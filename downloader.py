@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
 
-APP_BUILD = "20260427-2271"
+APP_BUILD = "20260427-2280"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -636,6 +636,35 @@ def _dedupe_download_urls(candidates, primary_url=None):
     return deduped
 
 
+def _task_source_site_name(task, fallback_site=""):
+    task = task or {}
+    source_site = str(task.get("source_site", "") or "").strip().lower()
+    if source_site:
+        return source_site
+    return str(fallback_site or "").strip().lower()
+
+
+def _task_fallback_urls_list(task, primary_url=None):
+    task = task or {}
+    return _dedupe_download_urls(task.get("fallback_urls", []), primary_url=primary_url)
+
+
+def _task_source_page_url(task, fallback_url=""):
+    task = task or {}
+    source_page = _normalize_download_url(task.get("source_page", ""))
+    if source_page:
+        return source_page
+    return _normalize_download_url(fallback_url)
+
+
+def _task_url_value(task, fallback_url=""):
+    task = task or {}
+    url = _normalize_download_url(task.get("url", ""))
+    if url:
+        return url
+    return _normalize_download_url(fallback_url)
+
+
 def _detect_browser_cookie_source():
     sources = _detect_browser_cookie_sources()
     return sources[0] if sources else None
@@ -1039,10 +1068,10 @@ def _match_forced_m3u8_site(url, task=None):
     normalized_url = _normalize_download_url(url)
     if not normalized_url.lower().endswith(".m3u8"):
         return None
-    source_site = str(task.get("source_site", "") or "").strip().lower()
+    source_site = _task_source_site_name(task)
     if source_site in FORCED_M3U8_SITE_RULES:
         return source_site
-    if task.get("fallback_urls"):
+    if _task_fallback_urls_list(task, primary_url=normalized_url):
         return "movieffm"
     hostname = urllib.parse.urlparse(normalized_url).netloc.lower().split(":", 1)[0]
     for site_name, config in FORCED_M3U8_SITE_RULES.items():
@@ -1809,8 +1838,11 @@ class DownloadManagerApp:
     def resume_unfinished_tasks(self):
         saved_tasks = load_state()
         for task in saved_tasks:
-            url = task.get("url")
-            name = task.get("name", t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目")
+            url = self._get_task_url(task)
+            name = self._get_task_name_text(
+                task,
+                t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目",
+            )
             is_mp3 = self._get_task_is_mp3(task)
             source_site = self._get_task_source_site(task)
             extra_task_data = {
@@ -2178,10 +2210,10 @@ class DownloadManagerApp:
         if not normalized_url:
             return None
         for item_id, task in self.tasks.items():
-            task_url = _normalize_download_url(task.get("url", ""))
+            task_url = self._get_task_url(task)
             if task_url != normalized_url:
                 continue
-            if bool(task.get("is_mp3", False)) != bool(is_mp3):
+            if self._get_task_is_mp3(task) != bool(is_mp3):
                 continue
             if task.get("state") == "DELETED":
                 continue
@@ -2844,31 +2876,19 @@ class DownloadManagerApp:
         return bool(task.get("is_mp3", default))
 
     def _get_task_url(self, task, fallback_url=""):
-        task = task or {}
-        url = _normalize_download_url(task.get("url", ""))
-        if url:
-            return url
-        return _normalize_download_url(fallback_url)
+        return _task_url_value(task, fallback_url=fallback_url)
 
     def _get_task_fallback_urls(self, task, primary_url=None):
         task = task or {}
         if primary_url is None:
             primary_url = self._get_task_url(task)
-        return self._normalize_fallback_urls(task.get("fallback_urls", []), primary_url=primary_url)
+        return _task_fallback_urls_list(task, primary_url=primary_url)
 
     def _get_task_source_page(self, task, fallback_url=""):
-        task = task or {}
-        source_page = _normalize_download_url(task.get("source_page", ""))
-        if source_page:
-            return source_page
-        return _normalize_download_url(fallback_url)
+        return _task_source_page_url(task, fallback_url=fallback_url)
 
     def _get_task_source_site(self, task, fallback_site=""):
-        task = task or {}
-        source_site = str(task.get("source_site", "") or "").strip()
-        if source_site:
-            return source_site
-        return str(fallback_site or "").strip()
+        return _task_source_site_name(task, fallback_site=fallback_site)
 
     def _build_extra_task_data_from_task(self, task, primary_url=None, fallback_url=""):
         task = task or {}
@@ -2979,7 +2999,7 @@ class DownloadManagerApp:
         normalize_url = _normalize_download_url
         default_name = default_short_name_for_url
         for task in self._iter_live_tasks():
-            url = _normalize_download_url(task.get("url", ""))
+            url = self._get_task_url(task)
             if not url:
                 continue
             is_mp3 = self._get_task_is_mp3(task)
@@ -3016,7 +3036,7 @@ class DownloadManagerApp:
 
     def _complete_if_output_exists(self, item_id):
         task = self.tasks.get(item_id, {})
-        short_name = task.get("short_name", "")
+        short_name = self._get_task_name_text(task)
         if not short_name or short_name == "Queued":
             return False
         if task.get("resume_requested"):
@@ -3041,7 +3061,7 @@ class DownloadManagerApp:
 
     def _get_task_queue_keys(self, task):
         return (
-            self._extract_domain(task.get("url", "")),
+            self._extract_domain(self._get_task_url(task)),
             self._get_task_source_page(task),
         )
 
@@ -4125,6 +4145,11 @@ class DownloadManagerApp:
     def _set_task_speed_eta_unknown_ui(self, item_id):
         self._set_task_speed_eta_text(item_id, "-")
 
+    def _set_task_metrics_unknown_ui(self, item_id):
+        self._set_task_progress_unknown_ui(item_id)
+        self._set_task_size_unknown_ui(item_id)
+        self._set_task_speed_eta_unknown_ui(item_id)
+
     def _set_task_transfer_rate_ui(self, item_id, speed_bps=None, eta_seconds=None):
         speed_text = format_transfer_rate(speed_bps) if speed_bps else "-"
         if eta_seconds not in (None, ""):
@@ -4136,9 +4161,7 @@ class DownloadManagerApp:
 
     def _set_task_queued_ui(self, item_id):
         self._set_task_status_text(item_id, t("status_queued"))
-        self._set_task_progress_unknown_ui(item_id)
-        self._set_task_size_unknown_ui(item_id)
-        self._set_task_speed_eta_unknown_ui(item_id)
+        self._set_task_metrics_unknown_ui(item_id)
 
     def _download_http_media(self, item_id, url, out_path, headers=None, session=None):
         headers = dict(headers or {})
@@ -4364,7 +4387,7 @@ class DownloadManagerApp:
             self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
             return
 
-        resume_key = self._get_task_source_page(task, fallback_url=task.get("url") or url) or url
+        resume_key = self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url)) or url
         temp_out_path = self._get_stable_resume_base(url, ext=ext, resume_key=resume_key)
         temp_root, temp_ext = os.path.splitext(temp_out_path)
         resume_out_path = f"{temp_root}.resume{temp_ext}"
@@ -4829,7 +4852,7 @@ class DownloadManagerApp:
             source_site = self._get_task_source_site(task)
             self._start_download_thread(
                 self._get_task_url(task),
-                task["short_name"],
+                self._get_task_name_text(task),
                 existing_item_id=item_id,
                 is_mp3=is_mp3,
                 source_site=source_site,
@@ -5123,9 +5146,8 @@ class DownloadManagerApp:
         is_youtube = any(host in parsed_url.netloc for host in ("youtube.com", "youtu.be"))
         if is_youtube:
             use_impersonate = False
-            task["source_site"] = "youtube"
             ydl_opts["noplaylist"] = True
-            self._update_task_state_entry(task, source_site="youtube")
+            _set_task_identity(source_site="youtube")
 
         forced_m3u8_site = _match_forced_m3u8_site(url, task)
         if forced_m3u8_site:
@@ -5170,10 +5192,7 @@ class DownloadManagerApp:
             if title_m:
                 raw_title = html.unescape(title_m.group(1)).strip()
                 clean_title = raw_title.split(" - ")[0].strip() or short_name
-            task["short_name"] = clean_title
-            task["source_site"] = "jable"
-            self._update_task_state_entry(task, name=clean_title, source_site="jable")
-            self._set_task_name_text(item_id, clean_title)
+            _set_task_identity(name=clean_title, source_site="jable")
             self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, url, source_site="jable", fallback_urls=[])
             self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer="https://jable.tv/", origin="https://jable.tv")
@@ -5198,10 +5217,7 @@ class DownloadManagerApp:
             code_m = re.search(r"([A-Za-z]+)-(\d+)", slug, re.IGNORECASE)
             if code_m:
                 title = f"{code_m.group(1).upper()}-{code_m.group(2)}"
-            task["short_name"] = title
-            task["source_site"] = "njavtv"
-            self._update_task_state_entry(task, name=title, source_site="njavtv")
-            self._set_task_name_text(item_id, title)
+            _set_task_identity(name=title, source_site="njavtv")
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer="https://njavtv.com/", origin="https://njavtv.com")
             return
 
@@ -5249,12 +5265,10 @@ class DownloadManagerApp:
                 fallback_urls = chosen_urls[1:] if len(chosen_urls) > 1 else []
                 if not m3u8_url:
                     raise Exception("Failed to extract xiaoyakankan m3u8")
-                task["source_site"] = "xiaoyakankan"
-                task["fallback_urls"] = [u for u in fallback_urls if u]
-                task["source_page"] = url
-                self._update_task_state_entry(task, source_site="xiaoyakankan", fallback_urls=task["fallback_urls"], source_page=url)
-                write_error_log("xiaoyakankan parse success", Exception("xiaoyakankan parse success"), url=url, item_id=item_id, stream_url=m3u8_url, fallback_count=len(task["fallback_urls"]))
-                self._log_m3u8_route_selected(task, item_id, m3u8_url, source_site="xiaoyakankan", fallback_urls=task["fallback_urls"])
+                _set_task_identity(source_site="xiaoyakankan", fallback_urls=[u for u in fallback_urls if u], source_page=url)
+                task_fallback_urls = self._get_task_fallback_urls(task)
+                write_error_log("xiaoyakankan parse success", Exception("xiaoyakankan parse success"), url=url, item_id=item_id, stream_url=m3u8_url, fallback_count=len(task_fallback_urls))
+                self._log_m3u8_route_selected(task, item_id, m3u8_url, source_site="xiaoyakankan", fallback_urls=task_fallback_urls)
                 self._download_m3u8_with_ffmpeg(item_id, m3u8_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
                 return
             except Exception as e:
@@ -5777,8 +5791,7 @@ class DownloadManagerApp:
                 direct_m3u8 = re.search(r'(https?://[^\s"\'\\]+(?:surrit\.com|[^"\']+)\.m3u8[^\s"\']*)', resp.text)
                 if direct_m3u8:
                     url = html.unescape(direct_m3u8.group(1))
-                    task["short_name"] = clean_title
-                    self._set_task_name_text(item_id, clean_title)
+                    _set_task_identity(name=clean_title)
                     self._set_task_found_stream_ui(item_id)
                     self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
                     return
@@ -5797,8 +5810,7 @@ class DownloadManagerApp:
                 if not m3u8_m:
                     raise Exception("Anime1 iframe did not contain an m3u8 URL")
                 url = m3u8_m.group(1)
-                task["short_name"] = clean_title
-                self._set_task_name_text(item_id, clean_title)
+                _set_task_identity(name=clean_title)
                 self._set_task_found_stream_ui(item_id)
                 self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
                 return
