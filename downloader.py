@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
 
-APP_BUILD = "20260427-2260"
+APP_BUILD = "20260427-2270"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1811,7 +1811,7 @@ class DownloadManagerApp:
         for task in saved_tasks:
             url = task.get("url")
             name = task.get("name", t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目")
-            is_mp3 = task.get("is_mp3", False)
+            is_mp3 = self._get_task_is_mp3(task)
             source_site = self._get_task_source_site(task)
             extra_task_data = {
                 "fallback_urls": self._get_task_fallback_urls(task),
@@ -2558,7 +2558,7 @@ class DownloadManagerApp:
         else:
             self._set_task_queued_ui(item_id)
             if source_site is None:
-                source_site = self.tasks.get(item_id, {}).get("source_site")
+                source_site = self._get_task_source_site(self.tasks.get(item_id, {}))
         task_data = {
             "url": url,
             "state": "QUEUED",
@@ -2570,8 +2570,11 @@ class DownloadManagerApp:
         }
         if extra_task_data:
             task_data.update(extra_task_data)
-        task_data["fallback_urls"] = list(task_data.get("fallback_urls", []))
-        task_data["source_page"] = _normalize_download_url(task_data.get("source_page", ""))
+        task_data["is_mp3"] = self._get_task_is_mp3(task_data)
+        task_data["source_site"] = self._get_task_source_site(task_data)
+        normalized_extra = self._build_extra_task_data_from_task(task_data, primary_url=url)
+        task_data["fallback_urls"] = normalized_extra.get("fallback_urls", [])
+        task_data["source_page"] = normalized_extra.get("source_page", "")
         task_data["resume_requested"] = bool(existing_item_id is not None or resume_requested)
         task_data["_stop_reason"] = None
         self.tasks[item_id] = task_data
@@ -2836,10 +2839,21 @@ class DownloadManagerApp:
     def _normalize_fallback_urls(self, fallback_urls, primary_url=None):
         return _dedupe_download_urls(fallback_urls, primary_url=primary_url)
 
+    def _get_task_is_mp3(self, task, default=False):
+        task = task or {}
+        return bool(task.get("is_mp3", default))
+
+    def _get_task_url(self, task, fallback_url=""):
+        task = task or {}
+        url = normalize_url(task.get("url", ""))
+        if url:
+            return url
+        return normalize_url(fallback_url)
+
     def _get_task_fallback_urls(self, task, primary_url=None):
         task = task or {}
         if primary_url is None:
-            primary_url = task.get("url")
+            primary_url = self._get_task_url(task)
         return self._normalize_fallback_urls(task.get("fallback_urls", []), primary_url=primary_url)
 
     def _get_task_source_page(self, task, fallback_url=""):
@@ -2855,6 +2869,88 @@ class DownloadManagerApp:
         if source_site:
             return source_site
         return str(fallback_site or "").strip()
+
+    def _build_extra_task_data_from_task(self, task, primary_url=None, fallback_url=""):
+        task = task or {}
+        return self._build_extra_task_data(
+            source_page=self._get_task_source_page(task, fallback_url=fallback_url),
+            fallback_urls=self._get_task_fallback_urls(task, primary_url=primary_url),
+        )
+
+    def _get_task_name_text(self, task, fallback_name=""):
+        task = task or {}
+        return str(task.get("short_name") or task.get("name") or fallback_name or "").strip()
+
+    def _get_task_output_basename(self, task, fallback_name):
+        name = self._get_task_name_text(task, fallback_name)
+        safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip()
+        return safe_name or fallback_name
+
+    def _set_task_output_path(self, task, item_id, path, temp=False):
+        task = task or {}
+        if temp:
+            task["temp_filename"] = path
+            return path
+        task["filename"] = path
+        self._set_task_output_name(item_id, path)
+        return path
+
+    def _get_existing_file_size(self, path):
+        try:
+            if path and os.path.exists(path):
+                return os.path.getsize(path)
+        except OSError:
+            return 0
+        return 0
+
+    def _has_nonempty_file(self, path, min_bytes=1):
+        return self._get_existing_file_size(path) >= max(int(min_bytes or 0), 1)
+
+    def _update_task_state_entry(self, task, **fields):
+        task = task or {}
+        url = self._get_task_url(task)
+        if not url:
+            return
+        updates = {}
+        if "name" in fields and fields["name"]:
+            updates["name"] = str(fields["name"]).strip()
+        if "source_site" in fields and fields["source_site"]:
+            updates["source_site"] = self._get_task_source_site({"source_site": fields["source_site"]})
+        if "source_page" in fields and fields["source_page"] is not None:
+            updates["source_page"] = _normalize_download_url(fields["source_page"])
+        if "fallback_urls" in fields and fields["fallback_urls"] is not None:
+            updates["fallback_urls"] = self._normalize_fallback_urls(fields["fallback_urls"], primary_url=url)
+        if updates:
+            update_state_entry(url, **updates)
+
+    def _log_m3u8_route_selected(self, task, item_id, media_url, source_site=None, fallback_urls=None):
+        task = task or {}
+        site = self._get_task_source_site(task, fallback_site=source_site or "")
+        fallback_count = len(
+            self._normalize_fallback_urls(
+                fallback_urls if fallback_urls is not None else self._get_task_fallback_urls(task),
+                primary_url=media_url,
+            )
+        )
+        write_error_log(
+            "m3u8 route selected",
+            Exception(f"route=ffmpeg site={site or 'unknown'}"),
+            url=media_url,
+            item_id=item_id,
+            source_site=site or None,
+            fallback_count=fallback_count,
+        )
+
+    def _build_ffmpeg_log_fields(self, task, item_id, media_url, **extra):
+        task = task or {}
+        fields = {
+            "url": media_url,
+            "item_id": item_id,
+            "source_site": self._get_task_source_site(task) or None,
+            "fallback_count": len(self._get_task_fallback_urls(task)),
+        }
+        fields.update(extra)
+        return fields
 
     def _is_stop_requested_state(self, state):
         return state in STOP_REQUEST_TASK_STATES
@@ -2886,8 +2982,8 @@ class DownloadManagerApp:
             url = normalize_url(task.get("url", ""))
             if not url:
                 continue
-            is_mp3 = bool(task.get("is_mp3", False))
-            name = task.get("short_name") or task.get("name") or default_name(url, is_mp3=is_mp3)
+            is_mp3 = self._get_task_is_mp3(task)
+            name = self._get_task_name_text(task, default_name(url, is_mp3=is_mp3))
             source_site = self._get_task_source_site(task)
             fallback_urls = tuple(self._get_task_fallback_urls(task, primary_url=url))
             source_page = self._get_task_source_page(task)
@@ -2927,7 +3023,7 @@ class DownloadManagerApp:
             return False
         save_dir = self.save_dir_var.get()
         possible_exts = [".mp4", ".mkv", ".webm", ".mp3", ".m4a"]
-        message = t("msg_file_exists") if "msg_file_exists" in I18N_DICT.get(CURRENT_LANG, {}) else "檔案已存在"
+        message = self._message_file_exists_text()
         safe_name = re.sub(r'[\\\\/:*?"<>|]+', "_", short_name).strip()
         for ext in possible_exts:
             if os.path.exists(os.path.join(save_dir, f"{safe_name}{ext}")):
@@ -3437,8 +3533,8 @@ class DownloadManagerApp:
                 pass
 
     def _promote_resume_artifact(self, src_path, dst_path):
-        temp_exists = bool(src_path and os.path.exists(src_path) and os.path.getsize(src_path) > 0)
-        resume_exists = bool(dst_path and os.path.exists(dst_path) and os.path.getsize(dst_path) > 0)
+        temp_exists = self._has_nonempty_file(src_path)
+        resume_exists = self._has_nonempty_file(dst_path)
         if not resume_exists:
             return False
         merged_path = dst_path + ".merged.mp4"
@@ -3468,7 +3564,7 @@ class DownloadManagerApp:
                         os.remove(dst_path)
                     except OSError:
                         pass
-                    return bool(src_path and os.path.exists(src_path) and os.path.getsize(src_path) > 0)
+                    return self._has_nonempty_file(src_path)
                 try:
                     os.remove(src_path)
                 except OSError:
@@ -3520,7 +3616,7 @@ class DownloadManagerApp:
                         os.remove(leftover)
                     except OSError:
                         continue
-            return bool(src_path and os.path.exists(src_path) and os.path.getsize(src_path) > 0)
+            return self._has_nonempty_file(src_path)
 
     def _load_resume_progress_info(self, progress_path):
         if not progress_path or not os.path.exists(progress_path):
@@ -3723,13 +3819,11 @@ class DownloadManagerApp:
 
     def _download_direct_media_audio_with_ffmpeg(self, item_id, url, save_dir, referer=None, origin=None):
         task = self.tasks.get(item_id, {})
-        short_name = task.get("short_name") or "Audio"
-        safe_name = "".join(ch for ch in short_name if ch not in '\\/:*?"<>|').strip() or "Audio"
+        safe_name = self._get_task_output_basename(task, "Audio")
         out_path = os.path.join(save_dir, f"{safe_name}.mp3")
-        task["filename"] = out_path
-        self._set_task_output_name(item_id, out_path)
+        self._set_task_output_path(task, item_id, out_path)
         if os.path.exists(out_path):
-            self._mark_existing_file_complete(item_id, t("eta_file_exists") if "eta_file_exists" in I18N_DICT.get(CURRENT_LANG, {}) else "檔案已存在")
+            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
             return
 
         ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
@@ -3798,7 +3892,7 @@ class DownloadManagerApp:
                     self.tasks[item_id]["state"] = "DELETED"
                     self._discard_task(item_id)
                     return
-                current_size = os.path.getsize(temp_out_path) if os.path.exists(temp_out_path) else 0
+                current_size = self._get_existing_file_size(temp_out_path)
                 if self._maybe_auto_pause_for_disk_space(item_id, temp_out_path, note=self._disk_full_pause_text()):
                     try:
                         proc.terminate()
@@ -3822,7 +3916,7 @@ class DownloadManagerApp:
 
         if return_code != 0:
             raise Exception(f"FFmpeg direct audio exited with code {return_code}: {' | '.join(recent_lines)[:240]}")
-        if not os.path.exists(temp_out_path) or os.path.getsize(temp_out_path) < 64 * 1024:
+        if not self._has_nonempty_file(temp_out_path, min_bytes=64 * 1024):
             raise Exception("FFmpeg direct audio produced an invalid output artifact")
 
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -3834,7 +3928,7 @@ class DownloadManagerApp:
         shutil.move(temp_out_path, out_path)
         self._set_task_progress_complete_ui(item_id)
         self._mark_task_finished(item_id)
-        write_error_log("ffmpeg direct audio finished", Exception("ffmpeg direct audio finished"), url=url, item_id=item_id, output=out_path, bytes=os.path.getsize(out_path))
+        write_error_log("ffmpeg direct audio finished", Exception("ffmpeg direct audio finished"), url=url, item_id=item_id, output=out_path, bytes=self._get_existing_file_size(out_path))
 
     def _get_disk_free_bytes(self, target_path):
         try:
@@ -3939,7 +4033,7 @@ class DownloadManagerApp:
         task["state"] = "FINISHED"
         if clear_resume_requested:
             task["resume_requested"] = False
-        remove_from_state(task["url"])
+        remove_from_state(self._get_task_url(task))
 
     def _set_task_downloading_ui(self, item_id, message=None):
         status_text = self._downloading_status_text()
@@ -3970,6 +4064,12 @@ class DownloadManagerApp:
 
     def _eta_found_stream_text(self):
         return t("eta_found_stream") if "eta_found_stream" in I18N_DICT.get(CURRENT_LANG, {}) else "已取得串流網址"
+
+    def _eta_file_exists_text(self):
+        return t("eta_file_exists") if "eta_file_exists" in I18N_DICT.get(CURRENT_LANG, {}) else "檔案已存在"
+
+    def _message_file_exists_text(self):
+        return t("msg_file_exists") if "msg_file_exists" in I18N_DICT.get(CURRENT_LANG, {}) else "檔案已存在"
 
     def _eta_site_text(self, key, fallback):
         return t(key) if key in I18N_DICT.get(CURRENT_LANG, {}) else fallback
@@ -4053,7 +4153,7 @@ class DownloadManagerApp:
         total_info = self._probe_http_download_info(url, headers=headers, session=session)
         total_size = total_info.get("total_size", 0)
         range_supported = bool(total_info.get("range_supported"))
-        resume_bytes = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+        resume_bytes = self._get_existing_file_size(out_path)
         if prefer_curl_stream:
             if resume_bytes > 0:
                 try:
@@ -4063,7 +4163,7 @@ class DownloadManagerApp:
             resume_bytes = 0
             range_supported = False
         if total_size > 0 and resume_bytes >= total_size:
-            self._mark_existing_file_complete(item_id, t("eta_file_exists") if "eta_file_exists" in I18N_DICT.get(CURRENT_LANG, {}) else "檔案已存在")
+            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
             return
         dl_headers = dict(headers)
         mode = "ab" if resume_bytes > 0 else "wb"
@@ -4256,14 +4356,12 @@ class DownloadManagerApp:
 
     def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net"):
         task = self.tasks.get(item_id, {})
-        short_name = task.get("short_name") or "Video"
-        safe_name = "".join(ch for ch in short_name if ch not in '\\/:*?"<>|').strip() or "Video"
+        safe_name = self._get_task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
-        task["filename"] = out_path
-        self._set_task_output_name(item_id, out_path)
+        self._set_task_output_path(task, item_id, out_path)
         if os.path.exists(out_path):
-            self._mark_existing_file_complete(item_id, t("eta_file_exists") if "eta_file_exists" in I18N_DICT.get(CURRENT_LANG, {}) else "檔案已存在")
+            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
             return
 
         resume_key = self._get_task_source_page(task, fallback_url=task.get("url") or url) or url
@@ -4272,7 +4370,7 @@ class DownloadManagerApp:
         resume_out_path = f"{temp_root}.resume{temp_ext}"
         merged_out_path = f"{temp_root}.merged{temp_ext}"
         progress_path = temp_out_path + ".progress.json"
-        task["temp_filename"] = temp_out_path
+        self._set_task_output_path(task, item_id, temp_out_path, temp=True)
 
         ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
         if not os.path.exists(ffmpeg_path) and ffmpeg_path == os.path.join(_APP_DIR, "ffmpeg.exe"):
@@ -4399,17 +4497,18 @@ class DownloadManagerApp:
             write_error_log(
                 "ffmpeg download started",
                 Exception("ffmpeg started"),
-                url=candidate_url,
-                item_id=item_id,
-                source_site=self._get_task_source_site(task),
-                fallback_count=len(self._get_task_fallback_urls(task)),
-                resume_seconds=resume_seconds,
-                base_bytes=base_bytes,
-                stored_bytes=stored_info.get("bytes", 0),
-                stored_progress=stored_info.get("seconds", 0.0),
-                total_duration=total_duration,
-                total_bytes=total_bytes,
-                average_media_bps=average_media_bps,
+                **self._build_ffmpeg_log_fields(
+                    task,
+                    item_id,
+                    candidate_url,
+                    resume_seconds=resume_seconds,
+                    base_bytes=base_bytes,
+                    stored_bytes=stored_info.get("bytes", 0),
+                    stored_progress=stored_info.get("seconds", 0.0),
+                    total_duration=total_duration,
+                    total_bytes=total_bytes,
+                    average_media_bps=average_media_bps,
+                ),
             )
 
             cmd = [
@@ -4476,7 +4575,7 @@ class DownloadManagerApp:
                         self.tasks[item_id]["state"] = "DELETED"
                         self._discard_task(item_id)
                         return
-                    active_size = os.path.getsize(active_output_path) if os.path.exists(active_output_path) else 0
+                    active_size = self._get_existing_file_size(active_output_path)
                     required_bytes = None
                     if active_total_bytes:
                         required_bytes = max(int(active_total_bytes) - int(base_bytes + active_size), 0)
@@ -4502,7 +4601,7 @@ class DownloadManagerApp:
                         active_output_bytes = 0
                         try:
                             if os.path.exists(active_output_path):
-                                active_output_bytes = os.path.getsize(active_output_path)
+                                active_output_bytes = self._get_existing_file_size(active_output_path)
                         except OSError:
                             active_output_bytes = 0
                         current_bytes = base_bytes + active_output_bytes
@@ -4662,10 +4761,13 @@ class DownloadManagerApp:
                 write_error_log(
                     "ffmpeg download finished",
                     Exception("ffmpeg finished"),
-                    url=candidate_url,
-                    item_id=item_id,
-                    output=out_path,
-                    bytes=os.path.getsize(out_path) if os.path.exists(out_path) else 0,
+                    **self._build_ffmpeg_log_fields(
+                        task,
+                        item_id,
+                        candidate_url,
+                        output=out_path,
+                        bytes=self._get_existing_file_size(out_path),
+                    ),
                 )
                 return
 
@@ -4722,18 +4824,16 @@ class DownloadManagerApp:
             self.tasks[item_id]["_stop_reason"] = None
             if not self._check_resume_disk_space(item_id):
                 continue
-            is_mp3 = self.tasks[item_id].get("is_mp3", False)
-            source_site = self.tasks[item_id].get("source_site")
+            task = self.tasks[item_id]
+            is_mp3 = self._get_task_is_mp3(task)
+            source_site = self._get_task_source_site(task)
             self._start_download_thread(
-                self.tasks[item_id]["url"],
-                self.tasks[item_id]["short_name"],
+                self._get_task_url(task),
+                task["short_name"],
                 existing_item_id=item_id,
                 is_mp3=is_mp3,
                 source_site=source_site,
-                extra_task_data={
-                    "fallback_urls": list(self.tasks[item_id].get("fallback_urls", [])),
-                    "source_page": self.tasks[item_id].get("source_page"),
-                },
+                extra_task_data=self._build_extra_task_data_from_task(task),
             )
 
     def delete_selected(self):
@@ -4742,7 +4842,7 @@ class DownloadManagerApp:
             if item_id not in self.tasks:
                 continue
             state = self.tasks[item_id]["state"]
-            remove_from_state(self.tasks[item_id]["url"])
+            remove_from_state(self._get_task_url(self.tasks[item_id]))
             if state in DELETE_REQUEST_TASK_STATES:
                 self._request_task_deletion(item_id, state)
                 changed = True
@@ -4801,11 +4901,11 @@ class DownloadManagerApp:
             self._set_task_downloading_ui(item_id)
             self._start_daemon_thread(
                 self.download_task,
-                task["url"],
+                self._get_task_url(task),
                 item_id,
                 self.save_dir_var.get(),
-                self._should_use_impersonation(task["url"], self._get_task_source_site(task)),
-                task.get("is_mp3", False),
+                self._should_use_impersonation(self._get_task_url(task), self._get_task_source_site(task)),
+                self._get_task_is_mp3(task),
             )
 
     def _cleanup_temp_files(self, item_id):
@@ -4879,11 +4979,8 @@ class DownloadManagerApp:
 
     def _download_task_internal(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         task = self.tasks.get(item_id, {})
-        short_name = task.get("short_name", "")
-        if not short_name:
-            short_name = t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目"
-
-        safe_name = "".join(ch for ch in short_name if ch not in '\\/:*?"<>|').strip() or short_name
+        short_name = self._get_task_name_text(task, t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目")
+        safe_name = self._get_task_output_basename(task, short_name)
         possible_exts = (".mp4", ".mkv", ".webm", ".m4a")
         if is_mp3:
             possible_exts = (".mp3", ".m4a")
@@ -4989,11 +5086,11 @@ class DownloadManagerApp:
                 task["source_page"] = source_page
                 updates["source_page"] = source_page
             if fallback_urls is not None:
-                normalized_urls = self._normalize_fallback_urls(fallback_urls, primary_url=task.get("url"))
+                normalized_urls = self._normalize_fallback_urls(fallback_urls, primary_url=self._get_task_url(task))
                 task["fallback_urls"] = normalized_urls
                 updates["fallback_urls"] = normalized_urls
             if updates:
-                update_state_entry(task["url"], **updates)
+                self._update_task_state_entry(task, **updates)
 
         def _extract_html_title(page_text, fallback_name):
             title_m = re.search(r"<title>(.*?)</title>", page_text, re.IGNORECASE | re.DOTALL)
@@ -5028,7 +5125,7 @@ class DownloadManagerApp:
             use_impersonate = False
             task["source_site"] = "youtube"
             ydl_opts["noplaylist"] = True
-            update_state_entry(task["url"], source_site="youtube")
+            self._update_task_state_entry(task, source_site="youtube")
 
         forced_m3u8_site = _match_forced_m3u8_site(url, task)
         if forced_m3u8_site:
@@ -5042,14 +5139,7 @@ class DownloadManagerApp:
                     origin = f"{parsed_ref.scheme}://{parsed_ref.netloc}"
             ydl_opts["http_headers"]["Referer"] = referer
             ydl_opts["http_headers"]["Origin"] = origin
-            write_error_log(
-                "m3u8 route selected",
-                Exception(f"route=ffmpeg site={forced_m3u8_site}"),
-                url=url,
-                item_id=item_id,
-                source_site=self._get_task_source_site(task),
-                fallback_count=len(self._get_task_fallback_urls(task)),
-            )
+            self._log_m3u8_route_selected(task, item_id, url, source_site=forced_m3u8_site)
             self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=referer, origin=origin)
             return
 
@@ -5057,7 +5147,7 @@ class DownloadManagerApp:
         if is_direct_media:
             self._set_task_direct_media_ui(item_id)
             filename = os.path.basename(parsed_url.path) or "downloaded_file"
-            task["filename"] = os.path.join(save_dir, filename)
+            self._set_task_output_path(task, item_id, os.path.join(save_dir, filename))
             self._set_task_name_text(item_id, filename)
             try:
                 self._download_http_media(item_id, url, task["filename"], headers={"User-Agent": DEFAULT_USER_AGENT})
@@ -5082,10 +5172,10 @@ class DownloadManagerApp:
                 clean_title = raw_title.split(" - ")[0].strip() or short_name
             task["short_name"] = clean_title
             task["source_site"] = "jable"
-            update_state_entry(task["url"], name=clean_title, source_site="jable")
+            self._update_task_state_entry(task, name=clean_title, source_site="jable")
             self._set_task_name_text(item_id, clean_title)
             self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
-            write_error_log("m3u8 route selected", Exception("route=ffmpeg site=jable"), url=url, item_id=item_id, source_site="jable", fallback_count=0)
+            self._log_m3u8_route_selected(task, item_id, url, source_site="jable", fallback_urls=[])
             self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer="https://jable.tv/", origin="https://jable.tv")
             return
 
@@ -5110,7 +5200,7 @@ class DownloadManagerApp:
                 title = f"{code_m.group(1).upper()}-{code_m.group(2)}"
             task["short_name"] = title
             task["source_site"] = "njavtv"
-            update_state_entry(task["url"], name=title, source_site="njavtv")
+            self._update_task_state_entry(task, name=title, source_site="njavtv")
             self._set_task_name_text(item_id, title)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer="https://njavtv.com/", origin="https://njavtv.com")
             return
@@ -5162,9 +5252,9 @@ class DownloadManagerApp:
                 task["source_site"] = "xiaoyakankan"
                 task["fallback_urls"] = [u for u in fallback_urls if u]
                 task["source_page"] = url
-                update_state_entry(task["url"], source_site="xiaoyakankan", fallback_urls=task["fallback_urls"], source_page=url)
+                self._update_task_state_entry(task, source_site="xiaoyakankan", fallback_urls=task["fallback_urls"], source_page=url)
                 write_error_log("xiaoyakankan parse success", Exception("xiaoyakankan parse success"), url=url, item_id=item_id, stream_url=m3u8_url, fallback_count=len(task["fallback_urls"]))
-                write_error_log("m3u8 route selected", Exception("route=ffmpeg site=xiaoyakankan"), url=m3u8_url, item_id=item_id, source_site="xiaoyakankan", fallback_count=len(task["fallback_urls"]))
+                self._log_m3u8_route_selected(task, item_id, m3u8_url, source_site="xiaoyakankan", fallback_urls=task["fallback_urls"])
                 self._download_m3u8_with_ffmpeg(item_id, m3u8_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
                 return
             except Exception as e:
@@ -5192,7 +5282,7 @@ class DownloadManagerApp:
                 raise Exception("MovieFFM stream URL missing")
             page_title = _extract_html_title(resp.text, short_name)
             _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=candidates[1:])
-            write_error_log("m3u8 route selected", Exception("route=ffmpeg site=movieffm"), url=candidates[0], item_id=item_id, source_site="movieffm", fallback_count=len(self._get_task_fallback_urls(task)))
+            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="movieffm")
             self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer="https://www.movieffm.net/", origin="https://www.movieffm.net")
             return
 
@@ -5350,7 +5440,7 @@ class DownloadManagerApp:
             page_title = _extract_html_title(resp_text, short_name)
             fallback_urls = ordered_candidates[1:] if len(ordered_candidates) > 1 else []
             _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
-            write_error_log("m3u8 route selected", Exception("route=ffmpeg site=gimy"), url=stream_url, item_id=item_id, source_site="gimy", fallback_count=len(fallback_urls))
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
 
@@ -5369,7 +5459,7 @@ class DownloadManagerApp:
                 raise Exception("Gimy stream URL missing")
             page_title = _extract_html_title(resp.text, short_name)
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=[])
-            write_error_log("m3u8 route selected", Exception("route=ffmpeg site=gimy"), url=stream_url, item_id=item_id, source_site="gimy", fallback_count=0)
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=[])
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
 
@@ -5385,7 +5475,7 @@ class DownloadManagerApp:
                 raise Exception("Hanime1 source URL missing")
             page_title = _extract_html_title(resp.text, short_name)
             _set_task_identity(name=page_title, source_site="hanime1", source_page=url, fallback_urls=[])
-            write_error_log("m3u8 route selected", Exception("route=ffmpeg site=hanime1"), url=stream_url, item_id=item_id, source_site="hanime1", fallback_count=0)
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="hanime1", fallback_urls=[])
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer="https://hanime1.me/", origin="https://hanime1.me")
             return
 
@@ -5398,7 +5488,7 @@ class DownloadManagerApp:
                 raise Exception("Failed to extract MissAV stream URL")
             page_title = _extract_html_title(resp.text, short_name)
             _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=candidates[1:])
-            write_error_log("m3u8 route selected", Exception("route=ffmpeg site=missav"), url=candidates[0], item_id=item_id, source_site="missav", fallback_count=len(self._get_task_fallback_urls(task)))
+            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="missav")
             self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
 
@@ -5418,7 +5508,7 @@ class DownloadManagerApp:
             _set_task_identity(name=page_title, source_site="avjoy", source_page=url, fallback_urls=fallback_urls)
             out_path = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() + ".mp4")
             if any(ext in media_url.lower() for ext in (".m3u8", ".mpd")):
-                write_error_log("m3u8 route selected", Exception("route=ffmpeg site=avjoy"), url=media_url, item_id=item_id, source_site="avjoy", fallback_count=len(fallback_urls))
+                self._log_m3u8_route_selected(task, item_id, media_url, source_site="avjoy", fallback_urls=fallback_urls)
                 self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             elif is_mp3:
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
@@ -5508,7 +5598,7 @@ class DownloadManagerApp:
                 _set_task_identity(name=page_title, source_site="instagram", source_page=url, fallback_urls=[])
                 out_path = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() + ".mp4")
                 if any(ext in media_url.lower() for ext in (".m3u8", ".mpd")):
-                    write_error_log("m3u8 route selected", Exception("route=ffmpeg site=instagram"), url=media_url, item_id=item_id, source_site="instagram", fallback_count=0)
+                    self._log_m3u8_route_selected(task, item_id, media_url, source_site="instagram", fallback_urls=[])
                     self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer="https://www.instagram.com/", origin="https://www.instagram.com")
                 elif is_mp3:
                     self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer="https://www.instagram.com/", origin="https://www.instagram.com")
@@ -5528,7 +5618,7 @@ class DownloadManagerApp:
                     out_path = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() + ".mp4")
                     write_error_log("instagram savereels fallback", Exception("Instagram SaveReels fallback succeeded"), url=url, item_id=item_id)
                     if any(ext in media_url.lower() for ext in (".m3u8", ".mpd")):
-                        write_error_log("m3u8 route selected", Exception("route=ffmpeg site=instagram"), url=media_url, item_id=item_id, source_site="instagram", fallback_count=len(fallback_urls))
+                        self._log_m3u8_route_selected(task, item_id, media_url, source_site="instagram", fallback_urls=fallback_urls)
                         self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer="https://savereels.app/", origin="https://savereels.app")
                     elif is_mp3:
                         self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer="https://savereels.app/", origin="https://savereels.app")
@@ -5585,7 +5675,7 @@ class DownloadManagerApp:
                 _set_task_identity(name=page_title, source_site="facebook", source_page=url, fallback_urls=[])
                 out_path = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() + ".mp4")
                 if any(ext in media_url.lower() for ext in (".m3u8", ".mpd")):
-                    write_error_log("m3u8 route selected", Exception("route=ffmpeg site=facebook"), url=media_url, item_id=item_id, source_site="facebook", fallback_count=0)
+                    self._log_m3u8_route_selected(task, item_id, media_url, source_site="facebook", fallback_urls=[])
                     self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=url, origin="https://www.facebook.com")
                 elif is_mp3:
                     self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin="https://www.facebook.com")
