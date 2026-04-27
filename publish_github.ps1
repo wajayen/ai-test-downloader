@@ -1,5 +1,5 @@
 param(
-    [string]$RepoName = "ai-tets-downloader",
+    [string]$RepoName = "ai-test-downloader",
     [string]$Visibility = "public"
 )
 
@@ -28,4 +28,3 @@ if (-not $originExists) {
 } else {
     git -c safe.directory=$repoRoot push -u origin HEAD
 }
-

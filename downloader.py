@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
 
-APP_BUILD = "20260427-2236"
+APP_BUILD = "20260427-2246"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1901,47 +1901,36 @@ class DownloadManagerApp:
                 parsed = urllib.parse.urlparse(new_url)
                 base = f"{parsed.scheme}://{parsed.netloc}"
 
-                matches = list(
-                    re.finditer(
-                        r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
-                        resp_text,
-                    )
-                )
-                if not matches:
+                if not re.search(
+                    r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
+                    resp_text,
+                ):
                     self._schedule_warning(t("err_site_parse"))
                     return
-                seen_title = set()
-                seen_urls = set()
                 drama_name = "Gimy"
                 m_title = re.search(r"<title>(.*?)</title>", resp_text)
                 if m_title:
                     drama_name = html.unescape(m_title.group(1)).split("-")[0].strip() or drama_name
                     drama_name = "".join(c for c in drama_name if c not in '\\/:*?"<>|')
-                episodes = []
-                for match in matches:
-                    link = match.group(1)
-                    title = re.sub(r"<[^>]+>", "", match.group(2)).strip()
-                    if not title:
-                        continue
-                    link_lower = link.lower()
-                    title_lower = title.lower()
-                    if "yu-gao" in link_lower or "預告" in title or "预告" in title or "trailer" in title_lower or "preview" in title_lower:
-                        continue
-                    normalized_title = re.sub(r"\s+", "", title)
-                    if normalized_title in seen_title:
-                        continue
-                    ep_url = urllib.parse.urljoin(base, link)
-                    if ep_url in seen_urls:
-                        continue
-                    seen_title.add(normalized_title)
-                    seen_urls.add(ep_url)
-                    full_name = " ".join(part for part in (drama_name, title) if part).strip()
-                    episodes.append((ep_url, full_name))
-                if not episodes:
+                entries = self._extract_gimy_detail_entries(resp_text, base, drama_name)
+                if not entries:
                     self._schedule_warning("Gimy 此頁所有劇集目前播放失效")
                     return
 
                 def enqueue():
+                    if self._is_gimy_movie_detail(entries):
+                        ordered_entries = sorted(entries, key=lambda entry: self._gimy_movie_source_priority(entry.get("title", "")))
+                        primary = ordered_entries[0]
+                        fallback_urls = [entry["url"] for entry in ordered_entries[1:] if entry["url"] != primary["url"]]
+                        self._final_add_download(
+                            primary["url"],
+                            is_mp3,
+                            drama_name,
+                            "gimy",
+                            self._build_extra_task_data(source_page=new_url, fallback_urls=fallback_urls),
+                        )
+                        return
+                    episodes = [(entry["url"], entry["full_name"]) for entry in entries]
                     targets = self._choose_playlist_targets(episodes, episodes[0])
                     for ep_url, full_name in targets:
                         self._final_add_download(
@@ -2195,6 +2184,102 @@ class DownloadManagerApp:
         if len(episodes) > 1 and self._ask_warning_yesno(self._playlist_add_all_text(len(episodes))):
             return episodes
         return [default_target]
+
+    def _extract_gimy_detail_entries(self, resp_text, base, drama_name):
+        def _title_kind(title):
+            normalized = re.sub(r"\s+", "", (title or "").strip())
+            if not normalized:
+                return "blank"
+            if re.search(r"(第\s*\d+\s*集|EP\s*\d+|E\d+)", normalized, re.IGNORECASE):
+                return "episode"
+            if normalized in {"正片", "TC", "HD", "HD中字", "HD國語", "HD国语", "HC中字", "搶先版", "抢先版"}:
+                return "source"
+            return "other"
+
+        def _title_score(title):
+            kind = _title_kind(title)
+            if kind == "episode":
+                return 30
+            if kind == "source":
+                return 20
+            if kind == "other":
+                return 10
+            return 0
+
+        def _is_promo_title(title):
+            normalized = re.sub(r"\s+", "", (title or "").strip())
+            if not normalized:
+                return False
+            kind = _title_kind(normalized)
+            if kind in {"episode", "source"}:
+                return False
+            return len(normalized) >= 12
+
+        matches = list(
+            re.finditer(
+                r'href=["\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))["\'][^>]*>(.*?)</a>',
+                resp_text,
+            )
+        )
+        entry_map = {}
+        for match in matches:
+            link = match.group(1)
+            title = re.sub(r"<[^>]+>", "", match.group(2)).strip()
+            link_lower = link.lower()
+            title_lower = title.lower()
+            if "yu-gao" in link_lower or "預告" in title or "预告" in title or "trailer" in title_lower or "preview" in title_lower:
+                continue
+            if _is_promo_title(title):
+                continue
+            ep_url = urllib.parse.urljoin(base, link)
+            triple_match = re.search(r"/eps/\d+-(\d+)-(\d+)\.html", link)
+            line_no = int(triple_match.group(1)) if triple_match else 0
+            episode_no = int(triple_match.group(2)) if triple_match else 0
+            full_name = " ".join(part for part in (drama_name, title) if part).strip() or drama_name
+            candidate = {
+                "url": ep_url,
+                "title": title,
+                "full_name": full_name,
+                "line_no": line_no,
+                "episode_no": episode_no,
+            }
+            existing = entry_map.get(ep_url)
+            if existing is None or _title_score(title) > _title_score(existing.get("title", "")):
+                entry_map[ep_url] = candidate
+        return list(entry_map.values())
+
+    def _is_gimy_movie_detail(self, entries):
+        if not entries:
+            return False
+        unique_lines = {entry["line_no"] for entry in entries if entry.get("line_no")}
+        max_episode_no = max((entry.get("episode_no") or 0) for entry in entries)
+        episode_title_re = re.compile(r"(第\s*\d+\s*集|EP\s*\d+|E\d+)", re.IGNORECASE)
+        has_episode_titles = any(episode_title_re.search(entry.get("title", "")) for entry in entries if entry.get("title"))
+        return len(unique_lines) >= 2 and max_episode_no <= 2 and not has_episode_titles
+
+    def _gimy_movie_source_priority(self, title):
+        title = (title or "").strip()
+        if title == "正片":
+            return (0, title)
+        if "HD中字" in title:
+            return (1, title)
+        if "HD國語" in title or "HD国语" in title:
+            return (2, title)
+        if title == "HD" or title.startswith("HD"):
+            return (3, title)
+        if "中字" in title:
+            return (4, title)
+        if "國語" in title or "国语" in title:
+            return (5, title)
+        if "TC" in title:
+            return (6, title)
+        if "搶先" in title or "抢先" in title:
+            return (7, title)
+        if "HC" in title:
+            return (8, title)
+        if not title:
+            return (90, title)
+        return (50, title)
 
     def download_ffmpeg_interactive(self, on_complete_callback):
         dialog = tk.Toplevel(self.root)
@@ -3667,7 +3752,7 @@ class DownloadManagerApp:
             except OSError:
                 pass
         shutil.move(temp_out_path, out_path)
-        self.update_tree(item_id, "progress", "100%", force=True)
+        self._set_task_progress_complete_ui(item_id)
         self._mark_task_finished(item_id)
         write_error_log("ffmpeg direct audio finished", Exception("ffmpeg direct audio finished"), url=url, item_id=item_id, output=out_path, bytes=os.path.getsize(out_path))
 
@@ -3746,18 +3831,24 @@ class DownloadManagerApp:
         return False
 
     def _set_task_paused_ui(self, item_id, message="-"):
-        self.update_tree(item_id, "speed_eta", message, force=True)
-        self.update_tree(item_id, "status", t("status_paused"), force=True)
+        self._set_task_speed_eta_text(item_id, message)
+        self._set_task_status_text(item_id, t("status_paused"))
+
+    def _set_task_progress_complete_ui(self, item_id):
+        self.update_tree(item_id, "progress", "100%", force=True)
+
+    def _set_task_progress_percent_ui(self, item_id, percent):
+        self.update_tree(item_id, "progress", f"{percent:.1f}%", force=True)
 
     def _set_task_finished_ui(self, item_id, message="-"):
-        self.update_tree(item_id, "progress", "100%", force=True)
-        self.update_tree(item_id, "status", t("status_done"), force=True)
-        self.update_tree(item_id, "speed_eta", message, force=True)
+        self._set_task_progress_complete_ui(item_id)
+        self._set_task_status_text(item_id, t("status_done"))
+        self._set_task_speed_eta_text(item_id, message)
 
     def _update_task_size_from_file(self, item_id, filename):
         if filename and os.path.exists(filename):
             try:
-                self.update_tree(item_id, "size", f"{os.path.getsize(filename) / (1024 * 1024):.1f} MB", force=True)
+                self._set_task_size_text(item_id, f"{os.path.getsize(filename) / (1024 * 1024):.1f} MB")
             except OSError:
                 pass
 
@@ -3772,9 +3863,9 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         if task is not None:
             task["_last_status_text"] = status_text
-        self.update_tree(item_id, "status", status_text, force=True)
+        self._set_task_status_text(item_id, status_text)
         if message is not None:
-            self.update_tree(item_id, "speed_eta", message, force=True)
+            self._set_task_speed_eta_text(item_id, message)
 
     def _processing_status_text(self):
         return t("status_processing") if "status_processing" in I18N_DICT.get(CURRENT_LANG, {}) else "整理中"
@@ -3784,9 +3875,9 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         if task is not None:
             task["_last_status_text"] = status_text
-        self.update_tree(item_id, "status", status_text, force=True)
+        self._set_task_status_text(item_id, status_text)
         if message is not None:
-            self.update_tree(item_id, "speed_eta", message, force=True)
+            self._set_task_speed_eta_text(item_id, message)
 
     def _eta_direct_media_text(self):
         return t("eta_direct_media") if "eta_direct_media" in I18N_DICT.get(CURRENT_LANG, {}) else "直接媒體下載"
@@ -3800,6 +3891,9 @@ class DownloadManagerApp:
     def _eta_site_text(self, key, fallback):
         return t(key) if key in I18N_DICT.get(CURRENT_LANG, {}) else fallback
 
+    def _set_task_site_parsing_ui(self, item_id, key, fallback):
+        self._set_task_speed_eta_text(item_id, self._eta_site_text(key, fallback))
+
     def _site_parse_error_text(self, error):
         prefix = t("err_site_parse") if "err_site_parse" in I18N_DICT.get(CURRENT_LANG, {}) else "解析失敗"
         return f"{prefix}: {str(error)[:40]}"
@@ -3809,14 +3903,32 @@ class DownloadManagerApp:
         self._schedule_error(f"{prefix}: {str(error)[:limit]}")
 
     def _set_task_error_ui(self, item_id, message):
-        self.update_tree(item_id, "status", t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤", force=True)
-        self.update_tree(item_id, "speed_eta", message, force=True)
+        self._set_task_status_text(item_id, t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤")
+        self._set_task_speed_eta_text(item_id, message)
+
+    def _set_task_progress_unknown_ui(self, item_id):
+        self.update_tree(item_id, "progress", "--", force=True)
+
+    def _set_task_size_text(self, item_id, value):
+        self.update_tree(item_id, "size", value, force=True)
+
+    def _set_task_size_unknown_ui(self, item_id):
+        self._set_task_size_text(item_id, "-")
+
+    def _set_task_speed_eta_text(self, item_id, value):
+        self.update_tree(item_id, "speed_eta", value, force=True)
+
+    def _set_task_speed_eta_unknown_ui(self, item_id):
+        self._set_task_speed_eta_text(item_id, "-")
+
+    def _set_task_status_text(self, item_id, value):
+        self.update_tree(item_id, "status", value, force=True)
 
     def _set_task_queued_ui(self, item_id):
-        self.update_tree(item_id, "status", t("status_queued"), force=True)
-        self.update_tree(item_id, "progress", "--", force=True)
-        self.update_tree(item_id, "size", "-", force=True)
-        self.update_tree(item_id, "speed_eta", "-", force=True)
+        self._set_task_status_text(item_id, t("status_queued"))
+        self._set_task_progress_unknown_ui(item_id)
+        self._set_task_size_unknown_ui(item_id)
+        self._set_task_speed_eta_unknown_ui(item_id)
 
     def _download_http_media(self, item_id, url, out_path, headers=None, session=None):
         headers = dict(headers or {})
@@ -3946,13 +4058,13 @@ class DownloadManagerApp:
                         last_update_bytes = downloaded
                         percent = format_progress_percent(downloaded, total_size, cap_at_99=True)
                         if percent is not None:
-                            self.update_tree(item_id, "progress", f"{percent:.1f}%", force=True)
+                            self._set_task_progress_percent_ui(item_id, percent)
                         if total_size > 0:
-                            self.update_tree(item_id, "size", f"{total_size / 1024 / 1024:.1f} MB")
+                            self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
                             eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
                             self.update_tree(item_id, "speed_eta", f"{format_transfer_rate(speed_bps)} | {format_eta(eta)}")
                         else:
-                            self.update_tree(item_id, "size", f"{downloaded / 1024 / 1024:.1f} MB")
+                            self._set_task_size_text(item_id, f"{downloaded / 1024 / 1024:.1f} MB")
                             self.update_tree(item_id, "speed_eta", format_transfer_rate(speed_bps))
             if res is not None:
                 try:
@@ -3990,7 +4102,7 @@ class DownloadManagerApp:
                                 future.cancel()
                             if self.tasks[item_id]["state"] == "PAUSE_REQUESTED":
                                 self.tasks[item_id]["state"] = "PAUSED"
-                                self.update_tree(item_id, "status", t("status_paused"), force=True)
+                                self._set_task_status_text(item_id, t("status_paused"))
                             return
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         required_bytes = max(total_size - multi_downloaded, 0) if total_size > 0 else None
@@ -4006,8 +4118,8 @@ class DownloadManagerApp:
                         speed_bps = max((multi_downloaded - resume_bytes) / elapsed, 0.0)
                         percent = format_progress_percent(multi_downloaded, total_size, cap_at_99=True)
                         if percent is not None:
-                            self.update_tree(item_id, "progress", f"{percent:.1f}%")
-                            self.update_tree(item_id, "size", f"{total_size / 1024 / 1024:.1f} MB")
+                            self._set_task_progress_percent_ui(item_id, percent)
+                            self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
                             eta = max((total_size - multi_downloaded) / max(speed_bps, 1.0), 0.0)
                             self.update_tree(item_id, "speed_eta", f"{format_transfer_rate(speed_bps)} | {format_eta(eta)}")
                         time.sleep(0.5)
@@ -4328,17 +4440,17 @@ class DownloadManagerApp:
                                                 estimated_total_bytes=estimated_total_bytes,
                                                 current_bytes=current_bytes,
                                             )
-                                    else:
-                                        near_complete_since = None
+                                else:
+                                    near_complete_since = None
                                 if percent is not None:
-                                    self.update_tree(item_id, "progress", f"{percent:.1f}%")
+                                    self._set_task_progress_percent_ui(item_id, percent)
                             if active_total_bytes and active_total_bytes > 0:
-                                self.update_tree(item_id, "size", f"{current_bytes / (1024 * 1024):.1f} / {active_total_bytes / (1024 * 1024):.1f} MB")
+                                self._set_task_size_text(item_id, f"{current_bytes / (1024 * 1024):.1f} / {active_total_bytes / (1024 * 1024):.1f} MB")
                         else:
                             near_complete_since = None
-                            self.update_tree(item_id, "progress", "--")
+                            self._set_task_progress_unknown_ui(item_id)
                         if not (active_total_bytes and active_total_bytes > 0) and current_bytes > 0:
-                            self.update_tree(item_id, "size", f"{current_bytes / (1024 * 1024):.1f} MB")
+                            self._set_task_size_text(item_id, f"{current_bytes / (1024 * 1024):.1f} MB")
                         if now - last_ui_update >= 1.0:
                             instant_bps = 0.0
                             if active_output_bytes > 0 and out_ms > 0:
@@ -4441,7 +4553,7 @@ class DownloadManagerApp:
                         except OSError:
                             pass
 
-                self.update_tree(item_id, "progress", "100%", force=True)
+                self._set_task_progress_complete_ui(item_id)
                 self._mark_task_finished(item_id)
                 write_error_log(
                     "ffmpeg download finished",
@@ -4689,7 +4801,7 @@ class DownloadManagerApp:
                 if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
-                self.update_tree(item_id, "progress", "100%", force=True)
+                self._set_task_progress_complete_ui(item_id)
                 self._set_task_processing_ui(item_id)
                 return
             if status != "downloading":
@@ -4698,7 +4810,7 @@ class DownloadManagerApp:
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             percent = format_progress_percent(downloaded, total) if total else None
             if percent is not None:
-                self.update_tree(item_id, "progress", f"{percent:.1f}%")
+                self._set_task_progress_percent_ui(item_id, percent)
             speed = d.get("speed")
             eta = d.get("eta")
             speed_text = format_transfer_rate(speed) if speed else "-"
@@ -4854,7 +4966,7 @@ class DownloadManagerApp:
                 self.update_tree(item_id, "speed_eta", f"Direct media download failed: {str(e)[:30]}", force=True)
 
         if "jable.tv" in parsed_url.netloc:
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_jable", "正在解析 Jable..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_jable", "正在解析 Jable...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=15)
             m = re.search(r'(https://[^\s"\'\\]+\.m3u8[^\s"\'\\]*)', resp.text)
@@ -4878,7 +4990,7 @@ class DownloadManagerApp:
             return
 
         if "njavtv.com" in parsed_url.netloc:
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_njavtv", "正在解析 NJAVTV..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_njavtv", "正在解析 NJAVTV...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=15)
             m = re.search(r"(https://surrit\.com/[^\s\"']+/playlist\.m3u8)", resp.text)
@@ -4960,7 +5072,7 @@ class DownloadManagerApp:
                 self.update_tree(item_id, "speed_eta", self._site_parse_error_text(e), force=True)
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" not in parsed_url.path:
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_movieffm", "正在解析 MovieFFM 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析 MovieFFM 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://www.movieffm.net/"})
             player_match = re.search(r"player_aaaa\s*=\s*(\{.*?\})", resp.text, re.DOTALL)
@@ -4985,7 +5097,7 @@ class DownloadManagerApp:
             return
 
         if "gimy" in parsed_url.netloc and ("/detail/" in parsed_url.path or "/voddetail/" in parsed_url.path or "/voddetail2/" in parsed_url.path or "/vod/" in parsed_url.path):
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_gimy", "正在解析 Gimy 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": url}
             resp_text = None
@@ -5004,46 +5116,35 @@ class DownloadManagerApp:
                 except Exception as fallback_exc:
                     raise fallback_exc from last_detail_error
             base = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            matches = list(
-                re.finditer(
-                    r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
-                    resp_text,
-                )
-            )
-            if not matches:
+            if not re.search(
+                r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
+                resp_text,
+            ):
                 raise Exception("Gimy detail page did not expose episode links")
             drama_name = short_name or "Gimy"
             title_match = re.search(r"<title>(.*?)</title>", resp_text, re.IGNORECASE | re.DOTALL)
             if title_match:
                 drama_name = html.unescape(title_match.group(1)).split("-")[0].strip() or drama_name
                 drama_name = "".join(c for c in drama_name if c not in '\\/:*?"<>|')
-            seen_titles = set()
-            first_episode_url = None
-            first_episode_name = None
-            for match in matches:
-                link = match.group(1)
-                title = re.sub(r"<[^>]+>", "", match.group(2)).strip()
-                if not title:
-                    continue
-                link_lower = link.lower()
-                title_lower = title.lower()
-                if "yu-gao" in link_lower or "預告" in title or "预告" in title or "trailer" in title_lower or "preview" in title_lower:
-                    continue
-                normalized_title = re.sub(r"\s+", "", title)
-                if normalized_title in seen_titles:
-                    continue
-                seen_titles.add(normalized_title)
-                first_episode_url = urllib.parse.urljoin(base, link)
-                first_episode_name = " ".join(part for part in (drama_name, title) if part).strip()
-                break
-            if not first_episode_url:
+            entries = self._extract_gimy_detail_entries(resp_text, base, drama_name)
+            if not entries:
                 raise Exception("Gimy detail page did not expose a playable episode")
-            _set_task_identity(name=first_episode_name or drama_name, source_site="gimy", source_page=url, fallback_urls=[])
+            if self._is_gimy_movie_detail(entries):
+                ordered_entries = sorted(entries, key=lambda entry: self._gimy_movie_source_priority(entry.get("title", "")))
+                primary = ordered_entries[0]
+                first_episode_url = primary["url"]
+                first_episode_name = drama_name
+                fallback_urls = [entry["url"] for entry in ordered_entries[1:] if entry["url"] != primary["url"]]
+            else:
+                first_episode_url = entries[0]["url"]
+                first_episode_name = entries[0]["full_name"]
+                fallback_urls = []
+            _set_task_identity(name=first_episode_name or drama_name, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             self._download_task_internal(first_episode_url, item_id, save_dir, use_impersonate, is_mp3)
             return
 
         if "gimy" in parsed_url.netloc and "/eps/" in parsed_url.path:
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_gimy", "正在解析 Gimy 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             stream_candidates = []
             last_gimy_error = None
@@ -5152,7 +5253,7 @@ class DownloadManagerApp:
             return
 
         if "gimy" in parsed_url.netloc and ("/play/" in parsed_url.path or "/vodplay/" in parsed_url.path or "/video/" in parsed_url.path):
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_gimy", "正在解析 Gimy 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
             player_match = re.search(r"var\s+player_data\s*=\s*(\{.*?\})\s*(?:<|;)", resp.text, re.DOTALL)
@@ -5171,7 +5272,7 @@ class DownloadManagerApp:
             return
 
         if "hanime1.me" in parsed_url.netloc and "watch" in parsed_url.path:
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_hanime", "正在解析 Hanime1 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_hanime", "正在解析 Hanime1 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://hanime1.me/"})
             source_match = re.search(r'<source\s+[^>]*src=["\']([^"\']+)["\']', resp.text, re.IGNORECASE)
@@ -5187,7 +5288,7 @@ class DownloadManagerApp:
             return
 
         if "missav" in parsed_url.netloc:
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_missav", "正在解析 MissAV 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_missav", "正在解析 MissAV 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": url})
             candidates = _extract_missav_m3u8_candidates(resp.text)
@@ -5224,7 +5325,7 @@ class DownloadManagerApp:
             return
 
         if "threads.net" in parsed_url.netloc or parsed_url.netloc.startswith("www.threads."):
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_threads", "正在解析 Threads 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_threads", "正在解析 Threads 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
             versions_match = re.search(r'\\"video_versions\\"\\:\s*(\[.*?\])', resp.text)
@@ -5247,7 +5348,7 @@ class DownloadManagerApp:
             return
 
         if "instagram.com" in parsed_url.netloc and any(part in parsed_url.path for part in ("/reel/", "/p/")):
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_instagram", "正在解析 Instagram 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_instagram", "正在解析 Instagram 頁面...")
             shortcode_m = re.search(r"/(?:reel|p)/([^/?#]+)", url)
             if not shortcode_m:
                 raise Exception("Instagram shortcode missing")
@@ -5393,7 +5494,7 @@ class DownloadManagerApp:
             self.update_tree(item_id, "speed_eta", "Facebook 直連解析失敗，改用 yt-dlp...", force=True)
 
         if "/status/" in parsed_url.path and any(host in parsed_url.netloc for host in ("twitter.com", "x.com", "fxtwitter.com", "vxtwitter.com")):
-            self.update_tree(item_id, "speed_eta", self._eta_site_text("eta_site_twitter", "正在解析 Twitter/X 頁面..."), force=True)
+            self._set_task_site_parsing_ui(item_id, "eta_site_twitter", "正在解析 Twitter/X 頁面...")
             status_id_m = re.search(r"/status/(\d+)", url)
             if not status_id_m:
                 raise Exception("Twitter status id missing")
