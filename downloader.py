@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
 
-APP_BUILD = "20260427-2280"
+APP_BUILD = "20260427-2290"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -663,6 +663,100 @@ def _task_url_value(task, fallback_url=""):
     if url:
         return url
     return _normalize_download_url(fallback_url)
+
+
+def _task_is_mp3_enabled(task, default=False):
+    task = task or {}
+    return bool(task.get("is_mp3", default))
+
+
+def _task_name_text(task, fallback_name=""):
+    task = task or {}
+    return str(task.get("short_name") or task.get("name") or fallback_name or "").strip()
+
+
+def _set_task_name_fields(task, name):
+    task = task or {}
+    cleaned_name = str(name or "").strip()
+    if not cleaned_name:
+        return ""
+    task["short_name"] = cleaned_name
+    task["name"] = cleaned_name
+    return cleaned_name
+
+
+def _task_output_basename(task, fallback_name):
+    name = _task_name_text(task, fallback_name=fallback_name)
+    safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip()
+    return safe_name or fallback_name
+
+
+def _task_display_name(task, fallback_url="", fallback_name="", default_is_mp3=False):
+    task = task or {}
+    task_name = _task_name_text(task, fallback_name="")
+    if task_name:
+        return task_name
+    fallback_url = _task_url_value(task, fallback_url=fallback_url)
+    if fallback_url:
+        return default_short_name_for_url(
+            fallback_url,
+            is_mp3=_task_is_mp3_enabled(task, default=default_is_mp3),
+        )
+    return str(fallback_name or "").strip()
+
+
+def _set_task_source_fields(task, source_site=None, source_page=None, fallback_urls=None, primary_url=None):
+    task = task or {}
+    updates = {}
+    if source_site:
+        normalized_site = str(source_site).strip().lower()
+        task["source_site"] = normalized_site
+        updates["source_site"] = normalized_site
+    if source_page:
+        normalized_page = _normalize_download_url(source_page)
+        if normalized_page:
+            task["source_page"] = normalized_page
+            updates["source_page"] = normalized_page
+    if fallback_urls is not None:
+        normalized_urls = _dedupe_download_urls(fallback_urls, primary_url=primary_url)
+        task["fallback_urls"] = normalized_urls
+        updates["fallback_urls"] = normalized_urls
+    return updates
+
+
+def _set_task_state_fields(task, state=None, **fields):
+    task = task or {}
+    if state is not None:
+        task["state"] = state
+    for key, value in fields.items():
+        task[key] = value
+    return task
+
+
+def _set_task_aux_fields(task, **fields):
+    task = task or {}
+    for key, value in fields.items():
+        task[key] = value
+    return task
+
+
+def _set_task_stop_fields(task, state=None, stop_reason=Ellipsis, resume_requested=None, **fields):
+    extra_fields = dict(fields)
+    if stop_reason is not Ellipsis:
+        extra_fields["_stop_reason"] = stop_reason
+    if resume_requested is not None:
+        extra_fields["resume_requested"] = bool(resume_requested)
+    return _set_task_state_fields(task, state, **extra_fields)
+
+
+def _task_state_value(task, default=""):
+    task = task or {}
+    return str(task.get("state", default) or default)
+
+
+def _task_stop_reason_value(task, default=None):
+    task = task or {}
+    return task.get("_stop_reason", default)
 
 
 def _detect_browser_cookie_source():
@@ -1839,9 +1933,10 @@ class DownloadManagerApp:
         saved_tasks = load_state()
         for task in saved_tasks:
             url = self._get_task_url(task)
-            name = self._get_task_name_text(
+            name = self._get_task_display_name(
                 task,
-                t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目",
+                fallback_url=url,
+                fallback_name=t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目",
             )
             is_mp3 = self._get_task_is_mp3(task)
             source_site = self._get_task_source_site(task)
@@ -2215,7 +2310,7 @@ class DownloadManagerApp:
                 continue
             if self._get_task_is_mp3(task) != bool(is_mp3):
                 continue
-            if task.get("state") == "DELETED":
+            if _task_state_value(task) == "DELETED":
                 continue
             return item_id
         return None
@@ -2762,18 +2857,17 @@ class DownloadManagerApp:
 
     def _handle_stopped_download(self, item_id):
         task = self.tasks.get(item_id, {})
-        state = task.get("state")
+        state = _task_state_value(task)
         if state in ("DELETED", "DELETE_REQUESTED"):
             self._discard_task(item_id)
             return
         if state == "PAUSE_REQUESTED":
             self._set_task_paused_ui(item_id)
-            task["state"] = "PAUSED"
-            task["_stop_reason"] = None
+            _set_task_stop_fields(task, "PAUSED", stop_reason=None)
             return
 
     def _is_live_task(self, task):
-        return task.get("state") not in TERMINAL_TASK_STATES
+        return _task_state_value(task) not in TERMINAL_TASK_STATES
 
     def _iter_live_tasks(self):
         for task in self.tasks.values():
@@ -2783,7 +2877,7 @@ class DownloadManagerApp:
     def _collect_state_counts(self):
         counts = {"DOWNLOADING": 0, "QUEUED": 0, "PAUSED": 0, "ERROR": 0}
         for task in self.tasks.values():
-            state = task.get("state")
+            state = _task_state_value(task)
             if state == "DOWNLOADING":
                 counts["DOWNLOADING"] += 1
             elif state == "QUEUED":
@@ -2872,8 +2966,7 @@ class DownloadManagerApp:
         return _dedupe_download_urls(fallback_urls, primary_url=primary_url)
 
     def _get_task_is_mp3(self, task, default=False):
-        task = task or {}
-        return bool(task.get("is_mp3", default))
+        return _task_is_mp3_enabled(task, default=default)
 
     def _get_task_url(self, task, fallback_url=""):
         return _task_url_value(task, fallback_url=fallback_url)
@@ -2898,18 +2991,23 @@ class DownloadManagerApp:
         )
 
     def _get_task_name_text(self, task, fallback_name=""):
-        task = task or {}
-        return str(task.get("short_name") or task.get("name") or fallback_name or "").strip()
+        return _task_name_text(task, fallback_name=fallback_name)
+
+    def _get_task_display_name(self, task, fallback_url="", fallback_name="", default_is_mp3=False):
+        return _task_display_name(
+            task,
+            fallback_url=fallback_url,
+            fallback_name=fallback_name,
+            default_is_mp3=default_is_mp3,
+        )
 
     def _get_task_output_basename(self, task, fallback_name):
-        name = self._get_task_name_text(task, fallback_name)
-        safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip()
-        return safe_name or fallback_name
+        return _task_output_basename(task, fallback_name)
 
     def _set_task_output_path(self, task, item_id, path, temp=False):
         task = task or {}
         if temp:
-            task["temp_filename"] = path
+            _set_task_aux_fields(task, temp_filename=path)
             return path
         task["filename"] = path
         self._set_task_output_name(item_id, path)
@@ -2997,13 +3095,12 @@ class DownloadManagerApp:
         entries_append = entries.append
         signature_append = signature_parts.append
         normalize_url = _normalize_download_url
-        default_name = default_short_name_for_url
         for task in self._iter_live_tasks():
             url = self._get_task_url(task)
             if not url:
                 continue
             is_mp3 = self._get_task_is_mp3(task)
-            name = self._get_task_name_text(task, default_name(url, is_mp3=is_mp3))
+            name = self._get_task_display_name(task, fallback_url=url, default_is_mp3=is_mp3)
             source_site = self._get_task_source_site(task)
             fallback_urls = tuple(self._get_task_fallback_urls(task, primary_url=url))
             source_page = self._get_task_source_page(task)
@@ -3963,8 +4060,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         if not task:
             return True
-        task["state"] = "PAUSED"
-        task["disk_full_pause"] = True
+        _set_task_state_fields(task, "PAUSED", disk_full_pause=True)
         message = note or self._disk_full_pause_text()
         self._set_task_paused_ui(item_id, message)
         write_error_log(
@@ -4020,8 +4116,7 @@ class DownloadManagerApp:
         except Exception:
             pass
         self._set_task_paused_ui(item_id, self._disk_full_pause_text())
-        task["state"] = "PAUSED"
-        task["disk_full_pause"] = True
+        _set_task_state_fields(task, "PAUSED", disk_full_pause=True)
         return False
 
     def _set_task_paused_ui(self, item_id, message="-"):
@@ -4050,9 +4145,7 @@ class DownloadManagerApp:
                 pass
 
     def _finalize_completed_task(self, task, clear_resume_requested=False):
-        task["state"] = "FINISHED"
-        if clear_resume_requested:
-            task["resume_requested"] = False
+        _set_task_stop_fields(task, "FINISHED", resume_requested=(False if clear_resume_requested else None))
         remove_from_state(self._get_task_url(task))
 
     def _set_task_downloading_ui(self, item_id, message=None):
@@ -4795,8 +4888,8 @@ class DownloadManagerApp:
                 return
 
             current_task = self.tasks.get(item_id, {})
-            current_state = current_task.get("state")
-            stop_reason = current_task.get("_stop_reason")
+            current_state = _task_state_value(current_task)
+            stop_reason = _task_stop_reason_value(current_task)
             if return_code != 0 and (self._is_stop_requested_state(current_state) or stop_reason in STOP_REASONS):
                 if self._is_pause_requested_state(current_state) or stop_reason == STOP_REASON_PAUSE:
                     raise StopDownloadException("pause requested")
@@ -4852,7 +4945,7 @@ class DownloadManagerApp:
             source_site = self._get_task_source_site(task)
             self._start_download_thread(
                 self._get_task_url(task),
-                self._get_task_name_text(task),
+                self._get_task_display_name(task, fallback_url=self._get_task_url(task), default_is_mp3=is_mp3),
                 existing_item_id=item_id,
                 is_mp3=is_mp3,
                 source_site=source_site,
@@ -4903,12 +4996,12 @@ class DownloadManagerApp:
         source_page_counts = {}
         queued_items = []
         for item_id, task in self.tasks.items():
-            if task["state"] == "DOWNLOADING":
+            if _task_state_value(task) == "DOWNLOADING":
                 domain, source_page = self._get_task_queue_keys(task)
                 domain_counts[domain] = domain_counts.get(domain, 0) + 1
                 if source_page:
                     source_page_counts[source_page] = source_page_counts.get(source_page, 0) + 1
-            elif task["state"] == "QUEUED":
+            elif _task_state_value(task) == "QUEUED":
                 queued_items.append(item_id)
         for item_id in queued_items:
             task = self.tasks[item_id]
@@ -4917,7 +5010,7 @@ class DownloadManagerApp:
                 continue
             if source_page and source_page_counts.get(source_page, 0) >= MAX_DOWNLOADS_PER_SOURCE_PAGE:
                 continue
-            task["state"] = "DOWNLOADING"
+            _set_task_state_fields(task, "DOWNLOADING")
             domain_counts[domain] = domain_counts.get(domain, 0) + 1
             if source_page:
                 source_page_counts[source_page] = source_page_counts.get(source_page, 0) + 1
@@ -4992,7 +5085,7 @@ class DownloadManagerApp:
                 task = self.tasks.get(item_id)
                 if not task:
                     return
-                task["state"] = "ERROR"
+                _set_task_state_fields(task, "ERROR")
 
             self._schedule_ui_call(update_err_state)
         finally:
@@ -5099,19 +5192,18 @@ class DownloadManagerApp:
         def _set_task_identity(name=None, source_site=None, source_page=None, fallback_urls=None):
             updates = {}
             if name:
-                task["short_name"] = name
-                self._set_task_name_text(item_id, name)
-                updates["name"] = name
-            if source_site:
-                task["source_site"] = source_site
-                updates["source_site"] = source_site
-            if source_page:
-                task["source_page"] = source_page
-                updates["source_page"] = source_page
-            if fallback_urls is not None:
-                normalized_urls = self._normalize_fallback_urls(fallback_urls, primary_url=self._get_task_url(task))
-                task["fallback_urls"] = normalized_urls
-                updates["fallback_urls"] = normalized_urls
+                normalized_name = _set_task_name_fields(task, name)
+                self._set_task_name_text(item_id, normalized_name)
+                updates["name"] = normalized_name
+            updates.update(
+                _set_task_source_fields(
+                    task,
+                    source_site=source_site,
+                    source_page=source_page,
+                    fallback_urls=fallback_urls,
+                    primary_url=self._get_task_url(task),
+                )
+            )
             if updates:
                 self._update_task_state_entry(task, **updates)
 
@@ -5838,17 +5930,17 @@ class DownloadManagerApp:
                 e,
                 url=url,
                 item_id=item_id,
-                state=task.get("state"),
+                state=_task_state_value(task),
                 use_impersonate=use_impersonate,
                 is_mp3=is_mp3,
             )
-            if task.get("state") in ("DELETED", "DELETE_REQUESTED"):
+            if _task_state_value(task) in ("DELETED", "DELETE_REQUESTED"):
                 self._discard_task(item_id)
                 return
-            if task.get("state") in PAUSED_TASK_STATES:
+            if _task_state_value(task) in PAUSED_TASK_STATES:
                 return
             self._set_task_error_ui(item_id, summarize_error_message(e, "err_net", 120))
-            task["state"] = "ERROR"
+            _set_task_state_fields(task, "ERROR")
 
     def on_closing(self):
         def _kill_children():
