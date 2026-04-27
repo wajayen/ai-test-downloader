@@ -1,0 +1,4 @@
+yt-dlp
+curl_cffi
+Pillow
+https://github.com/smalltownjj/yt-dlp-plugin-missav/archive/refs/heads/main.zip

@@ -1,0 +1,87 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+.venv_broken_20260423/
+
+# Build artifacts
+build/
+build_pyinstaller/
+dist/
+*.exe
+*.pkg
+
+# Runtime / logs / state
+error.log
+log.log
+downloads.json
+downloads.json.bak
+downloads.json.tmp
+config.json.bak
+config.json.tmp
+*.progress.json
+*.progress.json.bak
+*.progress.json.tmp
+
+# Local tools / caches
+toolchain/
+tools/
+.tmp_py/
+tmp/
+tmp_*/
+test_dl/
+_hf_cache/
+_hf_cache2/
+_hf_cache3/
+_hf_home/
+_hf_home2/
+_pydumpck_out/
+_pylingual_*/
+_recovered_src/
+_src/
+
+# Local browser profiles / dumps
+.edge_fb/
+.edge_ig/
+selenium_profile/
+fb_netlog.json
+ig_netlog.json
+fb_dump_dom.html
+ig_dump_dom.html
+fb_rendered_dom.html
+ig_rendered_dom.html
+njavtv_dump.html
+njavtv_page.html
+gimy_1.html
+gimy_1.html.snip.txt
+gimy_2.html
+gimy_2.html.snip.txt
+gimy_video.html
+
+# Large binaries / generated media
+ffmpeg.exe
+ffprobe.exe
+*.mp4
+*.mp3
+*.part
+*.zip
+tmp_http_test*.bin
+
+# Historical backups and intermediate restoration files
+downloader_backup_*.py
+downloader_safe_backup_*.py
+downloader_2122_payload.marshal
+downloader_2122_readable_outline.py
+downloader_2122_readable_recovery.py
+downloader_2122_reconstructed_stage1.py
+downloader_backup_restored_*.py
+downloader_backup_pre_restore_*.py
+_tmp_disasm_*.txt
+
+# Historical one-off spec files
+downloader_20*.spec
+
