@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
 
-APP_BUILD = "20260427-2270"
+APP_BUILD = "20260427-2271"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -2845,10 +2845,10 @@ class DownloadManagerApp:
 
     def _get_task_url(self, task, fallback_url=""):
         task = task or {}
-        url = normalize_url(task.get("url", ""))
+        url = _normalize_download_url(task.get("url", ""))
         if url:
             return url
-        return normalize_url(fallback_url)
+        return _normalize_download_url(fallback_url)
 
     def _get_task_fallback_urls(self, task, primary_url=None):
         task = task or {}
@@ -2979,7 +2979,7 @@ class DownloadManagerApp:
         normalize_url = _normalize_download_url
         default_name = default_short_name_for_url
         for task in self._iter_live_tasks():
-            url = normalize_url(task.get("url", ""))
+            url = _normalize_download_url(task.get("url", ""))
             if not url:
                 continue
             is_mp3 = self._get_task_is_mp3(task)
@@ -5902,6 +5902,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
