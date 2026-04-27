@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
 
-APP_BUILD = "20260427-2246"
+APP_BUILD = "20260427-2250"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -3647,7 +3647,7 @@ class DownloadManagerApp:
         safe_name = "".join(ch for ch in short_name if ch not in '\\/:*?"<>|').strip() or "Audio"
         out_path = os.path.join(save_dir, f"{safe_name}.mp3")
         task["filename"] = out_path
-        self.update_tree(item_id, "name", os.path.basename(out_path), force=True)
+        self._set_task_name_text(item_id, os.path.basename(out_path))
         if os.path.exists(out_path):
             self._mark_existing_file_complete(item_id, t("eta_file_exists") if "eta_file_exists" in I18N_DICT.get(CURRENT_LANG, {}) else "檔案已存在")
             return
@@ -3894,6 +3894,18 @@ class DownloadManagerApp:
     def _set_task_site_parsing_ui(self, item_id, key, fallback):
         self._set_task_speed_eta_text(item_id, self._eta_site_text(key, fallback))
 
+    def _set_task_name_text(self, item_id, value):
+        self.update_tree(item_id, "name", value, force=True)
+
+    def _set_task_direct_media_ui(self, item_id):
+        self._set_task_speed_eta_text(item_id, self._eta_direct_media_text())
+
+    def _set_task_found_media_ui(self, item_id):
+        self._set_task_speed_eta_text(item_id, self._eta_found_media_text())
+
+    def _set_task_found_stream_ui(self, item_id):
+        self._set_task_speed_eta_text(item_id, self._eta_found_stream_text())
+
     def _site_parse_error_text(self, error):
         prefix = t("err_site_parse") if "err_site_parse" in I18N_DICT.get(CURRENT_LANG, {}) else "解析失敗"
         return f"{prefix}: {str(error)[:40]}"
@@ -3920,6 +3932,12 @@ class DownloadManagerApp:
 
     def _set_task_speed_eta_unknown_ui(self, item_id):
         self._set_task_speed_eta_text(item_id, "-")
+
+    def _set_task_transfer_rate_ui(self, item_id, speed_bps=None, eta_seconds=None):
+        speed_text = format_transfer_rate(speed_bps) if speed_bps else "-"
+        if eta_seconds not in (None, ""):
+            speed_text = f"{speed_text} | {format_eta(float(eta_seconds))}"
+        self._set_task_speed_eta_text(item_id, speed_text)
 
     def _set_task_status_text(self, item_id, value):
         self.update_tree(item_id, "status", value, force=True)
@@ -4062,10 +4080,10 @@ class DownloadManagerApp:
                         if total_size > 0:
                             self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
                             eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
-                            self.update_tree(item_id, "speed_eta", f"{format_transfer_rate(speed_bps)} | {format_eta(eta)}")
+                            self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
                         else:
                             self._set_task_size_text(item_id, f"{downloaded / 1024 / 1024:.1f} MB")
-                            self.update_tree(item_id, "speed_eta", format_transfer_rate(speed_bps))
+                            self._set_task_transfer_rate_ui(item_id, speed_bps)
             if res is not None:
                 try:
                     res.close()
@@ -4121,7 +4139,7 @@ class DownloadManagerApp:
                             self._set_task_progress_percent_ui(item_id, percent)
                             self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
                             eta = max((total_size - multi_downloaded) / max(speed_bps, 1.0), 0.0)
-                            self.update_tree(item_id, "speed_eta", f"{format_transfer_rate(speed_bps)} | {format_eta(eta)}")
+                            self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
                         time.sleep(0.5)
                 with open(out_path, "ab") as main_out:
                     for part_path in part_paths:
@@ -4151,7 +4169,7 @@ class DownloadManagerApp:
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
         task["filename"] = out_path
-        self.update_tree(item_id, "name", os.path.basename(out_path), force=True)
+        self._set_task_name_text(item_id, os.path.basename(out_path))
         if os.path.exists(out_path):
             self._mark_existing_file_complete(item_id, t("eta_file_exists") if "eta_file_exists" in I18N_DICT.get(CURRENT_LANG, {}) else "檔案已存在")
             return
@@ -4455,16 +4473,15 @@ class DownloadManagerApp:
                             instant_bps = 0.0
                             if active_output_bytes > 0 and out_ms > 0:
                                 instant_bps = active_output_bytes / max(out_ms / 1_000_000.0, 0.001)
-                            eta_text = None
+                            eta_seconds = None
                             if active_total_bytes and active_total_bytes > 0 and instant_bps > 0:
-                                eta_text = format_eta((active_total_bytes - current_bytes) / instant_bps)
+                                eta_seconds = max((active_total_bytes - current_bytes) / instant_bps, 0.0)
                             elif total_duration > 0 and instant_bps > 0:
-                                remaining_seconds = max(total_duration - total_done_seconds, 0.0)
-                                eta_text = format_eta(remaining_seconds)
-                            if instant_bps > 0 and eta_text:
-                                self.update_tree(item_id, "speed_eta", f"{format_transfer_rate(instant_bps)} | {eta_text}")
+                                eta_seconds = max(total_duration - total_done_seconds, 0.0)
+                            if instant_bps > 0 and eta_seconds is not None:
+                                self._set_task_transfer_rate_ui(item_id, instant_bps, eta_seconds)
                             elif instant_bps > 0:
-                                self.update_tree(item_id, "speed_eta", format_transfer_rate(instant_bps))
+                                self._set_task_transfer_rate_ui(item_id, instant_bps)
                             last_ui_update = now
                         self._save_resume_progress(progress_path, total_done_seconds, source_url=resume_key, bytes_done=current_bytes)
                     if progress.get("progress") == "end":
@@ -4813,10 +4830,7 @@ class DownloadManagerApp:
                 self._set_task_progress_percent_ui(item_id, percent)
             speed = d.get("speed")
             eta = d.get("eta")
-            speed_text = format_transfer_rate(speed) if speed else "-"
-            if eta not in (None, ""):
-                speed_text = f"{speed_text} | {format_eta(float(eta))}"
-            self.update_tree(item_id, "speed_eta", speed_text)
+            self._set_task_transfer_rate_ui(item_id, speed, eta)
             status_text = self._downloading_status_text()
             if self.tasks.get(item_id, {}).get("_last_status_text") != status_text:
                 self._set_task_downloading_ui(item_id)
@@ -4879,7 +4893,7 @@ class DownloadManagerApp:
             updates = {}
             if name:
                 task["short_name"] = name
-                self.update_tree(item_id, "name", name, force=True)
+                self._set_task_name_text(item_id, name)
                 updates["name"] = name
             if source_site:
                 task["source_site"] = source_site
@@ -4955,10 +4969,10 @@ class DownloadManagerApp:
 
         is_direct_media = any(parsed_url.path.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm", ".m4a", ".mp3"))
         if is_direct_media:
-            self.update_tree(item_id, "speed_eta", self._eta_direct_media_text(), force=True)
+            self._set_task_direct_media_ui(item_id)
             filename = os.path.basename(parsed_url.path) or "downloaded_file"
             task["filename"] = os.path.join(save_dir, filename)
-            self.update_tree(item_id, "name", filename, force=True)
+            self._set_task_name_text(item_id, filename)
             try:
                 self._download_http_media(item_id, url, task["filename"], headers={"User-Agent": DEFAULT_USER_AGENT})
                 return
@@ -4983,7 +4997,7 @@ class DownloadManagerApp:
             task["short_name"] = clean_title
             task["source_site"] = "jable"
             update_state_entry(task["url"], name=clean_title, source_site="jable")
-            self.update_tree(item_id, "name", clean_title, force=True)
+            self._set_task_name_text(item_id, clean_title)
             self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
             write_error_log("m3u8 route selected", Exception("route=ffmpeg site=jable"), url=url, item_id=item_id, source_site="jable", fallback_count=0)
             self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer="https://jable.tv/", origin="https://jable.tv")
@@ -5011,7 +5025,7 @@ class DownloadManagerApp:
             task["short_name"] = title
             task["source_site"] = "njavtv"
             update_state_entry(task["url"], name=title, source_site="njavtv")
-            self.update_tree(item_id, "name", title, force=True)
+            self._set_task_name_text(item_id, title)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer="https://njavtv.com/", origin="https://njavtv.com")
             return
 
@@ -5566,8 +5580,8 @@ class DownloadManagerApp:
                     url = v_src
                     out_name = clean_title + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
-                    self.update_tree(item_id, "name", out_name, force=True)
-                    self.update_tree(item_id, "speed_eta", self._eta_found_media_text(), force=True)
+                    self._set_task_name_text(item_id, out_name)
+                    self._set_task_found_media_ui(item_id)
                     self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
                     return
                 direct_mp4 = re.search(r'<source[^>]+src=["\']([^"\']+\.mp4[^"\']*)["\']', resp.text, re.IGNORECASE)
@@ -5578,16 +5592,16 @@ class DownloadManagerApp:
                     url = v_src
                     out_name = clean_title + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
-                    self.update_tree(item_id, "name", out_name, force=True)
-                    self.update_tree(item_id, "speed_eta", self._eta_found_media_text(), force=True)
+                    self._set_task_name_text(item_id, out_name)
+                    self._set_task_found_media_ui(item_id)
                     self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
                     return
                 direct_m3u8 = re.search(r'(https?://[^\s"\'\\]+(?:surrit\.com|[^"\']+)\.m3u8[^\s"\']*)', resp.text)
                 if direct_m3u8:
                     url = html.unescape(direct_m3u8.group(1))
                     task["short_name"] = clean_title
-                    self.update_tree(item_id, "name", clean_title, force=True)
-                    self.update_tree(item_id, "speed_eta", self._eta_found_stream_text(), force=True)
+                    self._set_task_name_text(item_id, clean_title)
+                    self._set_task_found_stream_ui(item_id)
                     self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
                     return
                 iframe_m = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', resp.text)
@@ -5606,8 +5620,8 @@ class DownloadManagerApp:
                     raise Exception("Anime1 iframe did not contain an m3u8 URL")
                 url = m3u8_m.group(1)
                 task["short_name"] = clean_title
-                self.update_tree(item_id, "name", clean_title, force=True)
-                self.update_tree(item_id, "speed_eta", self._eta_found_stream_text(), force=True)
+                self._set_task_name_text(item_id, clean_title)
+                self._set_task_found_stream_ui(item_id)
                 self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
                 return
             except (StopDownloadException, KeyboardInterrupt):
