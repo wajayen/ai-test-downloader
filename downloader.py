@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - optional integration
     MegaClient = None
 
 
-APP_BUILD = "20260428-2350"
+APP_BUILD = "20260428-2360"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -67,6 +67,12 @@ STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
 ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 MAX_DOWNLOADS_PER_DOMAIN = 3
 MAX_DOWNLOADS_PER_SOURCE_PAGE = 1
+MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
+    "movieffm": 2,
+}
+MAX_DOWNLOADS_PER_SOURCE_SITE = {
+    "gimy": 1,
+}
 MAX_QUEUE_TASKS = 300
 DISK_SPACE_RESERVE_BYTES = 256 * 1024 * 1024
 STATE_PERSIST_INTERVAL_SECONDS = 2.5
@@ -86,6 +92,13 @@ FFMPEG_HLS_RECONNECT_OPTIONS = (
 )
 FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
+YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
+    "movieffm": 15.0,
+}
+YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 3
+YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
+    "movieffm": 8,
+}
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
 IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1")
@@ -155,6 +168,11 @@ FORCED_M3U8_SITE_RULES = {
         "referer": "https://tw.xiaoyakankan.com/",
     },
 }
+
+NATIVE_HLS_PREFERRED_HOSTS = frozenset((
+    "play.xluuss.com",
+    "hd.ijycnd.com",
+))
 
 RE_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 state_lock = threading.RLock()
@@ -1335,6 +1353,36 @@ def _match_forced_m3u8_site(url, task=None):
     return None
 
 
+def _should_prefer_native_hls(url, task=None):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    host = str(parsed.netloc or "").strip().lower()
+    if host in NATIVE_HLS_PREFERRED_HOSTS:
+        return True
+    source_site = _task_source_site_name(task)
+    return source_site == "gimy" and host.endswith(".xluuss.com")
+
+
+def _native_hls_source_site(task=None):
+    return _task_source_site_name(task)
+
+
+def _native_hls_socket_timeout(task=None):
+    source_site = _native_hls_source_site(task)
+    return float(YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE.get(source_site, YTDLP_HLS_NATIVE_SOCKET_TIMEOUT))
+
+
+def _native_hls_concurrent_fragments(task=None):
+    source_site = _native_hls_source_site(task)
+    return int(YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE.get(source_site, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS))
+
+
+def _native_hls_download_options(task=None):
+    return {
+        "socket_timeout": _native_hls_socket_timeout(task),
+        "concurrent_fragment_downloads": _native_hls_concurrent_fragments(task),
+    }
+
+
 def add_to_state(url, name, is_mp3=False, source_site=None, extra_task_data=None):
     normalized_url = _normalize_download_url(url)
     if not normalized_url:
@@ -1712,10 +1760,31 @@ def _ffmpeg_command_preview(cmd):
 
 
 def _yt_dlp_retry_sleep_functions():
+    def _retry_sleep_http(*args, **kwargs):
+        count = kwargs.get("n")
+        if count is None and args:
+            count = args[0]
+        count = max(int(count or 0), 0)
+        return min(float(2 ** max(count - 1, 0)), 10.0)
+
+    def _retry_sleep_fragment(*args, **kwargs):
+        count = kwargs.get("n")
+        if count is None and args:
+            count = args[0]
+        count = max(int(count or 0), 0)
+        return min(float(1.5 * (2 ** max(count - 1, 0))), 12.0)
+
+    def _retry_sleep_file_access(*args, **kwargs):
+        count = kwargs.get("n")
+        if count is None and args:
+            count = args[0]
+        count = max(int(count or 0), 0)
+        return min(float(max(count, 1)), 5.0)
+
     return {
-        "http": lambda count: min(float(2 ** max(int(count) - 1, 0)), 10.0),
-        "fragment": lambda count: min(float(1.5 * (2 ** max(int(count) - 1, 0))), 12.0),
-        "file_access": lambda count: min(float(max(int(count), 1)), 5.0),
+        "http": _retry_sleep_http,
+        "fragment": _retry_sleep_fragment,
+        "file_access": _retry_sleep_file_access,
     }
 
 
@@ -3480,6 +3549,86 @@ class DownloadManagerApp:
                 return True
         return False
 
+    def _find_output_file_candidate(self, save_dir, safe_name, preferred_ext=None):
+        if not save_dir or not safe_name:
+            return ""
+        possible_exts = []
+        if preferred_ext:
+            possible_exts.append(preferred_ext if str(preferred_ext).startswith(".") else f".{preferred_ext}")
+        possible_exts.extend([".mp4", ".mkv", ".webm", ".mp3", ".m4a", ".m4v", ".ts"])
+        seen = set()
+        for ext in possible_exts:
+            if ext in seen:
+                continue
+            seen.add(ext)
+            candidate = os.path.join(save_dir, f"{safe_name}{ext}")
+            if self._has_nonempty_file(candidate):
+                return candidate
+        pattern = os.path.join(save_dir, f"{glob.escape(safe_name)}*")
+        matches = []
+        for path in glob.glob(pattern):
+            base_name = os.path.basename(path)
+            if base_name.endswith((".part", ".ytdl")):
+                continue
+            if self._has_nonempty_file(path):
+                matches.append(path)
+        if not matches:
+            return ""
+        matches.sort(key=lambda path: (self._get_existing_file_size(path), os.path.getmtime(path)), reverse=True)
+        return matches[0]
+
+    def _collect_yt_dlp_output_candidates(self, info, save_dir, safe_name, preferred_ext=None):
+        candidates = []
+        seen = set()
+
+        def add_candidate(path):
+            clean_path = str(path or "").strip()
+            if not clean_path:
+                return
+            if not os.path.isabs(clean_path) and save_dir:
+                clean_path = os.path.join(save_dir, clean_path)
+            norm_path = os.path.normcase(os.path.abspath(clean_path))
+            if norm_path in seen:
+                return
+            seen.add(norm_path)
+            candidates.append(clean_path)
+
+        if isinstance(info, dict):
+            add_candidate(info.get("filepath"))
+            add_candidate(info.get("_filename"))
+            add_candidate(info.get("filename"))
+            try:
+                add_candidate(yt_dlp.YoutubeDL({}).prepare_filename(info) if yt_dlp is not None else "")
+            except Exception:
+                pass
+            for requested in info.get("requested_downloads") or []:
+                if not isinstance(requested, dict):
+                    continue
+                add_candidate(requested.get("filepath"))
+                add_candidate(requested.get("_filename"))
+                add_candidate(requested.get("filename"))
+        fallback_candidate = self._find_output_file_candidate(save_dir, safe_name, preferred_ext=preferred_ext)
+        add_candidate(fallback_candidate)
+        return candidates
+
+    def _resolve_yt_dlp_output_path(self, info, save_dir, safe_name, out_path, preferred_ext=None):
+        for candidate in self._collect_yt_dlp_output_candidates(info, save_dir, safe_name, preferred_ext=preferred_ext):
+            if self._has_nonempty_file(candidate):
+                return candidate
+        if self._has_nonempty_file(out_path):
+            return out_path
+        return ""
+
+    def _wait_for_yt_dlp_output_path(self, info, save_dir, safe_name, out_path, preferred_ext=None, timeout_seconds=12.0):
+        deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
+        while True:
+            resolved = self._resolve_yt_dlp_output_path(info, save_dir, safe_name, out_path, preferred_ext=preferred_ext)
+            if resolved:
+                return resolved
+            if time.time() >= deadline:
+                return ""
+            time.sleep(0.5)
+
     def _extract_domain(self, url):
         domain = urllib.parse.urlparse(url).netloc
         if not domain:
@@ -3991,13 +4140,13 @@ class DownloadManagerApp:
         try:
             if temp_exists and src_info.get("valid") and dst_info.get("valid"):
                 self._concat_media_files((src_path, dst_path), merged_path)
-                shutil.move(merged_path, src_path)
+                self._move_file_with_retry(merged_path, src_path)
             elif temp_exists and not src_info.get("valid") and dst_info.get("valid"):
                 try:
                     os.remove(src_path)
                 except OSError:
                     pass
-                shutil.move(dst_path, src_path)
+                self._move_file_with_retry(dst_path, src_path)
             elif temp_exists and src_info.get("valid") and not dst_info.get("valid"):
                 try:
                     os.remove(dst_path)
@@ -4017,9 +4166,9 @@ class DownloadManagerApp:
                     os.remove(src_path)
                 except OSError:
                     pass
-                shutil.move(dst_path, src_path)
+                self._move_file_with_retry(dst_path, src_path)
             else:
-                shutil.move(dst_path, src_path)
+                self._move_file_with_retry(dst_path, src_path)
             for leftover in (dst_path, merged_path):
                 if os.path.exists(leftover):
                     try:
@@ -4043,7 +4192,7 @@ class DownloadManagerApp:
                 try:
                     if src_path and os.path.exists(src_path):
                         os.remove(src_path)
-                    shutil.move(best_candidate, src_path)
+                    self._move_file_with_retry(best_candidate, src_path)
                 except Exception:
                     pass
             write_error_log(
@@ -4065,6 +4214,24 @@ class DownloadManagerApp:
                     except OSError:
                         continue
             return self._has_nonempty_file(src_path)
+
+    def _move_file_with_retry(self, src_path, dst_path, attempts=8, delay_seconds=0.5):
+        last_error = None
+        total_attempts = max(int(attempts or 1), 1)
+        for attempt in range(total_attempts):
+            try:
+                shutil.move(src_path, dst_path)
+                return True
+            except PermissionError as exc:
+                last_error = exc
+                if attempt >= total_attempts - 1:
+                    break
+                time.sleep(max(float(delay_seconds or 0.0), 0.0))
+            except Exception:
+                raise
+        if last_error:
+            raise last_error
+        return False
 
     def _load_resume_progress_info(self, progress_path):
         if not progress_path or not os.path.exists(progress_path):
@@ -4371,7 +4538,7 @@ class DownloadManagerApp:
                 os.remove(out_path)
             except OSError:
                 pass
-        shutil.move(temp_out_path, out_path)
+        self._move_file_with_retry(temp_out_path, out_path)
         self._set_task_progress_complete_ui(item_id)
         self._mark_task_finished(item_id)
         write_error_log("ffmpeg direct audio finished", Exception("ffmpeg direct audio finished"), url=url, item_id=item_id, output=out_path, bytes=self._get_existing_file_size(out_path))
@@ -5054,6 +5221,7 @@ class DownloadManagerApp:
         if yt_dlp is None:
             raise RuntimeError("yt-dlp is not available for native HLS fallback")
         task = self.tasks.get(item_id, {})
+        native_options = _native_hls_download_options(task)
         safe_name = self._get_task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
@@ -5099,9 +5267,9 @@ class DownloadManagerApp:
             "fragment_retries": 20,
             "file_access_retries": 3,
             "skip_unavailable_fragments": False,
-            "concurrent_fragment_downloads": 3,
+            "concurrent_fragment_downloads": native_options["concurrent_fragment_downloads"],
             "continuedl": True,
-            "paths": {"home": save_dir, "temp": tempfile.gettempdir()},
+            "paths": {"home": save_dir, "temp": save_dir},
             "outtmpl": {"default": f"{safe_name}.%(ext)s"},
             "format": "best",
             "merge_output_format": "mp4",
@@ -5111,7 +5279,7 @@ class DownloadManagerApp:
             "quiet": True,
             "hls_prefer_native": True,
             "hls_use_mpegts": True,
-            "socket_timeout": YTDLP_HLS_NATIVE_SOCKET_TIMEOUT,
+            "socket_timeout": native_options["socket_timeout"],
             "retry_sleep_functions": _yt_dlp_retry_sleep_functions(),
             "http_headers": {
                 "User-Agent": DEFAULT_USER_AGENT,
@@ -5131,12 +5299,23 @@ class DownloadManagerApp:
             source_site=self._get_task_source_site(task) or None,
             referer=referer,
             origin=origin,
-            socket_timeout=YTDLP_HLS_NATIVE_SOCKET_TIMEOUT,
+            socket_timeout=native_options["socket_timeout"],
             concurrent_fragment_downloads=ydl_opts["concurrent_fragment_downloads"],
             hls_use_mpegts=ydl_opts["hls_use_mpegts"],
         )
+        info = None
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+            info = ydl.extract_info(url, download=True)
+        actual_output = self._wait_for_yt_dlp_output_path(info, save_dir, safe_name, out_path, preferred_ext=ext)
+        if actual_output:
+            if os.path.normcase(os.path.abspath(actual_output)) != os.path.normcase(os.path.abspath(out_path)):
+                try:
+                    if not os.path.exists(out_path):
+                        self._move_file_with_retry(actual_output, out_path)
+                        actual_output = out_path
+                except Exception:
+                    pass
+            self._set_task_output_path(task, item_id, actual_output)
         if self._complete_if_output_exists(item_id):
             write_error_log(
                 "yt-dlp native hls fallback finished",
@@ -5144,10 +5323,20 @@ class DownloadManagerApp:
                 url=url,
                 item_id=item_id,
                 source_site=self._get_task_source_site(task) or None,
-                output=out_path,
-                bytes=self._get_existing_file_size(out_path),
+                output=self._get_task_output_path(task, default=out_path) or out_path,
+                bytes=self._get_existing_file_size(self._get_task_output_path(task, default=out_path) or out_path),
             )
             return
+        write_error_log(
+            "yt-dlp native hls fallback output missing",
+            self._ffmpeg_event_exception("yt-dlp native hls fallback output missing"),
+            url=url,
+            item_id=item_id,
+            source_site=self._get_task_source_site(task) or None,
+            expected_output=out_path,
+            detected_candidates=self._collect_yt_dlp_output_candidates(info, save_dir, safe_name, preferred_ext=ext),
+            save_dir=save_dir,
+        )
         raise FileNotFoundError("yt-dlp native HLS fallback did not produce an output file")
 
     def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False):
@@ -5159,6 +5348,24 @@ class DownloadManagerApp:
         if os.path.exists(out_path):
             self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
             return
+        if _should_prefer_native_hls(url, task) and not _native_fallback_done:
+            write_error_log(
+                "preferred native hls route selected",
+                self._ffmpeg_event_exception("preferred native hls route selected"),
+                url=url,
+                item_id=item_id,
+                source_site=self._get_task_source_site(task) or None,
+                referer=referer,
+                origin=origin,
+            )
+            return self._download_m3u8_with_ytdlp_native(
+                item_id,
+                url,
+                save_dir,
+                is_mp3=is_mp3,
+                referer=referer,
+                origin=origin,
+            )
 
         resume_key = self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url)) or url
         temp_out_path = self._get_stable_resume_base(url, ext=ext, resume_key=resume_key)
@@ -5545,7 +5752,7 @@ class DownloadManagerApp:
                         os.remove(out_path)
                     except OSError:
                         pass
-                shutil.move(final_source, out_path)
+                self._move_file_with_retry(final_source, out_path)
 
                 for stale_path in (temp_out_path, resume_out_path, merged_out_path, progress_path):
                     if stale_path == out_path:
@@ -5735,26 +5942,36 @@ class DownloadManagerApp:
     def _process_queue(self):
         domain_counts = {}
         source_page_counts = {}
+        source_site_counts = {}
         queued_items = []
         for item_id, task in self.tasks.items():
             if self._is_downloading_state(_task_state_value(task)):
                 domain, source_page = self._get_task_queue_keys(task)
+                source_site = self._get_task_source_site(task)
                 domain_counts[domain] = domain_counts.get(domain, 0) + 1
                 if source_page:
                     source_page_counts[source_page] = source_page_counts.get(source_page, 0) + 1
+                if source_site:
+                    source_site_counts[source_site] = source_site_counts.get(source_site, 0) + 1
             elif self._is_queued_state(_task_state_value(task)):
                 queued_items.append(item_id)
         for item_id in queued_items:
             task = self.tasks[item_id]
             domain, source_page = self._get_task_queue_keys(task)
+            source_site = self._get_task_source_site(task)
+            source_page_limit = MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE.get(source_site, MAX_DOWNLOADS_PER_SOURCE_PAGE)
             if domain_counts.get(domain, 0) >= MAX_DOWNLOADS_PER_DOMAIN:
                 continue
-            if source_page and source_page_counts.get(source_page, 0) >= MAX_DOWNLOADS_PER_SOURCE_PAGE:
+            if source_page and source_page_counts.get(source_page, 0) >= source_page_limit:
+                continue
+            if source_site and source_site_counts.get(source_site, 0) >= MAX_DOWNLOADS_PER_SOURCE_SITE.get(source_site, MAX_DOWNLOADS_PER_DOMAIN):
                 continue
             _set_task_state_fields(task, "DOWNLOADING")
             domain_counts[domain] = domain_counts.get(domain, 0) + 1
             if source_page:
                 source_page_counts[source_page] = source_page_counts.get(source_page, 0) + 1
+            if source_site:
+                source_site_counts[source_site] = source_site_counts.get(source_site, 0) + 1
             self._set_task_downloading_ui(item_id)
             self._start_daemon_thread(
                 self.download_task,
@@ -6006,6 +6223,70 @@ class DownloadManagerApp:
                                 return _parse_js_object(page_text[start : idx + 1])
             return None
 
+        def _add_m3u8_candidate(candidates, value, base_url=""):
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    _add_m3u8_candidate(candidates, item, base_url=base_url)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    _add_m3u8_candidate(candidates, item, base_url=base_url)
+                return
+            if not isinstance(value, str):
+                return
+            stream_url = html.unescape(value).replace("\\/", "/").strip()
+            if not stream_url:
+                return
+            if stream_url.startswith("//"):
+                stream_url = "https:" + stream_url
+            elif base_url and stream_url.startswith("/"):
+                stream_url = urllib.parse.urljoin(base_url, stream_url)
+            normalized_url = _normalize_download_url(stream_url)
+            if not normalized_url or ".m3u8" not in normalized_url.lower():
+                return
+            if normalized_url not in candidates:
+                candidates.append(normalized_url)
+
+        def _collect_player_m3u8_candidates(player_data, base_url=""):
+            candidates = []
+            if not isinstance(player_data, dict):
+                return candidates
+            for key in (
+                "url",
+                "src",
+                "source",
+                "play_url",
+                "playUrl",
+                "urls",
+                "backup",
+                "backup_urls",
+                "m3u8_urls",
+                "line_urls",
+                "lineUrls",
+                "playlist",
+                "sources",
+            ):
+                if key in player_data:
+                    _add_m3u8_candidate(candidates, player_data.get(key), base_url=base_url)
+            extras = player_data.get("vod_data") or {}
+            if isinstance(extras, dict):
+                for key in ("url", "play_url", "playUrl", "sources"):
+                    if key in extras:
+                        _add_m3u8_candidate(candidates, extras.get(key), base_url=base_url)
+            return _dedupe_download_urls(candidates)
+
+        def _extract_m3u8_candidates_from_text(page_text, base_url=""):
+            page_text = str(page_text or "")
+            candidates = []
+            for pattern in (
+                r"var\s+url\s*=\s*['\"]([^'\"]+\.m3u8[^'\"]*)['\"]",
+                r"['\"](https?://[^\"'\s]+\.m3u8[^\"'\s]*)['\"]",
+                r"(https?://[^\"'\s]+\.m3u8[^\"'\s]*)",
+            ):
+                for match in re.finditer(pattern, page_text, re.IGNORECASE):
+                    _add_m3u8_candidate(candidates, match.group(1), base_url=base_url)
+            return _dedupe_download_urls(candidates)
+
         parsed_url = urllib.parse.urlparse(url)
         if _is_mega_url(url):
             self._set_task_site_parsing_ui(item_id, "eta_site_mega", "正在解析 MEGA...")
@@ -6245,27 +6526,22 @@ class DownloadManagerApp:
                     last_gimy_error = e
                     continue
 
-                player_match = re.search(r"var\s+player(?:_aaaa|_data)?\s*=\s*(\{.*?\})\s*(?:</script>|;)", resp_text, re.DOTALL)
-                if player_match:
-                    try:
-                        player_data = json.loads(player_match.group(1))
-                        stream_url = html.unescape(str(player_data.get("url") or "")).replace("\\/", "/").strip()
-                        if stream_url.startswith("//"):
-                            stream_url = "https:" + stream_url
-                        if stream_url and stream_url not in stream_candidates:
-                            stream_candidates.append(_normalize_download_url(stream_url))
+                player_data = None
+                try:
+                    player_data = _extract_player_js_object(resp_text, "player_data", "player_aaaa", "player")
+                    if player_data:
+                        for candidate_url in _collect_player_m3u8_candidates(player_data, base_url=url):
+                            if candidate_url not in stream_candidates:
+                                stream_candidates.append(candidate_url)
                         player_title = (player_data.get("vod_data") or {}).get("vod_name")
                         if player_title:
                             page_title = re.sub(r"\s+", " ", str(player_title)).strip() or page_title
-                    except Exception as e:
-                        last_gimy_error = e
+                except Exception as e:
+                    last_gimy_error = e
 
-                direct_match = re.search(r"var\s+url\s*=\s*['\"]([^'\"]+\.m3u8[^'\"]*)['\"]", resp_text, re.IGNORECASE)
-                if not direct_match:
-                    direct_match = re.search(r'(https?://[^"\']+\.m3u8[^"\']*)', resp_text)
-                direct_stream = _normalize_download_url(direct_match.group(1)) if direct_match else None
-                if direct_stream and direct_stream not in stream_candidates:
-                    stream_candidates.append(direct_stream)
+                for direct_stream in _extract_m3u8_candidates_from_text(resp_text, base_url=url):
+                    if direct_stream not in stream_candidates:
+                        stream_candidates.append(direct_stream)
 
                 iframe_urls = []
                 for match in re.finditer(r'<iframe[^>]+src=["\']([^"\']+)["\']', resp_text, re.IGNORECASE):
@@ -6284,12 +6560,14 @@ class DownloadManagerApp:
                     except Exception as e:
                         last_gimy_error = e
                         continue
-                    m3u8_match = re.search(r"var\s+url\s*=\s*['\"]([^'\"]+\.m3u8[^'\"]*)['\"]", iframe_text, re.IGNORECASE)
-                    if not m3u8_match:
-                        m3u8_match = re.search(r'(https?://[^"\']+\.m3u8[^"\']*)', iframe_text)
-                    stream_url = _normalize_download_url(m3u8_match.group(1)) if m3u8_match else None
-                    if stream_url and stream_url not in stream_candidates:
-                        stream_candidates.append(stream_url)
+                    iframe_player_data = _extract_player_js_object(iframe_text, "player_data", "player_aaaa", "player")
+                    if iframe_player_data:
+                        for candidate_url in _collect_player_m3u8_candidates(iframe_player_data, base_url=iframe_url):
+                            if candidate_url not in stream_candidates:
+                                stream_candidates.append(candidate_url)
+                    for stream_url in _extract_m3u8_candidates_from_text(iframe_text, base_url=iframe_url):
+                        if stream_url not in stream_candidates:
+                            stream_candidates.append(stream_url)
 
                 if stream_candidates:
                     break
@@ -6337,13 +6615,19 @@ class DownloadManagerApp:
             player_data = _extract_player_js_object(resp.text, "player_data", "player_aaaa")
             if not player_data:
                 raise Exception("Gimy player_data not found")
-            stream_url = _normalize_download_url(player_data.get("url"))
+            candidates = _collect_player_m3u8_candidates(player_data, base_url=url)
+            for candidate_url in _extract_m3u8_candidates_from_text(resp.text, base_url=url):
+                if candidate_url not in candidates:
+                    candidates.append(candidate_url)
+            candidates = _dedupe_download_urls(candidates)
+            stream_url = candidates[0] if candidates else None
             if not stream_url:
                 raise Exception("Gimy stream URL missing")
             page_title = _extract_html_title(resp.text, short_name)
-            _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=[])
+            fallback_urls = candidates[1:] if len(candidates) > 1 else []
+            _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
-            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=[])
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
 
