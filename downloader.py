@@ -50,8 +50,13 @@ try:
 except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
+try:
+    from mega import Mega as MegaClient  # type: ignore
+except Exception:  # pragma: no cover - optional integration
+    MegaClient = None
 
-APP_BUILD = "20260428-2340"
+
+APP_BUILD = "20260428-2350"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -80,6 +85,7 @@ FFMPEG_HLS_RECONNECT_OPTIONS = (
     "-reconnect_max_retries", "20",
 )
 FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
+YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
 IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1")
@@ -255,6 +261,7 @@ I18N_PATCH = {
         "eta_site_threads": "正在解析 Threads...",
         "eta_site_instagram": "正在解析 Instagram...",
         "eta_site_twitter": "正在解析 Twitter/X...",
+        "eta_site_mega": "正在解析 MEGA...",
         "eta_found_stream": "已取得串流網址，準備下載",
         "eta_found_media": "已取得媒體網址，準備下載",
         "overview_idle": "待命中",
@@ -630,6 +637,57 @@ def _normalize_download_url(url):
         query = [(key, value) for key, value in query if key not in ("list", "index", "start_radio", "pp", "feature")]
     normalized_query = urllib.parse.urlencode(query, doseq=True)
     return urllib.parse.urlunsplit((scheme, netloc, parsed.path, normalized_query, ""))
+
+
+def _is_mega_url(url):
+    netloc = urllib.parse.urlparse(str(url or "")).netloc.lower()
+    return netloc.endswith("mega.nz") or netloc.endswith("mega.co.nz")
+
+
+def _is_mega_folder_url(url):
+    normalized = str(url or "").strip().lower()
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    fragment = str(parsed.fragment or "").strip().lower()
+    return "/folder/" in parsed.path.lower() or fragment.startswith("f!") or fragment.startswith("folder/")
+
+
+def _parse_mega_public_file_parts(mega_client, url):
+    parser = getattr(mega_client, "_parse_url", None)
+    if not callable(parser):
+        raise RuntimeError("MEGA URL parser is not available")
+    parsed = str(parser(url) or "").strip()
+    parts = parsed.split("!")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError("Unsupported MEGA public file link")
+    return parts[0], parts[1]
+
+
+def _find_megacmd_get_command():
+    candidates = []
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        base_dir = os.path.join(local_app_data, "MEGAcmd")
+        candidates.extend(
+            [
+                os.path.join(base_dir, "mega-get.exe"),
+                os.path.join(base_dir, "mega-get.cmd"),
+                os.path.join(base_dir, "mega-get.bat"),
+            ]
+        )
+    for name in ("mega-get.exe", "mega-get.cmd", "mega-get.bat", "mega-get"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    for path in candidates:
+        if not path or not os.path.exists(path):
+            continue
+        lower_path = path.lower()
+        if lower_path.endswith((".bat", ".cmd")):
+            return [os.environ.get("ComSpec", "cmd.exe"), "/c", path]
+        return [path]
+    return None
 
 
 def _dedupe_download_urls(candidates, primary_url=None):
@@ -1651,6 +1709,14 @@ def _ffmpeg_command_preview(cmd):
             continue
         preview_parts.append(text)
     return " ".join(preview_parts)[:400]
+
+
+def _yt_dlp_retry_sleep_functions():
+    return {
+        "http": lambda count: min(float(2 ** max(int(count) - 1, 0)), 10.0),
+        "fragment": lambda count: min(float(1.5 * (2 ** max(int(count) - 1, 0))), 12.0),
+        "file_access": lambda count: min(float(max(int(count), 1)), 5.0),
+    }
 
 
 def acquire_single_instance_lock():
@@ -3264,7 +3330,7 @@ class DownloadManagerApp:
         )
         write_error_log(
             "m3u8 route selected",
-            Exception(f"route=ffmpeg site={site or 'unknown'}"),
+            self._m3u8_route_exception(site),
             url=media_url,
             item_id=item_id,
             source_site=site or None,
@@ -3281,19 +3347,46 @@ class DownloadManagerApp:
         fields.update(extra)
         return fields
 
-    def _terminate_ffmpeg_process(self, task, item_id, proc, media_url, reason, **extra):
+    def _build_ffmpeg_runtime_fields(self, ffmpeg_path, retry_count=0, cmd=None, ffmpeg_version=None, **extra):
+        fields = {
+            "ffmpeg_path": ffmpeg_path,
+            "ffmpeg_version": ffmpeg_version or None,
+            "retry_count": retry_count,
+        }
+        if cmd is not None:
+            fields["cmd_preview"] = _ffmpeg_command_preview(cmd)
+        fields.update(extra)
+        return fields
+
+    def _ffmpeg_event_exception(self, message):
+        return Exception(str(message))
+
+    def _m3u8_route_exception(self, site):
+        return self._ffmpeg_event_exception(f"route=ffmpeg site={site or 'unknown'}")
+
+    def _log_ffmpeg_event(self, title, exc, task, item_id, media_url, **extra):
         write_error_log(
-            "ffmpeg terminate requested",
-            Exception(str(reason)),
+            title,
+            exc,
             **self._build_ffmpeg_log_fields(
                 task,
                 item_id,
                 media_url,
-                reason=reason,
-                state=_task_state_value(task),
-                stop_reason=_task_stop_reason_value(task),
                 **extra,
             ),
+        )
+
+    def _terminate_ffmpeg_process(self, task, item_id, proc, media_url, reason, **extra):
+        self._log_ffmpeg_event(
+            "ffmpeg terminate requested",
+            self._ffmpeg_event_exception(reason),
+            task,
+            item_id,
+            media_url,
+            reason=reason,
+            state=_task_state_value(task),
+            stop_reason=_task_stop_reason_value(task),
+            **extra,
         )
         try:
             proc.terminate()
@@ -4467,6 +4560,32 @@ class DownloadManagerApp:
     def _set_task_parse_error_ui(self, item_id, error):
         self._set_task_parse_ui(item_id, error=error)
 
+    def _set_task_mega_identity(self, item_id, task, url, safe_name):
+        normalized_name = _set_task_name_fields(task, safe_name)
+        self._set_task_name_text(item_id, normalized_name)
+        self._update_task_state_entry(
+            task,
+            name=normalized_name,
+            **_set_task_source_fields(
+                task,
+                source_site="mega",
+                source_page=url,
+                fallback_urls=[],
+                primary_url=self._get_task_url(task),
+            ),
+        )
+        return normalized_name
+
+    def _log_mega_event(self, event_name, message, url, item_id, **fields):
+        write_error_log(
+            event_name,
+            Exception(message),
+            url=url,
+            item_id=item_id,
+            source_site="mega",
+            **fields,
+        )
+
     def _site_parse_error_prefix(self):
         return self._ui_text("err_site_parse", "解析失敗")
 
@@ -4511,6 +4630,212 @@ class DownloadManagerApp:
     def _set_task_queued_ui(self, item_id):
         self._set_task_status_text(item_id, self._queued_status_text())
         self._set_task_metrics_unknown_ui(item_id)
+
+    def _download_mega_with_megacmd(self, item_id, url, save_dir, output_path=None, total_size=None):
+        task = self.tasks.get(item_id, {})
+        mega_get_cmd = _find_megacmd_get_command()
+        if not mega_get_cmd:
+            raise RuntimeError("MEGAcmd is not available")
+
+        cmd = list(mega_get_cmd) + [url, save_dir]
+        self._log_mega_event(
+            "mega cmd download started",
+            "mega cmd download started",
+            url,
+            item_id,
+            save_dir=save_dir,
+            output_path=output_path,
+            total_size=total_size,
+            cmd_preview=" ".join(str(part) for part in cmd),
+        )
+
+        startupinfo = None
+        creationflags = 0
+        if platform.system() == "Windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
+        _set_task_process_handle(task, proc)
+        last_bytes = 0
+        last_time = time.time()
+        try:
+            while proc.poll() is None:
+                state = _task_state_value(self.tasks.get(item_id, {}))
+                if self._is_pause_requested_state(state):
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
+                    _set_task_state_fields(self.tasks[item_id], "PAUSED")
+                    self._set_task_paused_ui(item_id)
+                    self._log_mega_event(
+                        "mega cmd terminate requested",
+                        "mega cmd terminate requested",
+                        url,
+                        item_id,
+                        output_path=output_path,
+                        reason="pause_requested",
+                    )
+                    return
+                if self._is_delete_requested_state(state):
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
+                    self._log_mega_event(
+                        "mega cmd terminate requested",
+                        "mega cmd terminate requested",
+                        url,
+                        item_id,
+                        output_path=output_path,
+                        reason="delete_requested",
+                    )
+                    raise KeyboardInterrupt()
+                if output_path and total_size and total_size > 0 and os.path.exists(output_path):
+                    downloaded = self._get_existing_file_size(output_path)
+                    _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=total_size)
+                    self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
+                    percent = format_progress_percent(downloaded, total_size, cap_at_99=True)
+                    if percent is not None:
+                        self._set_task_progress_percent_ui(item_id, percent)
+                    now = time.time()
+                    speed_bps = max((downloaded - last_bytes) / max(now - last_time, 0.001), 0.0)
+                    last_bytes = downloaded
+                    last_time = now
+                    eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
+                    self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
+                time.sleep(1.0)
+        finally:
+            _set_task_process_handle(task, None)
+
+        return_code = proc.returncode
+        if return_code != 0:
+            raise RuntimeError(f"MEGAcmd exited with code {return_code}")
+
+        self._log_mega_event(
+            "mega cmd download finished",
+            "mega cmd download finished",
+            url,
+            item_id,
+            output_path=output_path,
+            total_size=total_size,
+        )
+
+    def _download_mega_public_file(self, item_id, url, save_dir, is_mp3=False):
+        task = self.tasks.get(item_id, {})
+        is_folder_link = _is_mega_folder_url(url)
+        if is_folder_link and is_mp3:
+            raise RuntimeError("MEGA folder links do not support MP3 mode yet")
+        mega_client = MegaClient() if MegaClient is not None else None
+        public_info = {}
+        safe_name = ""
+        out_path = ""
+        source_out_path = ""
+        total_size = None
+
+        if not is_folder_link and mega_client is not None:
+            file_handle, file_key = _parse_mega_public_file_parts(mega_client, url)
+            public_info = mega_client.get_public_file_info(file_handle, file_key) or {}
+            raw_name = str(public_info.get("name") or "").strip()
+            if not raw_name:
+                raw_name = self._get_task_display_name(task, fallback_url=url, default_is_mp3=is_mp3) or "mega_download.bin"
+            safe_name = re.sub(r'[\\/:*?"<>|]+', "_", raw_name).strip() or "mega_download.bin"
+            if not os.path.splitext(safe_name)[1]:
+                safe_name += ".bin"
+            source_out_path = os.path.join(save_dir, safe_name)
+            if is_mp3:
+                out_path = self._set_task_output_path(task, item_id, os.path.join(save_dir, f"{os.path.splitext(safe_name)[0]}.mp3"))
+                _set_task_aux_fields(task, temp_filename=source_out_path)
+            else:
+                out_path = self._set_task_output_path(task, item_id, source_out_path)
+            try:
+                total_size = int(public_info.get("size") or 0)
+            except Exception:
+                total_size = None
+        else:
+            safe_name = self._get_task_display_name(task, fallback_url=url, default_is_mp3=is_mp3) or "MEGA folder"
+
+        display_name = os.path.splitext(safe_name)[0] if is_mp3 and safe_name else safe_name
+        self._set_task_mega_identity(item_id, task, url, display_name)
+
+        if is_mp3 and out_path and os.path.exists(out_path):
+            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
+            return
+        if total_size and total_size > 0:
+            _set_task_transfer_metrics(task, downloaded_bytes=0, total_bytes=total_size)
+            self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
+            if (not is_mp3) and out_path and self._get_existing_file_size(out_path) >= total_size:
+                self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
+                return
+
+        self._set_task_downloading_ui(item_id, "MEGA 下載中")
+        mega_get_cmd = _find_megacmd_get_command()
+        if mega_get_cmd:
+            self._download_mega_with_megacmd(item_id, url, save_dir, output_path=source_out_path or out_path or None, total_size=total_size)
+            if is_mp3:
+                if not source_out_path or not os.path.exists(source_out_path):
+                    raise RuntimeError("MEGA source file missing after MEGAcmd download")
+                self._download_direct_media_audio_with_ffmpeg(item_id, source_out_path, save_dir)
+                try:
+                    os.remove(source_out_path)
+                except OSError:
+                    pass
+                _set_task_aux_fields(task, temp_filename=None)
+                return
+            self._mark_task_finished(item_id)
+            return
+
+        if MegaClient is None:
+            raise RuntimeError("MEGA support package is not available")
+        if is_folder_link:
+            raise RuntimeError("MEGA folder links require MEGAcmd for stable download support")
+
+        self._log_mega_event(
+            "mega public download started",
+            "mega public download started",
+            url,
+            item_id,
+            output_path=out_path,
+            total_size=total_size,
+            backend="mega-py-v2",
+        )
+        downloaded_path = mega_client.download_url(url, dest_path=save_dir, dest_filename=safe_name)
+        if downloaded_path:
+            final_path = os.path.abspath(str(downloaded_path))
+            source_out_path = final_path
+            if not is_mp3:
+                self._set_task_output_path(task, item_id, final_path)
+                out_path = final_path
+        self._log_mega_event(
+            "mega public download finished",
+            "mega public download finished",
+            url,
+            item_id,
+            output_path=out_path,
+            backend="mega-py-v2",
+        )
+        if is_mp3:
+            if not source_out_path or not os.path.exists(source_out_path):
+                raise RuntimeError("MEGA source file missing after public download")
+            self._download_direct_media_audio_with_ffmpeg(item_id, source_out_path, save_dir)
+            try:
+                os.remove(source_out_path)
+            except OSError:
+                pass
+            _set_task_aux_fields(task, temp_filename=None)
+            return
+        self._mark_task_finished(item_id)
 
     def _download_http_media(self, item_id, url, out_path, headers=None, session=None):
         headers = dict(headers or {})
@@ -4725,7 +5050,107 @@ class DownloadManagerApp:
             return
         self._mark_task_finished(item_id)
 
-    def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0):
+    def _download_m3u8_with_ytdlp_native(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net"):
+        if yt_dlp is None:
+            raise RuntimeError("yt-dlp is not available for native HLS fallback")
+        task = self.tasks.get(item_id, {})
+        safe_name = self._get_task_output_basename(task, "Video")
+        ext = "mp3" if is_mp3 else "mp4"
+        out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
+        self._set_task_output_path(task, item_id, out_path)
+        if os.path.exists(out_path):
+            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
+            return
+
+        def progress_hook(d):
+            task_state = _task_state_value(self.tasks.get(item_id, {}))
+            if self._is_pause_requested_state(task_state):
+                raise StopDownloadException("pause requested")
+            if self._is_delete_requested_state(task_state):
+                raise KeyboardInterrupt()
+            status = _event_status(d)
+            if status == "downloading":
+                target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
+                required_bytes = max(int(total) - int(downloaded), 0) if total else None
+                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
+                    raise StopDownloadException("disk space low")
+            if status == "finished":
+                self._set_task_progress_complete_ui(item_id)
+                self._set_task_processing_ui(item_id)
+                return
+            if status != "downloading":
+                return
+            _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=None)
+            percent = format_progress_percent(downloaded, total) if total else None
+            if percent is not None:
+                self._set_task_progress_percent_ui(item_id, percent)
+            speed = _event_speed(d)
+            eta = _event_eta(d)
+            self._set_task_transfer_rate_ui(item_id, speed, eta)
+            status_text = self._downloading_status_text()
+            if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
+                self._set_task_downloading_ui(item_id)
+
+        ydl_opts = {
+            "color": "never",
+            "nopart": False,
+            "nocheckcertificate": True,
+            "retries": 20,
+            "fragment_retries": 20,
+            "file_access_retries": 3,
+            "skip_unavailable_fragments": False,
+            "concurrent_fragment_downloads": 3,
+            "continuedl": True,
+            "paths": {"home": save_dir, "temp": tempfile.gettempdir()},
+            "outtmpl": {"default": f"{safe_name}.%(ext)s"},
+            "format": "best",
+            "merge_output_format": "mp4",
+            "progress_hooks": [progress_hook],
+            "ignoreerrors": False,
+            "no_warnings": False,
+            "quiet": True,
+            "hls_prefer_native": True,
+            "hls_use_mpegts": True,
+            "socket_timeout": YTDLP_HLS_NATIVE_SOCKET_TIMEOUT,
+            "retry_sleep_functions": _yt_dlp_retry_sleep_functions(),
+            "http_headers": {
+                "User-Agent": DEFAULT_USER_AGENT,
+                "Referer": referer,
+                "Origin": origin,
+            },
+            "ffmpeg_location": _APP_DIR,
+        }
+        if is_mp3:
+            ydl_opts["format"] = "bestaudio/best"
+            ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
+        write_error_log(
+            "yt-dlp native hls fallback started",
+            self._ffmpeg_event_exception("yt-dlp native hls fallback started"),
+            url=url,
+            item_id=item_id,
+            source_site=self._get_task_source_site(task) or None,
+            referer=referer,
+            origin=origin,
+            socket_timeout=YTDLP_HLS_NATIVE_SOCKET_TIMEOUT,
+            concurrent_fragment_downloads=ydl_opts["concurrent_fragment_downloads"],
+            hls_use_mpegts=ydl_opts["hls_use_mpegts"],
+        )
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        if self._complete_if_output_exists(item_id):
+            write_error_log(
+                "yt-dlp native hls fallback finished",
+                self._ffmpeg_event_exception("yt-dlp native hls fallback finished"),
+                url=url,
+                item_id=item_id,
+                source_site=self._get_task_source_site(task) or None,
+                output=out_path,
+                bytes=self._get_existing_file_size(out_path),
+            )
+            return
+        raise FileNotFoundError("yt-dlp native HLS fallback did not produce an output file")
+
+    def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False):
         task = self.tasks.get(item_id, {})
         safe_name = self._get_task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
@@ -4866,23 +5291,23 @@ class DownloadManagerApp:
                 average_media_bps = self._estimate_m3u8_media_bps(candidate_url, headers={"Referer": referer, "Origin": origin}) or 0.0
 
             active_output_path = resume_out_path if resume_seconds > 0 else temp_out_path
-            write_error_log(
+            self._log_ffmpeg_event(
                 "ffmpeg download started",
-                Exception("ffmpeg started"),
-                **self._build_ffmpeg_log_fields(
-                    task,
-                    item_id,
-                    candidate_url,
-                    resume_seconds=resume_seconds,
-                    base_bytes=base_bytes,
-                    stored_bytes=stored_info.get("bytes", 0),
-                    stored_progress=stored_info.get("seconds", 0.0),
-                    total_duration=total_duration,
-                    total_bytes=total_bytes,
-                    average_media_bps=average_media_bps,
-                    ffmpeg_path=ffmpeg_path,
-                    ffmpeg_version=ffmpeg_version or None,
+                self._ffmpeg_event_exception("ffmpeg started"),
+                task,
+                item_id,
+                candidate_url,
+                resume_seconds=resume_seconds,
+                base_bytes=base_bytes,
+                stored_bytes=stored_info.get("bytes", 0),
+                stored_progress=stored_info.get("seconds", 0.0),
+                total_duration=total_duration,
+                total_bytes=total_bytes,
+                average_media_bps=average_media_bps,
+                **self._build_ffmpeg_runtime_fields(
+                    ffmpeg_path,
                     retry_count=_unexpected_retry_count,
+                    ffmpeg_version=ffmpeg_version,
                 ),
             )
 
@@ -5133,16 +5558,14 @@ class DownloadManagerApp:
 
                 self._set_task_progress_complete_ui(item_id)
                 self._mark_task_finished(item_id)
-                write_error_log(
+                self._log_ffmpeg_event(
                     "ffmpeg download finished",
-                    Exception("ffmpeg finished"),
-                    **self._build_ffmpeg_log_fields(
-                        task,
-                        item_id,
-                        candidate_url,
-                        output=out_path,
-                        bytes=self._get_existing_file_size(out_path),
-                    ),
+                    self._ffmpeg_event_exception("ffmpeg finished"),
+                    task,
+                    item_id,
+                    candidate_url,
+                    output=out_path,
+                    bytes=self._get_existing_file_size(out_path),
                 )
                 return
 
@@ -5155,21 +5578,21 @@ class DownloadManagerApp:
                 raise KeyboardInterrupt()
 
             if return_code == 15 and _unexpected_retry_count < len(FFMPEG_UNEXPECTED_RETRY_DELAYS):
-                write_error_log(
+                self._log_ffmpeg_event(
                     "ffmpeg unexpected termination retry",
-                    Exception("ffmpeg exited with code 15 without a stop request"),
-                    **self._build_ffmpeg_log_fields(
-                        current_task,
-                        item_id,
-                        candidate_url,
-                        return_code=return_code,
+                    self._ffmpeg_event_exception("ffmpeg exited with code 15 without a stop request"),
+                    current_task,
+                    item_id,
+                    candidate_url,
+                    return_code=return_code,
+                    state=current_state,
+                    stop_reason=stop_reason,
+                    recent_output=" | ".join(recent_lines)[:240],
+                    **self._build_ffmpeg_runtime_fields(
+                        ffmpeg_path,
                         retry_count=_unexpected_retry_count + 1,
-                        state=current_state,
-                        stop_reason=stop_reason,
-                        ffmpeg_path=ffmpeg_path,
-                        ffmpeg_version=ffmpeg_version or None,
-                        cmd_preview=_ffmpeg_command_preview(cmd),
-                        recent_output=" | ".join(recent_lines)[:240],
+                        cmd=cmd,
+                        ffmpeg_version=ffmpeg_version,
                     ),
                 )
                 retry_index = min(_unexpected_retry_count, len(FFMPEG_UNEXPECTED_RETRY_DELAYS) - 1)
@@ -5182,6 +5605,36 @@ class DownloadManagerApp:
                     referer=referer,
                     origin=origin,
                     _unexpected_retry_count=_unexpected_retry_count + 1,
+                    _native_fallback_done=_native_fallback_done,
+                )
+
+            if return_code == 15 and not _native_fallback_done and self._get_task_source_site(current_task) == "gimy":
+                write_error_log(
+                    "ffmpeg handoff to yt-dlp native",
+                    self._ffmpeg_event_exception("ffmpeg code 15 fallback to yt-dlp native"),
+                    **self._build_ffmpeg_log_fields(
+                        current_task,
+                        item_id,
+                        candidate_url,
+                        return_code=return_code,
+                        state=current_state,
+                        stop_reason=stop_reason,
+                        recent_output=" | ".join(recent_lines)[:240],
+                        **self._build_ffmpeg_runtime_fields(
+                            ffmpeg_path,
+                            retry_count=_unexpected_retry_count,
+                            cmd=cmd,
+                            ffmpeg_version=ffmpeg_version,
+                        ),
+                    ),
+                )
+                return self._download_m3u8_with_ytdlp_native(
+                    item_id,
+                    candidate_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
                 )
 
             last_error = Exception(f"FFmpeg exited with code {return_code}: {' | '.join(recent_lines)[:240]}")
@@ -5554,6 +6007,10 @@ class DownloadManagerApp:
             return None
 
         parsed_url = urllib.parse.urlparse(url)
+        if _is_mega_url(url):
+            self._set_task_site_parsing_ui(item_id, "eta_site_mega", "正在解析 MEGA...")
+            self._download_mega_public_file(item_id, url, save_dir, is_mp3=is_mp3)
+            return
         if any(host in parsed_url.netloc for host in ("instagram.com", "facebook.com", "threads.net")):
             social_cookie_sources = [source for source in _detect_browser_cookie_sources() if source and source[0] == "firefox"]
             if social_cookie_sources:
