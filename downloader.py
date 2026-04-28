@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
 
-APP_BUILD = "20260428-2330"
+APP_BUILD = "20260428-2340"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -69,8 +69,17 @@ RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS = 2.0
 RESUME_PROGRESS_MIN_BYTES_DELTA = 2 * 1024 * 1024
 ERROR_LOG_DEDUPE_WINDOW_SECONDS = 2.0
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-FFMPEG_WINDOWS_FFMPEG_URL = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-win-64.zip"
-FFMPEG_WINDOWS_FFPROBE_URL = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffprobe-6.1-win-64.zip"
+FFMPEG_WINDOWS_FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+FFMPEG_WINDOWS_FFPROBE_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+FFMPEG_HLS_RECONNECT_OPTIONS = (
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_on_network_error", "1",
+    "-reconnect_on_http_error", "4xx,5xx",
+    "-reconnect_delay_max", "10",
+    "-reconnect_max_retries", "20",
+)
+FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
 IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1")
@@ -1584,6 +1593,64 @@ def install_ffmpeg_to_app_dir(progress_callback=None):
                     os.remove(zip_path)
             except Exception:
                 pass
+
+
+_FFMPEG_VERSION_SUMMARY_CACHE = {}
+
+
+def _get_ffmpeg_version_summary(ffmpeg_path):
+    clean_path = str(ffmpeg_path or "").strip()
+    if not clean_path:
+        return ""
+    cached = _FFMPEG_VERSION_SUMMARY_CACHE.get(clean_path)
+    if cached is not None:
+        return cached
+    summary = ""
+    try:
+        startupinfo = None
+        creationflags = 0
+        if platform.system() == "Windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(
+            [clean_path, "-version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=15,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
+        first_line = ""
+        for line in (proc.stdout or "").splitlines():
+            first_line = line.strip()
+            if first_line:
+                break
+        summary = first_line[:160]
+    except Exception:
+        summary = ""
+    _FFMPEG_VERSION_SUMMARY_CACHE[clean_path] = summary
+    return summary
+
+
+def _ffmpeg_command_preview(cmd):
+    preview_parts = []
+    skip_next_header_value = False
+    for part in cmd:
+        if skip_next_header_value:
+            preview_parts.append("<headers>")
+            skip_next_header_value = False
+            continue
+        text = str(part)
+        if text == "-headers":
+            preview_parts.append(text)
+            skip_next_header_value = True
+            continue
+        preview_parts.append(text)
+    return " ".join(preview_parts)[:400]
 
 
 def acquire_single_instance_lock():
@@ -4289,8 +4356,7 @@ class DownloadManagerApp:
         return False
 
     def _set_task_paused_ui(self, item_id, message="-"):
-        self._set_task_speed_eta_text(item_id, message)
-        self._set_task_status_text(item_id, self._paused_status_text())
+        self._set_task_runtime_status_ui(item_id, self._paused_status_text(), message)
 
     def _set_task_column_text(self, item_id, column, value):
         self.update_tree(item_id, column, value, force=True)
@@ -4306,8 +4372,7 @@ class DownloadManagerApp:
 
     def _set_task_finished_ui(self, item_id, message="-"):
         self._set_task_progress_complete_ui(item_id)
-        self._set_task_status_text(item_id, self._finished_status_text())
-        self._set_task_speed_eta_text(item_id, message)
+        self._set_task_runtime_status_ui(item_id, self._finished_status_text(), message)
 
     def _update_task_size_from_file(self, item_id, filename):
         if filename and os.path.exists(filename):
@@ -4320,14 +4385,17 @@ class DownloadManagerApp:
         _set_task_stop_fields(task, "FINISHED", resume_requested=(False if clear_resume_requested else None))
         remove_from_state(self._get_task_url(task))
 
-    def _set_task_downloading_ui(self, item_id, message=None):
-        status_text = self._downloading_status_text()
+    def _set_task_runtime_status_ui(self, item_id, status_text, message=None):
         task = self.tasks.get(item_id)
         if task is not None:
             _set_task_last_status_text(task, status_text)
         self._set_task_status_text(item_id, status_text)
         if message is not None:
             self._set_task_speed_eta_text(item_id, message)
+
+    def _set_task_downloading_ui(self, item_id, message=None):
+        status_text = self._downloading_status_text()
+        self._set_task_runtime_status_ui(item_id, status_text, message)
 
     def _processing_status_text(self):
         return self._status_text("status_processing", "整理中")
@@ -4343,12 +4411,7 @@ class DownloadManagerApp:
 
     def _set_task_processing_ui(self, item_id, message=None):
         status_text = self._processing_status_text()
-        task = self.tasks.get(item_id)
-        if task is not None:
-            _set_task_last_status_text(task, status_text)
-        self._set_task_status_text(item_id, status_text)
-        if message is not None:
-            self._set_task_speed_eta_text(item_id, message)
+        self._set_task_runtime_status_ui(item_id, status_text, message)
 
     def _eta_direct_media_text(self):
         return self._ui_text("eta_direct_media", "直接媒體下載")
@@ -4365,12 +4428,6 @@ class DownloadManagerApp:
     def _message_file_exists_text(self):
         return self._ui_text("msg_file_exists", "檔案已存在")
 
-    def _eta_site_text(self, key, fallback):
-        return self._ui_text(key, fallback)
-
-    def _set_task_site_parsing_ui(self, item_id, key, fallback):
-        self._set_task_speed_eta_text(item_id, self._eta_site_text(key, fallback))
-
     def _set_task_name_text(self, item_id, value):
         self._set_task_column_text(item_id, "name", value)
 
@@ -4380,33 +4437,47 @@ class DownloadManagerApp:
     def _set_task_parse_eta_text(self, item_id, value):
         self._set_task_speed_eta_text(item_id, value)
 
+    def _set_task_parse_eta_by_key(self, item_id, key, fallback):
+        self._set_task_parse_eta_text(item_id, self._ui_text(key, fallback))
+
+    def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
+        if error is not None:
+            self._set_task_parse_eta_text(item_id, self._site_parse_error_text(error))
+            return
+        if message is not None:
+            self._set_task_parse_eta_text(item_id, message)
+            return
+        self._set_task_parse_eta_by_key(item_id, key, fallback)
+
+    def _set_task_site_parsing_ui(self, item_id, key, fallback):
+        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
+
     def _set_task_direct_media_ui(self, item_id):
-        self._set_task_parse_eta_text(item_id, self._eta_direct_media_text())
+        self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="直接媒體下載")
 
     def _set_task_found_media_ui(self, item_id):
-        self._set_task_parse_eta_text(item_id, self._eta_found_media_text())
+        self._set_task_parse_ui(item_id, key="eta_found_media", fallback="已取得媒體網址")
 
     def _set_task_found_stream_ui(self, item_id):
-        self._set_task_parse_eta_text(item_id, self._eta_found_stream_text())
+        self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="已取得串流網址")
 
     def _set_task_fallback_parser_ui(self, item_id, message):
-        self._set_task_parse_eta_text(item_id, message)
+        self._set_task_parse_ui(item_id, message=message)
 
     def _set_task_parse_error_ui(self, item_id, error):
-        self._set_task_parse_eta_text(item_id, self._site_parse_error_text(error))
+        self._set_task_parse_ui(item_id, error=error)
 
     def _site_parse_error_prefix(self):
         return self._ui_text("err_site_parse", "解析失敗")
 
-    def _site_parse_error_text(self, error):
-        return f"{self._site_parse_error_prefix()}: {str(error)[:40]}"
+    def _site_parse_error_text(self, error, limit=40):
+        return f"{self._site_parse_error_prefix()}: {str(error)[:max(int(limit or 0), 0)]}"
 
     def _schedule_site_parse_error(self, error, limit=80):
-        self._schedule_error(f"{self._site_parse_error_prefix()}: {str(error)[:limit]}")
+        self._schedule_error(self._site_parse_error_text(error, limit=limit))
 
     def _set_task_error_ui(self, item_id, message):
-        self._set_task_status_text(item_id, self._error_status_text())
-        self._set_task_speed_eta_text(item_id, message)
+        self._set_task_runtime_status_ui(item_id, self._error_status_text(), message)
 
     def _set_task_progress_unknown_ui(self, item_id):
         self._set_task_progress_text(item_id, "--")
@@ -4654,7 +4725,7 @@ class DownloadManagerApp:
             return
         self._mark_task_finished(item_id)
 
-    def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_done=False):
+    def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0):
         task = self.tasks.get(item_id, {})
         safe_name = self._get_task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
@@ -4675,6 +4746,7 @@ class DownloadManagerApp:
         ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
         if not os.path.exists(ffmpeg_path) and ffmpeg_path == os.path.join(_APP_DIR, "ffmpeg.exe"):
             raise FileNotFoundError("ffmpeg.exe was not found in the application directory")
+        ffmpeg_version = _get_ffmpeg_version_summary(ffmpeg_path)
 
         candidate_urls = _dedupe_download_urls([url] + self._get_task_fallback_urls(task, primary_url=url))
 
@@ -4808,6 +4880,9 @@ class DownloadManagerApp:
                     total_duration=total_duration,
                     total_bytes=total_bytes,
                     average_media_bps=average_media_bps,
+                    ffmpeg_path=ffmpeg_path,
+                    ffmpeg_version=ffmpeg_version or None,
+                    retry_count=_unexpected_retry_count,
                 ),
             )
 
@@ -4827,6 +4902,7 @@ class DownloadManagerApp:
                 "-headers",
                 headers,
             ]
+            cmd += list(FFMPEG_HLS_RECONNECT_OPTIONS)
             if resume_seconds > 0:
                 cmd += ["-ss", f"{resume_seconds:.3f}"]
             cmd += ["-i", candidate_url]
@@ -5078,7 +5154,7 @@ class DownloadManagerApp:
                     raise StopDownloadException("pause requested")
                 raise KeyboardInterrupt()
 
-            if return_code == 15 and not _unexpected_retry_done:
+            if return_code == 15 and _unexpected_retry_count < len(FFMPEG_UNEXPECTED_RETRY_DELAYS):
                 write_error_log(
                     "ffmpeg unexpected termination retry",
                     Exception("ffmpeg exited with code 15 without a stop request"),
@@ -5087,13 +5163,17 @@ class DownloadManagerApp:
                         item_id,
                         candidate_url,
                         return_code=return_code,
-                        retry_count=1,
+                        retry_count=_unexpected_retry_count + 1,
                         state=current_state,
                         stop_reason=stop_reason,
+                        ffmpeg_path=ffmpeg_path,
+                        ffmpeg_version=ffmpeg_version or None,
+                        cmd_preview=_ffmpeg_command_preview(cmd),
                         recent_output=" | ".join(recent_lines)[:240],
                     ),
                 )
-                time.sleep(1.0)
+                retry_index = min(_unexpected_retry_count, len(FFMPEG_UNEXPECTED_RETRY_DELAYS) - 1)
+                time.sleep(FFMPEG_UNEXPECTED_RETRY_DELAYS[retry_index])
                 return self._download_m3u8_with_ffmpeg(
                     item_id,
                     candidate_url,
@@ -5101,7 +5181,7 @@ class DownloadManagerApp:
                     is_mp3=is_mp3,
                     referer=referer,
                     origin=origin,
-                    _unexpected_retry_done=True,
+                    _unexpected_retry_count=_unexpected_retry_count + 1,
                 )
 
             last_error = Exception(f"FFmpeg exited with code {return_code}: {' | '.join(recent_lines)[:240]}")
@@ -5788,6 +5868,7 @@ class DownloadManagerApp:
             page_title = _extract_html_title(resp_text, short_name)
             fallback_urls = ordered_candidates[1:] if len(ordered_candidates) > 1 else []
             _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
+            self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
@@ -5804,6 +5885,7 @@ class DownloadManagerApp:
                 raise Exception("Gimy stream URL missing")
             page_title = _extract_html_title(resp.text, short_name)
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=[])
+            self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=[])
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
