@@ -51,7 +51,7 @@ except Exception:  # pragma: no cover - readable reconstruction only
     yt_dlp = None
 
 
-APP_BUILD = "20260427-2310"
+APP_BUILD = "20260428-2330"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -637,8 +637,8 @@ def _dedupe_download_urls(candidates, primary_url=None):
 
 
 def _task_field_value(task, field_name, default=None):
-    task = task or {}
-    return task.get(field_name, default)
+    target = task if task is not None else {}
+    return target.get(field_name, default)
 
 
 def _task_source_site_name(task, fallback_site=""):
@@ -679,12 +679,12 @@ def _task_name_text(task, fallback_name=""):
 
 
 def _set_task_name_fields(task, name):
-    task = task or {}
+    target = task if task is not None else {}
     cleaned_name = str(name or "").strip()
     if not cleaned_name:
         return ""
-    task["short_name"] = cleaned_name
-    task["name"] = cleaned_name
+    target["short_name"] = cleaned_name
+    target["name"] = cleaned_name
     return cleaned_name
 
 
@@ -692,6 +692,13 @@ def _task_output_basename(task, fallback_name):
     name = _task_name_text(task, fallback_name=fallback_name)
     safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip()
     return safe_name or fallback_name
+
+
+def _output_name_from_path(path, fallback_name=""):
+    clean_path = str(path or "").strip()
+    if not clean_path:
+        return fallback_name
+    return os.path.basename(clean_path) or fallback_name
 
 
 def _task_output_path_value(task, prefer_temp=False, default=""):
@@ -707,7 +714,6 @@ def _task_output_path_value(task, prefer_temp=False, default=""):
 
 
 def _task_display_name(task, fallback_url="", fallback_name="", default_is_mp3=False):
-    task = task or {}
     task_name = _task_name_text(task, fallback_name="")
     if task_name:
         return task_name
@@ -721,38 +727,38 @@ def _task_display_name(task, fallback_url="", fallback_name="", default_is_mp3=F
 
 
 def _set_task_source_fields(task, source_site=None, source_page=None, fallback_urls=None, primary_url=None):
-    task = task or {}
+    target = task if task is not None else {}
     updates = {}
     if source_site:
         normalized_site = str(source_site).strip().lower()
-        task["source_site"] = normalized_site
+        target["source_site"] = normalized_site
         updates["source_site"] = normalized_site
     if source_page:
         normalized_page = _normalize_download_url(source_page)
         if normalized_page:
-            task["source_page"] = normalized_page
+            target["source_page"] = normalized_page
             updates["source_page"] = normalized_page
     if fallback_urls is not None:
         normalized_urls = _dedupe_download_urls(fallback_urls, primary_url=primary_url)
-        task["fallback_urls"] = normalized_urls
+        target["fallback_urls"] = normalized_urls
         updates["fallback_urls"] = normalized_urls
     return updates
 
 
 def _set_task_state_fields(task, state=None, **fields):
-    task = task or {}
+    target = task if task is not None else {}
     if state is not None:
-        task["state"] = state
+        target["state"] = state
     for key, value in fields.items():
-        task[key] = value
-    return task
+        target[key] = value
+    return target
 
 
 def _set_task_aux_fields(task, **fields):
-    task = task or {}
+    target = task if task is not None else {}
     for key, value in fields.items():
-        task[key] = value
-    return task
+        target[key] = value
+    return target
 
 
 def _set_task_process_handle(task, proc=None):
@@ -767,15 +773,14 @@ def _set_task_last_status_text(task, status_text):
 
 
 def _set_task_transfer_metrics(task, downloaded_bytes=None, total_bytes=None):
-    task = task or {}
     fields = {}
     if downloaded_bytes is not None:
         fields["downloaded_bytes"] = downloaded_bytes
     if total_bytes is not None:
         fields["total_bytes"] = total_bytes
     if fields:
-        _set_task_aux_fields(task, **fields)
-    return task
+        return _set_task_aux_fields(task, **fields)
+    return task if task is not None else {}
 
 
 def _set_task_stop_fields(task, state=None, stop_reason=Ellipsis, resume_requested=None, **fields):
@@ -788,8 +793,7 @@ def _set_task_stop_fields(task, state=None, stop_reason=Ellipsis, resume_request
 
 
 def _task_state_value(task, default=""):
-    task = task or {}
-    return str(task.get("state", default) or default)
+    return str(_task_field_value(task, "state", default) or default)
 
 
 def _task_in_states(task, *states):
@@ -797,18 +801,15 @@ def _task_in_states(task, *states):
 
 
 def _task_last_status_text(task, default=""):
-    task = task or {}
-    return str(task.get("_last_status_text", default) or default)
+    return str(_task_field_value(task, "_last_status_text", default) or default)
 
 
 def _task_stop_reason_value(task, default=None):
-    task = task or {}
-    return task.get("_stop_reason", default)
+    return _task_field_value(task, "_stop_reason", default)
 
 
 def _task_process_handle(task, default=None):
-    task = task or {}
-    return task.get("_proc", default)
+    return _task_field_value(task, "_proc", default)
 
 
 def _event_downloaded_bytes(info, default=0):
@@ -1252,7 +1253,6 @@ def load_state():
 
 
 def _match_forced_m3u8_site(url, task=None):
-    task = task or {}
     normalized_url = _normalize_download_url(url)
     if not normalized_url.lower().endswith(".m3u8"):
         return None
@@ -1391,9 +1391,17 @@ def app_title_text():
     return f"{t('app_title')} v{app_version_text()}"
 
 
+def _dialog_title_text_fallback(key, fallback):
+    translated = t(key)
+    return translated if translated != key else fallback
+
+
 def _warning_title_text_fallback():
-    translated = t("msg_warning")
-    return translated if translated != "msg_warning" else "警告"
+    return _dialog_title_text_fallback("msg_warning", "警告")
+
+
+def _error_title_text_fallback():
+    return _dialog_title_text_fallback("msg_error", "錯誤")
 
 
 def unpack_packed_javascript(text):
@@ -1583,16 +1591,41 @@ def acquire_single_instance_lock():
     if platform.system() != "Windows":
         return True
     try:
-        kernel32 = ctypes.windll.kernel32
-        mutex_name = "Global\\AiTetsDownloaderSingleInstance"
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        mutex_name = "Global\\AiTestDownloaderSingleInstance"
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+        ctypes.set_last_error(0)
         handle = kernel32.CreateMutexW(None, False, mutex_name)
         if not handle:
             return True
+        already_exists = ctypes.get_last_error() == 183
+        if already_exists:
+            kernel32.CloseHandle(handle)
+            single_instance_mutex = None
+            return False
         single_instance_mutex = handle
-        already_exists = kernel32.GetLastError() == 183
-        return not already_exists
+        return True
     except Exception:
         return True
+
+
+def release_single_instance_lock():
+    global single_instance_mutex
+    if platform.system() != "Windows" or not single_instance_mutex:
+        single_instance_mutex = None
+        return
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_bool
+        kernel32.CloseHandle(single_instance_mutex)
+    except Exception:
+        pass
+    finally:
+        single_instance_mutex = None
 
 
 def make_context_menu(widget):
@@ -2988,11 +3021,23 @@ class DownloadManagerApp:
     def _queued_status_text(self):
         return self._status_text("status_queued", "排隊中")
 
+    def _paused_status_text(self):
+        return self._status_text("status_paused", "已暫停")
+
+    def _finished_status_text(self):
+        return self._status_text("status_done", "完成")
+
+    def _error_status_text(self):
+        return self._status_text("status_error", "錯誤")
+
     def _status_text(self, key, fallback):
         return self._eta_or_status_text(key, fallback)
 
+    def _dialog_title_text(self, key, fallback):
+        return _dialog_title_text_fallback(key, fallback)
+
     def _warning_title_text(self):
-        return _warning_title_text_fallback()
+        return self._dialog_title_text("msg_warning", "警告")
 
     def _show_warning(self, message, parent=None):
         messagebox.showwarning(self._warning_title_text(), message, parent=parent)
@@ -3004,8 +3049,7 @@ class DownloadManagerApp:
         return messagebox.askyesno(self._warning_title_text(), message, parent=parent)
 
     def _error_title_text(self):
-        translated = t("msg_error")
-        return translated if translated != "msg_error" else "錯誤"
+        return self._dialog_title_text("msg_error", "錯誤")
 
     def _show_error(self, message, parent=None):
         messagebox.showerror(self._error_title_text(), message, parent=parent)
@@ -3075,7 +3119,6 @@ class DownloadManagerApp:
         return _task_url_value(task, fallback_url=fallback_url)
 
     def _get_task_fallback_urls(self, task, primary_url=None):
-        task = task or {}
         if primary_url is None:
             primary_url = self._get_task_url(task)
         return _task_fallback_urls_list(task, primary_url=primary_url)
@@ -3087,7 +3130,6 @@ class DownloadManagerApp:
         return _task_source_site_name(task, fallback_site=fallback_site)
 
     def _build_extra_task_data_from_task(self, task, primary_url=None, fallback_url=""):
-        task = task or {}
         return self._build_extra_task_data(
             source_page=self._get_task_source_page(task, fallback_url=fallback_url),
             fallback_urls=self._get_task_fallback_urls(task, primary_url=primary_url),
@@ -3111,7 +3153,6 @@ class DownloadManagerApp:
         return _task_output_path_value(task, prefer_temp=prefer_temp, default=default)
 
     def _set_task_output_path(self, task, item_id, path, temp=False):
-        task = task or {}
         if temp:
             _set_task_aux_fields(task, temp_filename=path)
             return path
@@ -3131,7 +3172,6 @@ class DownloadManagerApp:
         return self._get_existing_file_size(path) >= max(int(min_bytes or 0), 1)
 
     def _update_task_state_entry(self, task, **fields):
-        task = task or {}
         url = self._get_task_url(task)
         if not url:
             return
@@ -3148,7 +3188,6 @@ class DownloadManagerApp:
             update_state_entry(url, **updates)
 
     def _log_m3u8_route_selected(self, task, item_id, media_url, source_site=None, fallback_urls=None):
-        task = task or {}
         site = self._get_task_source_site(task, fallback_site=source_site or "")
         fallback_count = len(
             self._normalize_fallback_urls(
@@ -3166,7 +3205,6 @@ class DownloadManagerApp:
         )
 
     def _build_ffmpeg_log_fields(self, task, item_id, media_url, **extra):
-        task = task or {}
         fields = {
             "url": media_url,
             "item_id": item_id,
@@ -4252,20 +4290,23 @@ class DownloadManagerApp:
 
     def _set_task_paused_ui(self, item_id, message="-"):
         self._set_task_speed_eta_text(item_id, message)
-        self._set_task_status_text(item_id, self._status_text("status_paused", "已暫停"))
+        self._set_task_status_text(item_id, self._paused_status_text())
 
     def _set_task_column_text(self, item_id, column, value):
         self.update_tree(item_id, column, value, force=True)
 
+    def _set_task_progress_text(self, item_id, value):
+        self._set_task_column_text(item_id, "progress", value)
+
     def _set_task_progress_complete_ui(self, item_id):
-        self._set_task_column_text(item_id, "progress", "100%")
+        self._set_task_progress_text(item_id, "100%")
 
     def _set_task_progress_percent_ui(self, item_id, percent):
-        self._set_task_column_text(item_id, "progress", f"{percent:.1f}%")
+        self._set_task_progress_text(item_id, f"{percent:.1f}%")
 
     def _set_task_finished_ui(self, item_id, message="-"):
         self._set_task_progress_complete_ui(item_id)
-        self._set_task_status_text(item_id, self._status_text("status_done", "完成"))
+        self._set_task_status_text(item_id, self._finished_status_text())
         self._set_task_speed_eta_text(item_id, message)
 
     def _update_task_size_from_file(self, item_id, filename):
@@ -4289,7 +4330,7 @@ class DownloadManagerApp:
             self._set_task_speed_eta_text(item_id, message)
 
     def _processing_status_text(self):
-        return self._eta_or_status_text("status_processing", "整理中")
+        return self._status_text("status_processing", "整理中")
 
     def _processing_eta_text(self):
         return self._eta_or_status_text("eta_processing", "整理中")
@@ -4334,37 +4375,41 @@ class DownloadManagerApp:
         self._set_task_column_text(item_id, "name", value)
 
     def _set_task_output_name(self, item_id, path):
-        self._set_task_name_text(item_id, os.path.basename(path))
+        self._set_task_name_text(item_id, _output_name_from_path(path))
+
+    def _set_task_parse_eta_text(self, item_id, value):
+        self._set_task_speed_eta_text(item_id, value)
 
     def _set_task_direct_media_ui(self, item_id):
-        self._set_task_speed_eta_text(item_id, self._eta_direct_media_text())
+        self._set_task_parse_eta_text(item_id, self._eta_direct_media_text())
 
     def _set_task_found_media_ui(self, item_id):
-        self._set_task_speed_eta_text(item_id, self._eta_found_media_text())
+        self._set_task_parse_eta_text(item_id, self._eta_found_media_text())
 
     def _set_task_found_stream_ui(self, item_id):
-        self._set_task_speed_eta_text(item_id, self._eta_found_stream_text())
+        self._set_task_parse_eta_text(item_id, self._eta_found_stream_text())
 
     def _set_task_fallback_parser_ui(self, item_id, message):
-        self._set_task_speed_eta_text(item_id, message)
+        self._set_task_parse_eta_text(item_id, message)
 
     def _set_task_parse_error_ui(self, item_id, error):
-        self._set_task_speed_eta_text(item_id, self._site_parse_error_text(error))
+        self._set_task_parse_eta_text(item_id, self._site_parse_error_text(error))
+
+    def _site_parse_error_prefix(self):
+        return self._ui_text("err_site_parse", "解析失敗")
 
     def _site_parse_error_text(self, error):
-        prefix = t("err_site_parse") if "err_site_parse" in I18N_DICT.get(CURRENT_LANG, {}) else "解析失敗"
-        return f"{prefix}: {str(error)[:40]}"
+        return f"{self._site_parse_error_prefix()}: {str(error)[:40]}"
 
     def _schedule_site_parse_error(self, error, limit=80):
-        prefix = t("err_site_parse") if "err_site_parse" in I18N_DICT.get(CURRENT_LANG, {}) else "解析失敗"
-        self._schedule_error(f"{prefix}: {str(error)[:limit]}")
+        self._schedule_error(f"{self._site_parse_error_prefix()}: {str(error)[:limit]}")
 
     def _set_task_error_ui(self, item_id, message):
-        self._set_task_status_text(item_id, self._status_text("status_error", "錯誤"))
+        self._set_task_status_text(item_id, self._error_status_text())
         self._set_task_speed_eta_text(item_id, message)
 
     def _set_task_progress_unknown_ui(self, item_id):
-        self._set_task_column_text(item_id, "progress", "--")
+        self._set_task_progress_text(item_id, "--")
 
     def _set_task_size_text(self, item_id, value):
         self._set_task_column_text(item_id, "size", value)
@@ -4567,7 +4612,7 @@ class DownloadManagerApp:
                                 future.cancel()
                             if current_task_state == "PAUSE_REQUESTED":
                                 _set_task_state_fields(self.tasks[item_id], "PAUSED")
-                                self._set_task_status_text(item_id, self._status_text("status_paused", "已暫停"))
+                                self._set_task_status_text(item_id, self._paused_status_text())
                             return
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         required_bytes = max(total_size - multi_downloaded, 0) if total_size > 0 else None
@@ -6172,6 +6217,11 @@ class DownloadManagerApp:
 
 def main():
     if not acquire_single_instance_lock():
+        try:
+            with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock denied build={APP_BUILD} app_dir={_APP_DIR}\n")
+        except Exception:
+            pass
         warning_root = tk.Tk()
         warning_root.withdraw()
         warning_root.attributes("-topmost", True)
@@ -6195,7 +6245,10 @@ def main():
     else:
         root = tk.Tk()
     app = DownloadManagerApp(root)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        release_single_instance_lock()
 
 
 if __name__ == "__main__":
