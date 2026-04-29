@@ -56,7 +56,7 @@ except Exception:  # pragma: no cover - optional integration
     MegaClient = None
 
 
-APP_BUILD = "20260429-2370"
+APP_BUILD = "20260429-2380"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -65,6 +65,7 @@ else:
 CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
 STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
 ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
+TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
 MAX_DOWNLOADS_PER_DOMAIN = 3
 MAX_DOWNLOADS_PER_SOURCE_PAGE = 1
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
@@ -112,6 +113,23 @@ STOP_REASON_PAUSE = "pause"
 STOP_REASON_DELETE = "delete"
 STOP_REASONS = frozenset((STOP_REASON_PAUSE, STOP_REASON_DELETE))
 _ERROR_LOG_RECENT = {}
+TRACE_LOG_CONTEXTS = frozenset((
+    "app start",
+    "single instance lock denied",
+    "m3u8 route selected",
+    "preferred native hls route selected",
+    "ffmpeg download started",
+    "ffmpeg download finished",
+    "ffmpeg direct audio started",
+    "ffmpeg direct audio finished",
+    "yt-dlp native hls fallback started",
+    "yt-dlp native hls fallback finished",
+    "xiaoyakankan parse start",
+    "xiaoyakankan parse success",
+    "instagram savereels fallback",
+    "instagram extractor fallback",
+    "facebook extractor fallback",
+))
 
 FORCED_M3U8_SITE_RULES = {
     "jable": {
@@ -1247,6 +1265,91 @@ def _extract_movieffm_m3u8_candidates(page_html):
     return _dedupe_download_urls(candidates)
 
 
+def _extract_movieffm_detail_page_urls(page_html, current_url=None):
+    current_url = _normalize_download_url(current_url)
+    detail_urls = []
+    for match in re.finditer(r'href=["\'](https?://www\.movieffm\.net/drama/\d+/)["\']', str(page_html or ""), re.IGNORECASE):
+        candidate = _normalize_download_url(html.unescape(match.group(1)).strip())
+        if candidate and candidate != current_url:
+            detail_urls.append(candidate)
+    return _dedupe_download_urls(detail_urls)
+
+
+def _decode_js_escaped_text(value):
+    text = str(value or "").strip()
+    if "\\u" not in text and "\\x" not in text:
+        return text
+    try:
+        return bytes(text, "utf-8").decode("unicode_escape")
+    except Exception:
+        return text
+
+
+def _normalize_movieffm_episode_name(name_text):
+    cleaned = re.sub(r"<[^>]+>", "", html.unescape(str(name_text or "")).strip())
+    cleaned = _decode_js_escaped_text(cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _movieffm_numbered_episode_key(name_text):
+    cleaned = re.sub(r"\s+", " ", str(name_text or "").strip())
+    match = re.fullmatch(r"0*(\d{1,3})", cleaned)
+    if not match:
+        return ""
+    num = int(match.group(1))
+    return f"{num:02d}" if num < 100 else str(num)
+
+
+def _collect_movieffm_drama_episodes(page_html, page_url, fallback_title="MovieFFM"):
+    text = str(page_html or "")
+    page_url = _normalize_download_url(page_url)
+    title_match = re.search(r"<title>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+    drama_title = str(fallback_title or "MovieFFM").strip() or "MovieFFM"
+    if title_match:
+        drama_title = html.unescape(title_match.group(1)).split("-")[0].strip() or drama_title
+        drama_title = "".join(c for c in drama_title if c not in '\\/:*?"<>|')
+    episodes = []
+    seen_urls = set()
+    seen_names = set()
+    episode_fallbacks = {}
+
+    def add_episode(ep_url, ep_name, allow_direct_m3u8=False):
+        if not ep_url:
+            return
+        cleaned_url = html.unescape(str(ep_url)).replace("\\/", "/").strip()
+        cleaned_url = urllib.parse.urljoin(page_url, cleaned_url)
+        if not cleaned_url.startswith("http"):
+            return
+        if cleaned_url.lower().endswith(".m3u8") and not allow_direct_m3u8:
+            return
+        cleaned_name = _normalize_movieffm_episode_name(ep_name)
+        if not cleaned_name:
+            tail = urllib.parse.urlparse(cleaned_url).path.rstrip("/").split("/")[-1]
+            cleaned_name = tail or "Episode"
+        episode_key = _movieffm_numbered_episode_key(cleaned_name)
+        if episode_key:
+            cleaned_name = episode_key
+        else:
+            return
+        bucket = episode_fallbacks.setdefault(episode_key, [])
+        if cleaned_url not in bucket:
+            bucket.append(cleaned_url)
+        if cleaned_url in seen_urls or episode_key in seen_names:
+            return
+        full_name = f"{drama_title} {cleaned_name}".strip()
+        seen_urls.add(cleaned_url)
+        seen_names.add(episode_key)
+        episodes.append((cleaned_url, full_name))
+
+    for name, ep_url in re.findall(r'"name"\s*:\s*"([^"]+)"\s*,\s*"url"\s*:\s*"([^"]+)"', text):
+        add_episode(ep_url, name, allow_direct_m3u8=ep_url.lower().endswith(".m3u8"))
+    for ep_url in re.findall(r'https://www\.movieffm\.net/[^"\']+', text):
+        if "/play/" in ep_url or "/vodplay/" in ep_url or "/episode/" in ep_url:
+            add_episode(ep_url, _derive_task_name_from_url(ep_url))
+    return drama_title, episodes, episode_fallbacks
+
+
 def _build_gimy_iframe_urls(page_url, player_data):
     player_data = player_data or {}
     play_url = str(player_data.get("url") or "").strip()
@@ -1310,6 +1413,14 @@ def _extract_gimy_episode_page_urls(page_html, page_url, current_url=None):
     return urls
 
 
+def _looks_like_direct_media_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    lower = normalized.lower()
+    return any(token in lower for token in (".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".mp3", ".m4a"))
+
+
 def save_state_entries(entries):
     _atomic_json_dump(STATE_FILE, entries)
 
@@ -1361,6 +1472,10 @@ class UIThrottler:
         self._lock = threading.Lock()
         self._flush_scheduled = False
 
+    def _flush_delay_ms(self):
+        interval = max(float(self.update_interval or 0.0), 0.12)
+        return max(120, int(interval * 1000))
+
     def update(self, item_id, col, value, force=False):
         if col == "status":
             force = True
@@ -1379,7 +1494,7 @@ class UIThrottler:
                 return
             self._flush_scheduled = True
         try:
-            self.root.after(120, self._flush_updates)
+            self.root.after(self._flush_delay_ms(), self._flush_updates)
         except Exception:
             with self._lock:
                 self._flush_scheduled = False
@@ -1452,10 +1567,12 @@ def _match_forced_m3u8_site(url, task=None):
 def _should_prefer_native_hls(url, task=None):
     parsed = urllib.parse.urlparse(str(url or ""))
     host = str(parsed.netloc or "").strip().lower()
+    source_site = _task_source_site_name(task)
+    if source_site != "gimy":
+        return False
     if host in NATIVE_HLS_PREFERRED_HOSTS:
         return True
-    source_site = _task_source_site_name(task)
-    return source_site == "gimy" and host.endswith(".xluuss.com")
+    return host.endswith(".xluuss.com")
 
 
 def _native_hls_source_site(task=None):
@@ -1710,7 +1827,9 @@ def create_taiwan_map_icon():
 def write_error_log(context, exc, **extra):
     try:
         now = time.time()
+        log_path = TRACE_LOG_FILE if context in TRACE_LOG_CONTEXTS else ERROR_LOG_FILE
         signature = (
+            log_path,
             context,
             type(exc).__name__,
             str(exc),
@@ -1735,7 +1854,7 @@ def write_error_log(context, exc, **extra):
         lines.append("traceback:")
         lines.append("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip())
         lines.append("--------------------------------------------------------------------------------")
-        with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
     except Exception:
         return
@@ -2571,60 +2690,7 @@ class DownloadManagerApp:
             try:
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(new_url, impersonate="chrome110", timeout=15, headers={"Referer": new_url})
-                text = resp.text
-                title_match = re.search(r"<title>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
-                drama_title = "MovieFFM"
-                if title_match:
-                    drama_title = html.unescape(title_match.group(1)).split("-")[0].strip() or drama_title
-                    drama_title = "".join(c for c in drama_title if c not in '\\/:*?"<>|')
-                episodes = []
-                seen_urls = set()
-                seen_names = set()
-                episode_fallbacks = {}
-
-                def normalize_episode_key(name_text):
-                    cleaned = re.sub(r"\s+", " ", str(name_text or "").strip())
-                    match = re.search(r"(\d+)$", cleaned)
-                    if not match:
-                        return cleaned.lower()
-                    num = int(match.group(1))
-                    return f"{num:02d}" if num < 100 else str(num)
-
-                def add_episode(ep_url, ep_name, allow_direct_m3u8=False):
-                    if not ep_url:
-                        return
-                    cleaned_url = html.unescape(str(ep_url)).replace("\\/", "/").strip()
-                    cleaned_url = urllib.parse.urljoin(new_url, cleaned_url)
-                    if not cleaned_url.startswith("http"):
-                        return
-                    if cleaned_url.lower().endswith(".m3u8") and not allow_direct_m3u8:
-                        return
-                    if cleaned_url in seen_urls:
-                        return
-                    cleaned_name = re.sub(r"<[^>]+>", "", html.unescape(str(ep_name or "")).strip())
-                    cleaned_name = re.sub(r"\s+", " ", cleaned_name).strip()
-                    if not cleaned_name:
-                        tail = urllib.parse.urlparse(cleaned_url).path.rstrip("/").split("/")[-1]
-                        cleaned_name = tail or t("msg_resume_name")
-                    episode_key = normalize_episode_key(cleaned_name)
-                    if re.fullmatch(r"\d+", cleaned_name):
-                        cleaned_name = episode_key
-                    name_key = episode_key
-                    bucket = episode_fallbacks.setdefault(episode_key, [])
-                    if cleaned_url not in bucket:
-                        bucket.append(cleaned_url)
-                    if name_key in seen_names:
-                        return
-                    full_name = f"{drama_title} {cleaned_name}".strip()
-                    seen_urls.add(cleaned_url)
-                    seen_names.add(name_key)
-                    episodes.append((cleaned_url, full_name))
-
-                for name, ep_url in re.findall(r'"name"\s*:\s*"([^"]+)"\s*,\s*"url"\s*:\s*"([^"]+)"', text):
-                    add_episode(ep_url, name, allow_direct_m3u8=ep_url.lower().endswith(".m3u8"))
-                for ep_url in re.findall(r'https://www\.movieffm\.net/[^"\']+', text):
-                    if "/play/" in ep_url or "/vodplay/" in ep_url or "/episode/" in ep_url:
-                        add_episode(ep_url, _derive_task_name_from_url(ep_url))
+                drama_title, episodes, episode_fallbacks = _collect_movieffm_drama_episodes(resp.text, new_url, "MovieFFM")
                 if not episodes:
                     self._schedule_warning(t("msg_fetch_movieffm_empty"))
                     return
@@ -2632,7 +2698,7 @@ class DownloadManagerApp:
                 def enqueue():
                     targets = self._choose_playlist_targets(episodes, episodes[0])
                     for ep_url, ep_name in targets:
-                        episode_key = normalize_episode_key(ep_name.rsplit(" ", 1)[-1])
+                        episode_key = _movieffm_numbered_episode_key(ep_name.rsplit(" ", 1)[-1])
                         fallback_urls = [u for u in episode_fallbacks.get(episode_key, []) if u != ep_url]
                         self._final_add_download(
                             ep_url,
@@ -3373,6 +3439,10 @@ class DownloadManagerApp:
     def _schedule_warning(self, message, parent=None):
         self._schedule_ui_call(lambda msg=message, target=parent: self._show_warning(msg, parent=target))
 
+    def _reject_unsupported_task_page(self, item_id, warning_message):
+        self._schedule_warning(warning_message)
+        self._schedule_ui_call(lambda _item_id=item_id: (self._discard_task(_item_id), self._delete_tree_item(_item_id)))
+
     def _ask_warning_yesno(self, message, parent=None):
         return messagebox.askyesno(self._warning_title_text(), message, parent=parent)
 
@@ -3571,6 +3641,31 @@ class DownloadManagerApp:
             ),
         )
 
+    def _invalidate_m3u8_total_bytes(self, item_id, media_url, total_bytes_box, reason, estimated_total_bytes, current_bytes):
+        total_bytes_box["value"] = None
+        write_error_log(
+            "m3u8 total bytes invalidated",
+            self._ffmpeg_event_exception(reason),
+            url=media_url,
+            item_id=item_id,
+            estimated_total_bytes=estimated_total_bytes,
+            current_bytes=current_bytes,
+        )
+
+    def _should_invalidate_m3u8_total_bytes(self, current_bytes, estimated_total_bytes):
+        return bool(estimated_total_bytes and estimated_total_bytes > 0 and current_bytes > estimated_total_bytes * 1.01)
+
+    def _should_invalidate_stalled_m3u8_total(self, percent, progress_state, near_complete_since, now):
+        if percent is None or progress_state == "end":
+            return False, None
+        if percent < 99.0:
+            return False, None
+        if near_complete_since is None:
+            return False, now
+        if now - near_complete_since >= 5.0:
+            return True, near_complete_since
+        return False, near_complete_since
+
     def _terminate_ffmpeg_process(self, task, item_id, proc, media_url, reason, **extra):
         self._log_ffmpeg_event(
             "ffmpeg terminate requested",
@@ -3660,10 +3755,15 @@ class DownloadManagerApp:
 
     def _complete_if_output_exists(self, item_id):
         task = self.tasks.get(item_id, {})
+        if self._get_task_resume_requested(task):
+            return False
+        explicit_output = self._get_task_output_path(task)
+        if self._has_nonempty_file(explicit_output):
+            self._set_task_output_path(task, item_id, explicit_output)
+            self._mark_existing_file_complete(item_id, self._message_file_exists_text())
+            return True
         short_name = self._get_task_name_text(task)
         if not short_name or short_name == "Queued":
-            return False
-        if self._get_task_resume_requested(task):
             return False
         save_dir = self.save_dir_var.get()
         possible_exts = [".mp4", ".mkv", ".webm", ".mp3", ".m4a"]
@@ -5456,6 +5556,18 @@ class DownloadManagerApp:
                 except Exception:
                     pass
             self._set_task_output_path(task, item_id, actual_output)
+        if self._has_nonempty_file(self._get_task_output_path(task, default=out_path) or out_path):
+            self._mark_task_finished(item_id)
+            write_error_log(
+                "yt-dlp native hls fallback finished",
+                self._ffmpeg_event_exception("yt-dlp native hls fallback finished"),
+                url=url,
+                item_id=item_id,
+                source_site=self._get_task_source_site(task) or None,
+                output=self._get_task_output_path(task, default=out_path) or out_path,
+                bytes=self._get_existing_file_size(self._get_task_output_path(task, default=out_path) or out_path),
+            )
+            return
         if self._complete_if_output_exists(item_id):
             write_error_log(
                 "yt-dlp native hls fallback finished",
@@ -5520,7 +5632,10 @@ class DownloadManagerApp:
             raise FileNotFoundError("ffmpeg.exe was not found in the application directory")
         ffmpeg_version = _get_ffmpeg_version_summary(ffmpeg_path)
 
-        candidate_urls = _dedupe_download_urls([url] + self._get_task_fallback_urls(task, primary_url=url))
+        raw_fallback_urls = self._get_task_fallback_urls(task, primary_url=url)
+        direct_fallback_urls = [candidate for candidate in raw_fallback_urls if _looks_like_direct_media_url(candidate)]
+        deferred_fallback_urls = [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls]
+        candidate_urls = _dedupe_download_urls([url] + direct_fallback_urls)
 
         duration_box = {}
         media_bps_box = {}
@@ -5740,44 +5855,46 @@ class DownloadManagerApp:
                             active_output_bytes = 0
                         current_bytes = base_bytes + active_output_bytes
                         if active_total_bytes and active_total_bytes > 0 and progress.get("progress") != "end":
-                            if current_bytes > active_total_bytes * 1.01:
+                            if self._should_invalidate_m3u8_total_bytes(current_bytes, active_total_bytes):
                                 estimated_total_bytes = active_total_bytes
                                 invalidated_total_bytes = True
-                                total_bytes_box["value"] = None
                                 total_bytes = None
                                 active_total_bytes = None
                                 near_complete_since = None
-                                write_error_log(
-                                    "m3u8 total bytes invalidated",
-                                    Exception("actual bytes exceeded estimated total"),
-                                    url=candidate_url,
-                                    item_id=item_id,
-                                    estimated_total_bytes=estimated_total_bytes,
-                                    current_bytes=current_bytes,
+                                self._invalidate_m3u8_total_bytes(
+                                    item_id,
+                                    candidate_url,
+                                    total_bytes_box,
+                                    "actual bytes exceeded estimated total",
+                                    estimated_total_bytes,
+                                    current_bytes,
                                 )
                         if active_total_bytes and active_total_bytes > 0:
                             percent = format_progress_percent(current_bytes, active_total_bytes, cap_at_99=True)
                             if percent is not None:
                                 if progress.get("progress") != "end":
                                     percent = min(percent, 99.0)
-                                    if percent >= 99.0:
-                                        if near_complete_since is None:
-                                            near_complete_since = now
-                                        elif now - near_complete_since >= 5.0:
-                                            estimated_total_bytes = active_total_bytes
-                                            invalidated_total_bytes = True
-                                            total_bytes_box["value"] = None
-                                            total_bytes = None
-                                            active_total_bytes = None
-                                            percent = None
-                                            write_error_log(
-                                                "m3u8 total bytes invalidated",
-                                                Exception("estimated total stalled at 99% before ffmpeg end"),
-                                                url=candidate_url,
-                                                item_id=item_id,
-                                                estimated_total_bytes=estimated_total_bytes,
-                                                current_bytes=current_bytes,
-                                            )
+                                    should_invalidate_stalled_total, near_complete_since = self._should_invalidate_stalled_m3u8_total(
+                                        percent,
+                                        progress.get("progress"),
+                                        near_complete_since,
+                                        now,
+                                    )
+                                    if should_invalidate_stalled_total:
+                                        estimated_total_bytes = active_total_bytes
+                                        invalidated_total_bytes = True
+                                        total_bytes = None
+                                        active_total_bytes = None
+                                        percent = None
+                                        near_complete_since = None
+                                        self._invalidate_m3u8_total_bytes(
+                                            item_id,
+                                            candidate_url,
+                                            total_bytes_box,
+                                            "estimated total stalled at 99% before ffmpeg end",
+                                            estimated_total_bytes,
+                                            current_bytes,
+                                        )
                                 else:
                                     near_complete_since = None
                                 if percent is not None:
@@ -5968,6 +6085,25 @@ class DownloadManagerApp:
                 )
 
             last_error = Exception(f"FFmpeg exited with code {return_code}: {' | '.join(recent_lines)[:240]}")
+        if last_error and self._get_task_source_site(task) == "gimy":
+            refresh_url = next((candidate for candidate in deferred_fallback_urls if candidate), "") or self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url))
+            refresh_url = _normalize_download_url(refresh_url)
+            if refresh_url and refresh_url != _normalize_download_url(url):
+                write_error_log(
+                    "gimy source page refresh",
+                    self._ffmpeg_event_exception("refreshing gimy source page after direct stream failures"),
+                    item_id=item_id,
+                    stream_url=url,
+                    refresh_url=refresh_url,
+                    fallback_count=len(raw_fallback_urls),
+                )
+                return self._download_task_internal(
+                    refresh_url,
+                    item_id,
+                    save_dir,
+                    self._should_use_impersonation(self._get_task_url(task), self._get_task_source_site(task)),
+                    is_mp3,
+                )
         if last_error:
             raise last_error
         raise Exception("FFmpeg download failed without candidates")
@@ -6556,6 +6692,9 @@ class DownloadManagerApp:
             self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析 MovieFFM 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://www.movieffm.net/"})
+            if "/tvshows/" in parsed_url.path:
+                self._reject_unsupported_task_page(item_id, t("msg_fetch_movieffm_empty"))
+                return
             player_data = _extract_player_js_object(resp.text, "player_aaaa")
             candidates = []
             if player_data:
@@ -6577,6 +6716,25 @@ class DownloadManagerApp:
             _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=candidates[1:])
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="movieffm")
             self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer="https://www.movieffm.net/", origin="https://www.movieffm.net")
+            return
+
+        if "movieffm.net" in parsed_url.netloc and "/drama/" in parsed_url.path:
+            self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析 MovieFFM 頁面...")
+            c_req = get_curl_cffi_requests()
+            resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
+            drama_title, episodes, episode_fallbacks = _collect_movieffm_drama_episodes(resp.text, url, short_name or "MovieFFM")
+            if not episodes:
+                raise Exception("MovieFFM detail page did not expose episode links")
+            primary_url, primary_name = episodes[0]
+            episode_key = _movieffm_numbered_episode_key(primary_name.rsplit(" ", 1)[-1])
+            fallback_urls = [u for u in episode_fallbacks.get(episode_key, []) if u != primary_url]
+            _set_task_identity(
+                name=primary_name,
+                source_site="movieffm",
+                source_page=url,
+                fallback_urls=fallback_urls,
+            )
+            self._download_task_internal(primary_url, item_id, save_dir, use_impersonate, is_mp3)
             return
 
         if "gimy" in parsed_url.netloc and ("/detail/" in parsed_url.path or "/voddetail/" in parsed_url.path or "/voddetail2/" in parsed_url.path or "/vod/" in parsed_url.path):
@@ -6634,6 +6792,7 @@ class DownloadManagerApp:
             stream_candidates = []
             direct_fallback_candidates = []
             external_source_urls = []
+            deferred_episode_urls = []
             last_gimy_error = None
             page_title = short_name or "Gimy"
             def gimy_fetch_text(target_url, referer_value, impersonate_name):
@@ -6730,6 +6889,9 @@ class DownloadManagerApp:
                     if candidate_url not in external_source_urls:
                         external_source_urls.append(candidate_url)
                 alternate_episode_urls = _extract_gimy_episode_page_urls(resp_text, url, current_url=url)
+                for alternate_episode_url in alternate_episode_urls:
+                    if alternate_episode_url not in deferred_episode_urls:
+                        deferred_episode_urls.append(alternate_episode_url)
                 for alternate_episode_url in alternate_episode_urls[:8]:
                     try:
                         alternate_text = gimy_fetch_text(alternate_episode_url, url, gimy_impersonate)
@@ -6789,7 +6951,12 @@ class DownloadManagerApp:
             ordered_candidates = reachable + [candidate for candidate in unreachable if candidate not in reachable]
             stream_url = ordered_candidates[0]
             page_title = _extract_html_title(resp_text, short_name)
-            fallback_urls = ordered_candidates[1:] if len(ordered_candidates) > 1 else []
+            deferred_fallback_urls = [
+                candidate
+                for candidate in (deferred_episode_urls + external_source_urls)
+                if candidate and candidate not in ordered_candidates and candidate != url
+            ]
+            fallback_urls = (ordered_candidates[1:] if len(ordered_candidates) > 1 else []) + deferred_fallback_urls
             _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
             self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
@@ -7229,7 +7396,7 @@ class DownloadManagerApp:
 def main():
     if not acquire_single_instance_lock():
         try:
-            with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+            with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock denied build={APP_BUILD} app_dir={_APP_DIR}\n")
         except Exception:
             pass
@@ -7243,7 +7410,7 @@ def main():
         return
 
     try:
-        with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+        with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app start build={APP_BUILD} frozen={getattr(sys, 'frozen', False)} app_dir={_APP_DIR}\n")
     except Exception:
         pass
