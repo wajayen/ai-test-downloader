@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260430-2410"
+APP_BUILD = "20260430-2435"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -100,6 +100,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
 GIMY_DIRECT_STREAM_FALLBACK_LIMIT = 1
 GIMY_EPISODE_PAGE_PARSE_FALLBACK_LIMIT = 2
 GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
+GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
 IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1")
@@ -953,6 +954,37 @@ def _task_gimy_page_refresh_candidates(task):
     return normalized_candidates
 
 
+def _task_gimy_failed_stream_urls(task):
+    raw_candidates = _task_field_value(task, "_gimy_failed_stream_urls", [])
+    if isinstance(raw_candidates, str):
+        raw_candidates = [raw_candidates]
+    normalized_candidates = []
+    for candidate in raw_candidates or []:
+        normalized_candidate = _normalize_download_url(candidate)
+        if normalized_candidate and normalized_candidate not in normalized_candidates:
+            normalized_candidates.append(normalized_candidate)
+    return normalized_candidates
+
+
+def _task_gimy_failed_stream_hosts(task):
+    raw_hosts = _task_field_value(task, "_gimy_failed_stream_hosts", [])
+    if isinstance(raw_hosts, str):
+        raw_hosts = [raw_hosts]
+    normalized_hosts = []
+    for host in raw_hosts or []:
+        host_text = str(host or "").strip().lower()
+        if host_text and host_text not in normalized_hosts:
+            normalized_hosts.append(host_text)
+    return normalized_hosts
+
+
+def _task_gimy_failed_stream_filters(task):
+    return (
+        set(_task_gimy_failed_stream_urls(task)),
+        set(_task_gimy_failed_stream_hosts(task)),
+    )
+
+
 def _task_resolved_url(task, fallback_url=""):
     resolved_url = _normalize_download_url(_task_field_value(task, "resolved_url", ""))
     if resolved_url:
@@ -983,6 +1015,27 @@ def _task_gimy_source_refresh_history(task):
     return normalized_history
 
 
+def _is_http_404_download_error(exc):
+    if exc is None:
+        return False
+    lowered = str(exc).lower()
+    return "http error 404" in lowered or "404 not found" in lowered
+
+
+def _is_gimy_stream_refreshable_error(exc):
+    if exc is None:
+        return False
+    lowered = str(exc).lower()
+    return (
+        "http error 404" in lowered
+        or "404 not found" in lowered
+        or "failed to establish a new connection" in lowered
+        or "connection refused" in lowered
+        or "winerror 10061" in lowered
+        or "gimy native hls artifact rejected" in lowered
+    )
+
+
 def _filter_gimy_untried_page_candidates(task, candidates):
     tried = set(_task_gimy_refresh_history(task))
     filtered = []
@@ -991,6 +1044,15 @@ def _filter_gimy_untried_page_candidates(task, candidates):
         if normalized_candidate and normalized_candidate not in tried and normalized_candidate not in filtered:
             filtered.append(normalized_candidate)
     return filtered
+
+
+def _append_normalized_unique_candidates(target_list, *candidates):
+    updated = list(target_list or [])
+    for candidate in candidates:
+        normalized_candidate = _normalize_download_url(candidate)
+        if normalized_candidate and normalized_candidate not in updated:
+            updated.append(normalized_candidate)
+    return updated
 
 
 def _event_downloaded_bytes(info, default=0):
@@ -1500,6 +1562,13 @@ def _derive_gimy_detail_page_urls(page_url):
             candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
             if candidate and candidate not in urls:
                 urls.append(candidate)
+    play_match = re.search(r"/(?:play|vodplay|video)/(\d+)-\d+(?:-\d+)?\.html", path)
+    if play_match:
+        vod_id = play_match.group(1)
+        for relative_path in (f"/vod/{vod_id}.html", f"/detail/{vod_id}.html", f"/voddetail/{vod_id}.html"):
+            candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
+            if candidate and candidate not in urls:
+                urls.append(candidate)
     return urls
 
 
@@ -1764,13 +1833,9 @@ def _should_prefer_native_hls(url, task=None):
     parsed = urllib.parse.urlparse(str(url or ""))
     host = str(parsed.netloc or "").strip().lower()
     source_site = _task_source_site_name(task)
-    if source_site != "gimy":
+    if source_site == "gimy":
         return False
-    if _looks_like_manifest_url(url):
-        return True
-    if host in NATIVE_HLS_PREFERRED_HOSTS:
-        return True
-    return host.endswith(".xluuss.com")
+    return False
 
 
 def _native_hls_source_site(task=None):
@@ -4445,7 +4510,15 @@ class DownloadManagerApp:
     def _get_stable_resume_base(self, url, ext="mp4", resume_key=None):
         normalized_url = _normalize_download_url(resume_key or url) or str(resume_key or url)
         digest = hashlib.sha1(normalized_url.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        return os.path.join(tempfile.gettempdir(), f"downloader_resume_{digest}.{ext}")
+        return os.path.join(self._get_system_temp_dir(), f"downloader_resume_{digest}.{ext}")
+
+    def _get_system_temp_dir(self):
+        return tempfile.gettempdir()
+
+    def _get_temp_download_part_path(self, out_path, index):
+        normalized_out_path = os.path.abspath(str(out_path or "download"))
+        digest = hashlib.sha1(normalized_out_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        return os.path.join(self._get_system_temp_dir(), f"downloader_http_{digest}.part{index}")
 
     def _probe_media_duration_seconds(self, path):
         if not path or not os.path.exists(path):
@@ -4770,6 +4843,11 @@ class DownloadManagerApp:
         seconds_value = max(float(seconds or 0), 0.0)
         bytes_value = max(int(bytes_done or 0), 0)
         source_value = str(source_url or "")
+        persisted = self._load_resume_progress_info(progress_path)
+        persisted_source = str(persisted.get("source_url", "") or "")
+        if source_value and persisted_source == source_value:
+            seconds_value = max(seconds_value, float(persisted.get("seconds", 0.0) or 0.0))
+            bytes_value = max(bytes_value, int(persisted.get("bytes", 0) or 0))
         now = time.time()
         with self._resume_progress_lock:
             cached = self._resume_progress_cache.get(progress_path)
@@ -4778,6 +4856,9 @@ class DownloadManagerApp:
                 last_bytes = int(cached.get("bytes", 0) or 0)
                 last_source = str(cached.get("source_url", "") or "")
                 last_saved_at = float(cached.get("saved_at", 0.0) or 0.0)
+                if source_value == last_source:
+                    seconds_value = max(seconds_value, last_seconds)
+                    bytes_value = max(bytes_value, last_bytes)
                 if (
                     source_value == last_source
                     and now - last_saved_at < RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS
@@ -4970,7 +5051,7 @@ class DownloadManagerApp:
         if referer or origin:
             headers_blob = f"Referer: {referer or ''}\r\nOrigin: {origin or ''}\r\nUser-Agent: {DEFAULT_USER_AGENT}\r\n"
 
-        temp_out_path = os.path.join(tempfile.gettempdir(), f"{safe_name}_audio_tmp.mp3")
+        temp_out_path = os.path.join(self._get_system_temp_dir(), f"{safe_name}_audio_tmp.mp3")
         cmd = [
             ffmpeg_path,
             "-y",
@@ -5677,7 +5758,7 @@ class DownloadManagerApp:
                         if part_start > remaining_end:
                             break
                         part_end = remaining_end if index == 3 else min(remaining_end, part_start + part_size - 1)
-                        part_path = f"{out_path}.part{index}"
+                        part_path = self._get_temp_download_part_path(out_path, index)
                         part_paths.append(part_path)
                         box = {"bytes": 0}
                         progress_boxes.append(box)
@@ -5737,6 +5818,12 @@ class DownloadManagerApp:
         if yt_dlp_module is None:
             raise RuntimeError("yt-dlp module is not available")
         task = self.tasks.get(item_id, {})
+        resume_key = self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url)) or url
+        temp_out_path = self._get_stable_resume_base(url, ext="mp3" if is_mp3 else "mp4", resume_key=resume_key)
+        temp_root, temp_ext = os.path.splitext(temp_out_path)
+        resume_out_path = f"{temp_root}.resume{temp_ext}"
+        merged_out_path = f"{temp_root}.merged{temp_ext}"
+        progress_path = temp_out_path + ".progress.json"
         self._cache_task_resolved_link(
             task,
             url,
@@ -5765,7 +5852,6 @@ class DownloadManagerApp:
                 if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
-                self._set_task_progress_complete_ui(item_id)
                 self._set_task_processing_ui(item_id)
                 return
             if status != "downloading":
@@ -5781,6 +5867,7 @@ class DownloadManagerApp:
             if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
                 self._set_task_downloading_ui(item_id)
 
+        native_work_dir = self._get_system_temp_dir()
         ydl_opts = {
             "color": "never",
             "nopart": False,
@@ -5791,8 +5878,8 @@ class DownloadManagerApp:
             "skip_unavailable_fragments": False,
             "concurrent_fragment_downloads": native_options["concurrent_fragment_downloads"],
             "continuedl": True,
-            "paths": {"home": save_dir, "temp": save_dir},
-            "outtmpl": {"default": f"{safe_name}.%(ext)s"},
+            "paths": {"home": native_work_dir, "temp": native_work_dir},
+            "outtmpl": {"default": f"{os.path.splitext(temp_out_path)[0]}.%(ext)s"},
             "format": "best",
             "merge_output_format": "mp4",
             "progress_hooks": [progress_hook],
@@ -5842,7 +5929,7 @@ class DownloadManagerApp:
                 info = ydl.process_ie_result(direct_info, download=True)
             else:
                 info = ydl.extract_info(url, download=True)
-        actual_output = self._wait_for_yt_dlp_output_path(info, save_dir, safe_name, out_path, preferred_ext=ext)
+        actual_output = self._wait_for_yt_dlp_output_path(info, native_work_dir, safe_name, out_path, preferred_ext=ext)
         if actual_output:
             if os.path.normcase(os.path.abspath(actual_output)) != os.path.normcase(os.path.abspath(out_path)):
                 try:
@@ -5852,7 +5939,28 @@ class DownloadManagerApp:
                 except Exception:
                     pass
             self._set_task_output_path(task, item_id, actual_output)
-        if self._has_nonempty_file(self._get_task_output_path(task, default=out_path) or out_path):
+        final_output_path = self._get_task_output_path(task, default=out_path) or out_path
+        if self._has_nonempty_file(final_output_path) and self._get_task_source_site(task) == "gimy" and not is_mp3:
+            final_info = self._probe_media_info(final_output_path)
+            final_size = int(final_info.get("size", 0) or 0)
+            final_duration = float(final_info.get("duration", 0.0) or 0.0)
+            if final_size < 1024 * 1024 and final_duration < 60.0:
+                artifact_exc = Exception(
+                    f"gimy native hls artifact rejected: size={final_size} duration={final_duration:.3f}"
+                )
+                write_error_log(
+                    "gimy native hls artifact rejected",
+                    artifact_exc,
+                    url=url,
+                    item_id=item_id,
+                    source_site=self._get_task_source_site(task) or None,
+                    output=final_output_path,
+                    size=final_size,
+                    duration=final_duration,
+                )
+                self._remove_artifact_paths(final_output_path, temp_out_path, resume_out_path, merged_out_path, progress_path)
+                raise artifact_exc
+        if self._has_nonempty_file(final_output_path):
             self._mark_task_finished(item_id)
             write_error_log(
                 "yt-dlp native hls fallback finished",
@@ -5860,8 +5968,8 @@ class DownloadManagerApp:
                 url=url,
                 item_id=item_id,
                 source_site=self._get_task_source_site(task) or None,
-                output=self._get_task_output_path(task, default=out_path) or out_path,
-                bytes=self._get_existing_file_size(self._get_task_output_path(task, default=out_path) or out_path),
+                output=final_output_path,
+                bytes=self._get_existing_file_size(final_output_path),
             )
             return
         if self._complete_if_output_exists(item_id):
@@ -5882,13 +5990,15 @@ class DownloadManagerApp:
             item_id=item_id,
             source_site=self._get_task_source_site(task) or None,
             expected_output=out_path,
-            detected_candidates=self._collect_yt_dlp_output_candidates(info, save_dir, safe_name, preferred_ext=ext),
+            detected_candidates=self._collect_yt_dlp_output_candidates(info, native_work_dir, safe_name, preferred_ext=ext),
             save_dir=save_dir,
+            temp_dir=native_work_dir,
         )
         raise FileNotFoundError("yt-dlp native HLS fallback did not produce an output file")
 
     def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False):
         task = self.tasks.get(item_id, {})
+        source_site = self._get_task_source_site(task)
         safe_name = self._get_task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
@@ -5896,25 +6006,6 @@ class DownloadManagerApp:
         if os.path.exists(out_path):
             self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
             return
-        if _should_prefer_native_hls(url, task) and not _native_fallback_done:
-            write_error_log(
-                "preferred native hls route selected",
-                self._ffmpeg_event_exception("preferred native hls route selected"),
-                url=url,
-                item_id=item_id,
-                source_site=self._get_task_source_site(task) or None,
-                referer=referer,
-                origin=origin,
-            )
-            return self._download_m3u8_with_ytdlp_native(
-                item_id,
-                url,
-                save_dir,
-                is_mp3=is_mp3,
-                referer=referer,
-                origin=origin,
-            )
-
         resume_key = self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url)) or url
         temp_out_path = self._get_stable_resume_base(url, ext=ext, resume_key=resume_key)
         temp_root, temp_ext = os.path.splitext(temp_out_path)
@@ -5928,14 +6019,208 @@ class DownloadManagerApp:
             raise FileNotFoundError("ffmpeg.exe was not found in the application directory")
         ffmpeg_version = _get_ffmpeg_version_summary(ffmpeg_path)
 
-        source_site = self._get_task_source_site(task)
         raw_fallback_urls = self._get_task_fallback_urls(task, primary_url=url)
         direct_fallback_urls = [candidate for candidate in raw_fallback_urls if _looks_like_direct_media_url(candidate)]
         page_refresh_candidates = _task_gimy_page_refresh_candidates(task) if source_site == "gimy" else [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls]
+        gimy_failed_stream_urls = _task_gimy_failed_stream_urls(task) if source_site == "gimy" else []
+        gimy_failed_stream_hosts = _task_gimy_failed_stream_hosts(task) if source_site == "gimy" else []
         detail_refresh_done = _task_gimy_detail_refresh_done(task)
         if source_site == "gimy" and len(direct_fallback_urls) > GIMY_DIRECT_STREAM_FALLBACK_LIMIT:
             direct_fallback_urls = direct_fallback_urls[:GIMY_DIRECT_STREAM_FALLBACK_LIMIT]
+        if gimy_failed_stream_urls:
+            direct_fallback_urls = [
+                candidate for candidate in direct_fallback_urls
+                if _normalize_download_url(candidate) not in gimy_failed_stream_urls
+            ]
+        if gimy_failed_stream_hosts:
+            direct_fallback_urls = [
+                candidate for candidate in direct_fallback_urls
+                if urllib.parse.urlsplit(_normalize_download_url(candidate) or "").netloc.lower() not in gimy_failed_stream_hosts
+            ]
         candidate_urls = _dedupe_download_urls([url] + direct_fallback_urls)
+        failed_primary_candidate_url = ""
+
+        def _remember_gimy_failed_stream(stream_url):
+            if source_site != "gimy":
+                return
+            normalized_stream_url = _normalize_download_url(stream_url)
+            if not normalized_stream_url:
+                return
+            failed_stream_urls = list(_task_gimy_failed_stream_urls(task))
+            if normalized_stream_url not in failed_stream_urls:
+                failed_stream_urls.append(normalized_stream_url)
+                _set_task_aux_fields(task, _gimy_failed_stream_urls=failed_stream_urls)
+            failed_stream_host = urllib.parse.urlsplit(normalized_stream_url).netloc.lower()
+            if failed_stream_host:
+                failed_stream_hosts = list(_task_gimy_failed_stream_hosts(task))
+                if failed_stream_host not in failed_stream_hosts:
+                    failed_stream_hosts.append(failed_stream_host)
+                    _set_task_aux_fields(task, _gimy_failed_stream_hosts=failed_stream_hosts)
+
+        def _gimy_detail_rebuild_after_stream_failure(refresh_history, source_page_url, exc_obj):
+            if source_site != "gimy" or detail_refresh_done:
+                return None
+            detail_page_candidates = _collect_gimy_detail_page_urls(
+                source_page_url,
+                self._get_task_url(task, fallback_url=url),
+                url,
+            )
+            if not detail_page_candidates:
+                return None
+            detail_refresh_url = detail_page_candidates[0]
+            detail_refresh_history = list(_task_gimy_refresh_history(task))
+            for attempted_page in (
+                self._get_task_url(task, fallback_url=""),
+                source_page_url,
+            ):
+                normalized_attempted_page = _normalize_download_url(attempted_page)
+                if (
+                    normalized_attempted_page
+                    and re.search(r"/(?:eps|play|vodplay|video)/", urllib.parse.urlsplit(normalized_attempted_page).path, re.IGNORECASE)
+                    and normalized_attempted_page not in detail_refresh_history
+                ):
+                    detail_refresh_history.append(normalized_attempted_page)
+            if detail_refresh_url not in detail_refresh_history:
+                detail_refresh_history.append(detail_refresh_url)
+            _set_task_aux_fields(
+                task,
+                _gimy_detail_refresh_done=True,
+                _gimy_refresh_history=detail_refresh_history,
+                _gimy_source_refresh_history=[],
+            )
+            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重建 Gimy 播放線...")
+            write_error_log(
+                "gimy detail page rebuild",
+                self._ffmpeg_event_exception("rebuilding gimy episode sources from detail page"),
+                item_id=item_id,
+                stream_url=url,
+                refresh_url=detail_refresh_url,
+                refresh_attempts=len(refresh_history) + 1,
+                fallback_count=len(raw_fallback_urls),
+                original_exception=repr(exc_obj) if exc_obj is not None else None,
+            )
+            return self._download_task_internal(
+                detail_refresh_url,
+                item_id,
+                save_dir,
+                self._should_use_impersonation(self._get_task_url(task), self._get_task_source_site(task)),
+                is_mp3,
+            )
+
+        def _gimy_refresh_after_stream_failure(exc_obj):
+            current_page_url = self._get_task_url(task, fallback_url=url)
+            source_page_url = self._get_task_source_page(task, fallback_url=current_page_url)
+            refresh_history = _task_gimy_source_refresh_history(task)
+            current_candidate_urls = [candidate for candidate in (current_page_url, source_page_url) if candidate]
+            for current_candidate_url in current_candidate_urls:
+                normalized_current_candidate = _normalize_download_url(current_candidate_url)
+                if normalized_current_candidate and normalized_current_candidate not in refresh_history:
+                    refresh_history.append(normalized_current_candidate)
+
+            parse_refresh_history = _task_gimy_refresh_history(task)
+            available_refresh_candidates = []
+            for candidate in page_refresh_candidates:
+                normalized_candidate = _normalize_download_url(candidate)
+                if (
+                    normalized_candidate
+                    and normalized_candidate not in refresh_history
+                    and normalized_candidate not in parse_refresh_history
+                ):
+                    available_refresh_candidates.append(normalized_candidate)
+
+            refresh_url = next((candidate for candidate in available_refresh_candidates if candidate), "")
+            if not refresh_url:
+                normalized_source_page = _normalize_download_url(source_page_url)
+                normalized_current_page = _normalize_download_url(current_page_url)
+                same_page_refresh_attempts = refresh_history.count(normalized_source_page) if normalized_source_page else 0
+                if normalized_source_page and (
+                    normalized_source_page not in refresh_history
+                    or (
+                        not available_refresh_candidates
+                        and normalized_source_page != normalized_current_page
+                        and same_page_refresh_attempts < GIMY_SOURCE_PAGE_REFRESH_LIMIT
+                    )
+                    or (
+                        not available_refresh_candidates
+                        and normalized_source_page == normalized_current_page
+                        and same_page_refresh_attempts < GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT
+                    )
+                ):
+                    refresh_url = normalized_source_page
+
+            _set_task_aux_fields(task, resolved_url="", resolved_url_saved_at=0.0)
+            self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0)
+
+            if refresh_url and refresh_url != _normalize_download_url(url) and len(refresh_history) < GIMY_SOURCE_PAGE_REFRESH_LIMIT:
+                gimy_parse_history = _task_gimy_refresh_history(task)
+                if _is_gimy_episode_page_url(refresh_url) and refresh_url not in gimy_parse_history:
+                    gimy_parse_history = gimy_parse_history + [refresh_url]
+                _set_task_aux_fields(
+                    task,
+                    _gimy_source_refresh_history=refresh_history + [refresh_url],
+                    _gimy_refresh_history=gimy_parse_history,
+                    _gimy_detail_refresh_done=False,
+                )
+                self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
+                write_error_log(
+                    "gimy source page refresh",
+                    exc_obj,
+                    item_id=item_id,
+                    stream_url=url,
+                    refresh_url=refresh_url,
+                    fallback_count=len(raw_fallback_urls),
+                    refresh_attempts=len(refresh_history) + 1,
+                )
+                return self._download_task_internal(
+                    refresh_url,
+                    item_id,
+                    save_dir,
+                    self._should_use_impersonation(self._get_task_url(task), self._get_task_source_site(task)),
+                    is_mp3,
+                )
+            if source_site == "gimy" and not available_refresh_candidates and not refresh_url:
+                detail_rebuild = _gimy_detail_rebuild_after_stream_failure(refresh_history, source_page_url, exc_obj)
+                if detail_rebuild is not None:
+                    return detail_rebuild
+            return None
+
+        if _should_prefer_native_hls(url, task) and not _native_fallback_done:
+            write_error_log(
+                "preferred native hls route selected",
+                self._ffmpeg_event_exception("preferred native hls route selected"),
+                url=url,
+                item_id=item_id,
+                source_site=self._get_task_source_site(task) or None,
+                referer=referer,
+                origin=origin,
+            )
+            try:
+                return self._download_m3u8_with_ytdlp_native(
+                    item_id,
+                    url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
+                )
+            except Exception as native_exc:
+                _remember_gimy_failed_stream(url)
+                if source_site == "gimy":
+                    if _is_gimy_stream_refreshable_error(native_exc):
+                        refreshed = _gimy_refresh_after_stream_failure(native_exc)
+                        if refreshed is not None:
+                            return refreshed
+                    failed_primary_candidate_url = _normalize_download_url(url)
+                    write_error_log(
+                        "gimy native hls handoff to ffmpeg",
+                        native_exc,
+                        url=url,
+                        item_id=item_id,
+                        source_site=source_site,
+                    )
+                    _native_fallback_done = True
+                else:
+                    raise
 
         duration_box = {}
         media_bps_box = {}
@@ -5977,7 +6262,25 @@ class DownloadManagerApp:
         total_duration = 0.0
         self._start_daemon_thread(probe_metadata)
 
-        for candidate_url in candidate_urls:
+        ffmpeg_candidate_urls = list(candidate_urls)
+        skip_ffmpeg_same_failed_primary = False
+        if failed_primary_candidate_url:
+            alternate_candidates = [
+                candidate for candidate in ffmpeg_candidate_urls
+                if _normalize_download_url(candidate) != failed_primary_candidate_url
+            ]
+            failed_candidates = [
+                candidate for candidate in ffmpeg_candidate_urls
+                if _normalize_download_url(candidate) == failed_primary_candidate_url
+            ]
+            if alternate_candidates:
+                ffmpeg_candidate_urls = alternate_candidates + failed_candidates
+            elif source_site == "gimy":
+                skip_ffmpeg_same_failed_primary = True
+
+        for candidate_url in ffmpeg_candidate_urls:
+            if skip_ffmpeg_same_failed_primary and _normalize_download_url(candidate_url) == failed_primary_candidate_url:
+                continue
             self._promote_resume_artifact(temp_out_path, resume_out_path)
             stored_info = self._load_resume_progress_info(progress_path)
             partial_info = self._probe_media_info(temp_out_path)
@@ -5992,15 +6295,17 @@ class DownloadManagerApp:
             partial_valid = bool(partial_info.get("valid"))
             size_consistent = partial_size > 0 and stored_bytes > 0 and abs(partial_size - stored_bytes) <= max(1024 * 1024, int(max(partial_size, stored_bytes) * 0.35))
             usable_sidecar_only_partial = partial_size > 0 and same_resume_target and (partial_valid or partial_reason == "ffprobe-error")
-            if stored_seconds > 0 and stored_bytes > 0 and partial_size > 0 and partial_size < stored_bytes:
-                stored_seconds = max(0.0, min(stored_seconds, stored_seconds * (partial_size / stored_bytes)))
-
             if partial_valid and partial_duration > 0:
                 base_bytes = partial_size
                 resume_seconds = partial_duration
+                resume_mode = "media_probe"
+                if same_resume_target and stored_seconds > resume_seconds and size_consistent:
+                    resume_seconds = stored_seconds
+                    resume_mode = "media_probe_persisted"
             elif usable_sidecar_only_partial:
                 base_bytes = partial_size
                 resume_seconds = stored_seconds
+                resume_mode = "sidecar_only"
             else:
                 if partial_size > 0 and (not same_resume_target or (stored_bytes > 0 and not size_consistent)):
                     write_error_log(
@@ -6020,6 +6325,7 @@ class DownloadManagerApp:
                         stored_source_url=stored_source_url,
                     )
                 base_bytes, resume_seconds = self._reset_resume_artifacts(temp_out_path, resume_out_path, merged_out_path, progress_path)
+                resume_mode = "reset"
             if duration_box.get("value"):
                 total_duration = duration_box.get("value", 0.0)
             elif total_duration <= 0:
@@ -6033,7 +6339,7 @@ class DownloadManagerApp:
                 if estimated_resume_seconds > 0:
                     if resume_seconds <= 0:
                         resume_seconds = estimated_resume_seconds
-                    else:
+                    elif resume_mode == "sidecar_only":
                         allowed_drift = max(30.0, total_duration * 0.05)
                         if abs(resume_seconds - estimated_resume_seconds) > allowed_drift:
                             resume_seconds = min(resume_seconds, estimated_resume_seconds)
@@ -6375,113 +6681,35 @@ class DownloadManagerApp:
                         ),
                     ),
                 )
-                return self._download_m3u8_with_ytdlp_native(
-                    item_id,
-                    candidate_url,
-                    save_dir,
-                    is_mp3=is_mp3,
-                    referer=referer,
-                    origin=origin,
-                )
+                try:
+                    return self._download_m3u8_with_ytdlp_native(
+                        item_id,
+                        candidate_url,
+                        save_dir,
+                        is_mp3=is_mp3,
+                        referer=referer,
+                        origin=origin,
+                    )
+                except Exception as native_exc:
+                    _remember_gimy_failed_stream(candidate_url)
+                    if source_site == "gimy" and _is_gimy_stream_refreshable_error(native_exc):
+                        refreshed = _gimy_refresh_after_stream_failure(native_exc)
+                        if refreshed is not None:
+                            return refreshed
+                    raise
 
+            _remember_gimy_failed_stream(candidate_url)
             last_error = Exception(f"FFmpeg exited with code {return_code}: {' | '.join(recent_lines)[:240]}")
         if last_error and source_site == "gimy":
-            current_page_url = self._get_task_url(task, fallback_url=url)
-            source_page_url = self._get_task_source_page(task, fallback_url=current_page_url)
-            refresh_history = _task_gimy_source_refresh_history(task)
-            current_candidate_urls = [candidate for candidate in (current_page_url, source_page_url) if candidate]
-            for current_candidate_url in current_candidate_urls:
-                normalized_current_candidate = _normalize_download_url(current_candidate_url)
-                if normalized_current_candidate and normalized_current_candidate not in refresh_history:
-                    refresh_history.append(normalized_current_candidate)
-
-            parse_refresh_history = _task_gimy_refresh_history(task)
-            available_refresh_candidates = []
-            for candidate in page_refresh_candidates:
-                normalized_candidate = _normalize_download_url(candidate)
-                if (
-                    normalized_candidate
-                    and normalized_candidate not in refresh_history
-                    and normalized_candidate not in parse_refresh_history
-                ):
-                    available_refresh_candidates.append(normalized_candidate)
-
-            refresh_url = next((candidate for candidate in available_refresh_candidates if candidate), "")
-            if not refresh_url:
-                normalized_source_page = _normalize_download_url(source_page_url)
-                if normalized_source_page and normalized_source_page not in refresh_history:
-                    refresh_url = normalized_source_page
-
-            if refresh_url and refresh_url != _normalize_download_url(url) and len(refresh_history) < GIMY_SOURCE_PAGE_REFRESH_LIMIT:
-                gimy_parse_history = _task_gimy_refresh_history(task)
-                if _is_gimy_episode_page_url(refresh_url) and refresh_url not in gimy_parse_history:
-                    gimy_parse_history = gimy_parse_history + [refresh_url]
-                _set_task_aux_fields(
-                    task,
-                    _gimy_source_refresh_history=refresh_history + [refresh_url],
-                    _gimy_refresh_history=gimy_parse_history,
-                    _gimy_detail_refresh_done=False,
-                )
-                self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
-                write_error_log(
-                    "gimy source page refresh",
-                    self._ffmpeg_event_exception("refreshing gimy source page after direct stream failures"),
-                    item_id=item_id,
-                    stream_url=url,
-                    refresh_url=refresh_url,
-                    fallback_count=len(raw_fallback_urls),
-                    refresh_attempts=len(refresh_history) + 1,
-                )
-                return self._download_task_internal(
-                    refresh_url,
-                    item_id,
-                    save_dir,
-                    self._should_use_impersonation(self._get_task_url(task), self._get_task_source_site(task)),
-                    is_mp3,
-                )
-            if len(refresh_history) >= GIMY_SOURCE_PAGE_REFRESH_LIMIT:
-                write_error_log(
-                    "gimy source page refresh limit",
-                    self._ffmpeg_event_exception("gimy source page refresh limit reached"),
-                    item_id=item_id,
-                    stream_url=url,
-                    refresh_attempts=len(refresh_history),
-                    fallback_count=len(raw_fallback_urls),
-                    refresh_history=refresh_history,
-                )
-                if not detail_refresh_done:
-                    detail_page_candidates = []
-                    for candidate in _derive_gimy_detail_page_urls(self._get_task_source_page(task, fallback_url=url) or url):
-                        normalized_candidate = _normalize_download_url(candidate)
-                        if normalized_candidate and normalized_candidate not in detail_page_candidates:
-                            detail_page_candidates.append(normalized_candidate)
-                    if detail_page_candidates:
-                        detail_refresh_url = detail_page_candidates[0]
-                        detail_refresh_history = list(_task_gimy_refresh_history(task))
-                        if detail_refresh_url not in detail_refresh_history:
-                            detail_refresh_history.append(detail_refresh_url)
-                        _set_task_aux_fields(
-                            task,
-                            _gimy_detail_refresh_done=True,
-                            _gimy_refresh_history=detail_refresh_history,
-                            _gimy_source_refresh_history=[],
-                        )
-                        self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重建 Gimy 播放線...")
-                        write_error_log(
-                            "gimy detail page rebuild",
-                            self._ffmpeg_event_exception("rebuilding gimy episode sources from detail page"),
-                            item_id=item_id,
-                            stream_url=url,
-                            refresh_url=detail_refresh_url,
-                            refresh_attempts=len(refresh_history) + 1,
-                        )
-                        return self._download_task_internal(
-                            detail_refresh_url,
-                            item_id,
-                            save_dir,
-                            self._should_use_impersonation(self._get_task_url(task), self._get_task_source_site(task)),
-                            is_mp3,
-                        )
+            refreshed = _gimy_refresh_after_stream_failure(last_error)
+            if refreshed is not None:
+                return refreshed
+        if source_site == "gimy" and not last_error:
+            exhausted_exc = Exception("gimy stream candidates exhausted without a successful ffmpeg handoff")
+            refreshed = _gimy_refresh_after_stream_failure(exhausted_exc)
+            if refreshed is not None:
+                return refreshed
+            last_error = Exception("FFmpeg download failed without candidates")
         if last_error:
             raise last_error
         raise Exception("FFmpeg download failed without candidates")
@@ -6624,7 +6852,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         if not task:
             return
-        sys_temp_dir = tempfile.gettempdir()
+        sys_temp_dir = self._get_system_temp_dir()
         filename = self._get_task_output_path(task)
         if filename:
             base_name = os.path.splitext(os.path.basename(filename))[0]
@@ -6639,6 +6867,38 @@ class DownloadManagerApp:
                         os.remove(path)
                     except Exception:
                         continue
+
+    def _clear_cached_resolved_link(self, task):
+        _set_task_aux_fields(
+            task,
+            resolved_url="",
+            resolved_url_saved_at=0.0,
+            page_refresh_candidates=[],
+            _gimy_page_refresh_candidates=[],
+            _gimy_source_refresh_history=[],
+        )
+        self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0, page_refresh_candidates=[])
+
+    def _download_with_cached_resolved_link(self, task, item_id, source_url, cached_resolved_url, save_dir, use_impersonate, is_mp3):
+        self._set_task_fallback_parser_ui(item_id, "使用已記錄下載連結續傳...")
+        try:
+            self._download_task_internal(cached_resolved_url, item_id, save_dir, use_impersonate, is_mp3)
+            return True
+        except (StopDownloadException, KeyboardInterrupt):
+            raise
+        except Exception as cached_exc:
+            write_error_log(
+                "cached resolved url failed",
+                cached_exc,
+                item_id=item_id,
+                source_url=source_url,
+                resolved_url=cached_resolved_url,
+                source_site=self._get_task_source_site(task) or None,
+            )
+            self._clear_cached_resolved_link(task)
+            self._set_task_fallback_parser_ui(item_id, "已記錄連結失效，重新分析頁面...")
+            self._download_task_internal(source_url, item_id, save_dir, use_impersonate, is_mp3)
+            return True
 
     def download_task(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         has_anime1_lock = False
@@ -6655,34 +6915,17 @@ class DownloadManagerApp:
                 has_anime1_lock = True
             should_reuse_cached_url = self._should_reuse_cached_resolved_url(task, cached_resolved_url)
             if self._get_task_resume_requested(task) and cached_resolved_url and cached_resolved_url != _normalize_download_url(url) and should_reuse_cached_url:
-                try:
-                    self._set_task_fallback_parser_ui(item_id, "使用已記錄下載連結續傳...")
-                    self._download_task_internal(cached_resolved_url, item_id, save_dir, use_impersonate, is_mp3)
-                except (StopDownloadException, KeyboardInterrupt):
-                    raise
-                except Exception as cached_exc:
-                    write_error_log(
-                        "cached resolved url failed",
-                        cached_exc,
-                        item_id=item_id,
-                        source_url=url,
-                        resolved_url=cached_resolved_url,
-                        source_site=self._get_task_source_site(task) or None,
-                    )
-                    _set_task_aux_fields(
-                        task,
-                        resolved_url="",
-                        resolved_url_saved_at=0.0,
-                        page_refresh_candidates=[],
-                        _gimy_page_refresh_candidates=[],
-                        _gimy_source_refresh_history=[],
-                    )
-                    self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0, page_refresh_candidates=[])
-                    self._set_task_fallback_parser_ui(item_id, "已記錄連結失效，重新分析頁面...")
-                    self._download_task_internal(url, item_id, save_dir, use_impersonate, is_mp3)
+                self._download_with_cached_resolved_link(
+                    task,
+                    item_id,
+                    url,
+                    cached_resolved_url,
+                    save_dir,
+                    use_impersonate,
+                    is_mp3,
+                )
             elif self._get_task_resume_requested(task) and cached_resolved_url and cached_resolved_url != _normalize_download_url(url):
-                _set_task_aux_fields(task, resolved_url="", resolved_url_saved_at=0.0)
-                self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0)
+                self._clear_cached_resolved_link(task)
                 self._set_task_fallback_parser_ui(item_id, "已記錄連結過期，重新分析頁面...")
                 self._download_task_internal(url, item_id, save_dir, use_impersonate, is_mp3)
             else:
@@ -6748,7 +6991,6 @@ class DownloadManagerApp:
                 if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
-                self._set_task_progress_complete_ui(item_id)
                 self._set_task_processing_ui(item_id)
                 return
             if status != "downloading":
@@ -6773,7 +7015,7 @@ class DownloadManagerApp:
             "file_access_retries": 3,
             "skip_unavailable_fragments": False,
             "concurrent_fragment_downloads": 3,
-            "paths": {"home": save_dir, "temp": tempfile.gettempdir()},
+            "paths": {"home": save_dir, "temp": self._get_system_temp_dir()},
             "outtmpl": {"default": "%(title)s.%(ext)s"},
             "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
             "merge_output_format": "mp4",
@@ -7205,6 +7447,7 @@ class DownloadManagerApp:
                     entry["url"] for entry in ordered_entries
                     if entry["url"] != primary["url"]
                 ]
+                ordered_episode_urls = [first_episode_url] + [candidate for candidate in fallback_urls if candidate != first_episode_url]
             else:
                 episode_entries = self._group_gimy_episode_entries(entries)
                 primary = next(
@@ -7221,9 +7464,29 @@ class DownloadManagerApp:
                     entry_url = entry.get("url")
                     if entry_url and entry_url != first_episode_url and entry_url not in fallback_urls:
                         fallback_urls.append(entry_url)
+                ordered_episode_urls = [first_episode_url] + [candidate for candidate in fallback_urls if candidate != first_episode_url]
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=first_episode_name or drama_name, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
-            self._download_task_internal(first_episode_url, item_id, save_dir, use_impersonate, is_mp3)
+            last_episode_error = None
+            for attempt_index, episode_url in enumerate(ordered_episode_urls):
+                try:
+                    self._download_task_internal(episode_url, item_id, save_dir, use_impersonate, is_mp3)
+                    return
+                except Exception as episode_exc:
+                    last_episode_error = episode_exc
+                    episode_exc_text = str(episode_exc or "")
+                    if "Gimy stream URL missing" not in episode_exc_text and "Gimy iframe stream URL missing" not in episode_exc_text:
+                        raise
+                    refresh_history = _append_normalized_unique_candidates(
+                        _task_gimy_refresh_history(task),
+                        episode_url,
+                    )
+                    _set_task_aux_fields(task, _gimy_refresh_history=refresh_history)
+                    if attempt_index < len(ordered_episode_urls) - 1:
+                        continue
+                    raise
+            if last_episode_error is not None:
+                raise last_episode_error
             return
 
         if "gimy" in parsed_url.netloc and "/eps/" in parsed_url.path:
@@ -7233,6 +7496,7 @@ class DownloadManagerApp:
             direct_fallback_candidates = []
             external_source_urls = []
             deferred_episode_urls = []
+            gimy_failed_stream_urls, gimy_failed_stream_hosts = _task_gimy_failed_stream_filters(task)
             last_gimy_error = None
             page_title = short_name or "Gimy"
             def gimy_fetch_text(target_url, referer_value, impersonate_name):
@@ -7309,7 +7573,11 @@ class DownloadManagerApp:
                     if direct_stream not in local_candidates:
                         local_candidates.append(direct_stream)
                 return {
-                    "candidates": _dedupe_download_urls(local_candidates),
+                    "candidates": [
+                        candidate for candidate in _dedupe_download_urls(local_candidates)
+                        if candidate not in gimy_failed_stream_urls
+                        and urllib.parse.urlsplit(candidate).netloc.lower() not in gimy_failed_stream_hosts
+                    ],
                     "direct_urls": _dedupe_download_urls(local_direct_urls),
                     "external_urls": _dedupe_download_urls(local_external_urls),
                     "title": local_title,
@@ -7617,16 +7885,130 @@ class DownloadManagerApp:
             player_data = _extract_player_js_object(resp.text, "player_data", "player_aaaa")
             if not player_data:
                 raise Exception("Gimy player_data not found")
+            direct_fallback_candidates = []
+            external_source_urls = []
+            direct_url = _normalize_download_url(player_data.get("url"))
+            if direct_url:
+                candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(direct_url)
+                if candidate_kind == "manifest" and normalized_candidate:
+                    direct_fallback_candidates.append(normalized_candidate)
+                elif candidate_kind == "external" and normalized_candidate:
+                    external_source_urls.append(normalized_candidate)
             candidates = _collect_player_m3u8_candidates(player_data, base_url=url)
             for candidate_url in _extract_m3u8_candidates_from_text(resp.text, base_url=url):
                 if candidate_url not in candidates:
                     candidates.append(candidate_url)
+            for iframe_url in _build_gimy_iframe_urls(url, player_data):
+                try:
+                    iframe_resp = c_req.get(iframe_url, impersonate="chrome110", timeout=12, headers={"Referer": f"{parsed_url.scheme}://{parsed_url.netloc}/"})
+                    iframe_text = iframe_resp.text
+                except Exception:
+                    continue
+                iframe_player_data = _extract_player_js_object(iframe_text, "player_data", "player_aaaa", "player")
+                if iframe_player_data:
+                    iframe_direct_url = _normalize_download_url(iframe_player_data.get("url"))
+                    if iframe_direct_url:
+                        candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(iframe_direct_url)
+                        if candidate_kind == "manifest" and normalized_candidate and normalized_candidate not in direct_fallback_candidates:
+                            direct_fallback_candidates.append(normalized_candidate)
+                        elif candidate_kind == "external" and normalized_candidate and normalized_candidate not in external_source_urls:
+                            external_source_urls.append(normalized_candidate)
+                    for candidate_url in _collect_player_m3u8_candidates(iframe_player_data, base_url=iframe_url):
+                        if candidate_url not in candidates:
+                            candidates.append(candidate_url)
+                for candidate_url in _extract_m3u8_candidates_from_text(iframe_text, base_url=iframe_url):
+                    if candidate_url not in candidates:
+                        candidates.append(candidate_url)
+                parse_source = urllib.parse.parse_qs(urllib.parse.urlsplit(iframe_url).query).get("url", [""])[0]
+                if parse_source and "parse.php" in iframe_text:
+                    parse_api = urllib.parse.urljoin(iframe_url, f"parse.php?url={urllib.parse.quote(parse_source, safe='')}")
+                    try:
+                        parse_resp = c_req.get(parse_api, impersonate="chrome110", timeout=12, headers={"Referer": iframe_url})
+                        parse_data = json.loads(parse_resp.text)
+                    except Exception:
+                        parse_data = None
+                    if isinstance(parse_data, dict):
+                        for key in ("url", "video", "playurl"):
+                            parsed_candidate = _normalize_download_url(parse_data.get(key))
+                            if not parsed_candidate:
+                                continue
+                            candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(parsed_candidate)
+                            if candidate_kind == "manifest" and normalized_candidate and normalized_candidate not in candidates:
+                                candidates.append(normalized_candidate)
+                            elif candidate_kind == "external" and normalized_candidate and normalized_candidate not in external_source_urls:
+                                external_source_urls.append(normalized_candidate)
             candidates = _dedupe_download_urls(candidates)
+            gimy_failed_stream_urls, gimy_failed_stream_hosts = _task_gimy_failed_stream_filters(task)
+            if gimy_failed_stream_urls:
+                candidates = [candidate for candidate in candidates if candidate not in gimy_failed_stream_urls]
+                direct_fallback_candidates = [candidate for candidate in direct_fallback_candidates if candidate not in gimy_failed_stream_urls]
+            if gimy_failed_stream_hosts:
+                candidates = [candidate for candidate in candidates if urllib.parse.urlsplit(candidate).netloc.lower() not in gimy_failed_stream_hosts]
+                direct_fallback_candidates = [
+                    candidate for candidate in direct_fallback_candidates
+                    if urllib.parse.urlsplit(candidate).netloc.lower() not in gimy_failed_stream_hosts
+                ]
             stream_url = candidates[0] if candidates else None
             if not stream_url:
+                supported_external_pages = [
+                    candidate for candidate in external_source_urls
+                    if _is_supported_download_page_url(candidate)
+                ]
+                if supported_external_pages:
+                    external_url = supported_external_pages[0]
+                    fallback_urls = [candidate for candidate in supported_external_pages[1:] if candidate and candidate != external_url]
+                    _set_task_aux_fields(task, _gimy_page_refresh_candidates=[], _gimy_source_refresh_history=[])
+                    _set_task_identity(name=_extract_html_title(resp.text, short_name), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
+                    self._set_task_found_media_ui(item_id)
+                    self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
+                    return
+                page_refresh_candidates = _task_gimy_page_refresh_candidates(task)
+                fallback_episode_candidates = [
+                    candidate
+                    for candidate in self._get_task_fallback_urls(task, primary_url=url)
+                    if _is_gimy_episode_page_url(candidate)
+                ]
+                next_episode_candidates = _filter_gimy_untried_page_candidates(
+                    task,
+                    list(page_refresh_candidates) + fallback_episode_candidates,
+                )
+                if next_episode_candidates:
+                    refresh_url = next_episode_candidates[0]
+                    refresh_history = _append_normalized_unique_candidates(
+                        _task_gimy_refresh_history(task),
+                        url,
+                        refresh_url,
+                    )
+                    remaining_candidates = [candidate for candidate in next_episode_candidates[1:] if candidate != refresh_url]
+                    _set_task_aux_fields(
+                        task,
+                        _gimy_refresh_history=refresh_history,
+                        _gimy_page_refresh_candidates=remaining_candidates,
+                        _gimy_source_refresh_history=[],
+                        resolved_url="",
+                        resolved_url_saved_at=0.0,
+                    )
+                    self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0, page_refresh_candidates=remaining_candidates)
+                    self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
+                    write_error_log(
+                        "gimy play page retry",
+                        self._ffmpeg_event_exception("retrying alternate gimy play page after stream URL missing"),
+                        item_id=item_id,
+                        page_url=url,
+                        refresh_url=refresh_url,
+                        remaining_candidates=len(remaining_candidates),
+                    )
+                    self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
+                    return
                 raise Exception("Gimy stream URL missing")
             page_title = _extract_html_title(resp.text, short_name)
-            fallback_urls = candidates[1:] if len(candidates) > 1 else []
+            fallback_urls = (candidates[1:] if len(candidates) > 1 else []) + [
+                candidate for candidate in direct_fallback_candidates
+                if candidate and candidate != stream_url and candidate not in candidates
+            ] + [
+                candidate for candidate in external_source_urls
+                if candidate and candidate not in candidates
+            ]
             _set_task_aux_fields(task, _gimy_page_refresh_candidates=[])
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
