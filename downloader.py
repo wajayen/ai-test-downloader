@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260430-2435"
+APP_BUILD = "20260430-2450"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -632,6 +632,36 @@ def _is_anime1_media_url(url_or_header):
     return "anime1.me" in lowered or "anime1.pw" in lowered or ".v.anime1.me" in lowered
 
 
+def _extract_anime1_category_links(page_url, page_html):
+    html_text = str(page_html or "")
+    candidates = []
+    for href, title in re.findall(r'<h2[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
+        normalized_link = _normalize_download_url(urllib.parse.urljoin(page_url, html.unescape(href)))
+        if not _is_anime1_episode_url(normalized_link):
+            continue
+        clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
+        if not clean_title:
+            continue
+        candidates.append((normalized_link.rstrip("/"), clean_title))
+    if not candidates:
+        for href, title in re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
+            normalized_link = _normalize_download_url(urllib.parse.urljoin(page_url, html.unescape(href)))
+            if not _is_anime1_episode_url(normalized_link):
+                continue
+            clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
+            if not clean_title or not re.search(r"\[\d+\]", clean_title):
+                continue
+            candidates.append((normalized_link.rstrip("/"), clean_title))
+    deduped = []
+    seen = set()
+    for link, title in candidates:
+        if link in seen:
+            continue
+        seen.add(link)
+        deduped.append((link, title))
+    return deduped
+
+
 def _normalize_state_entry(entry):
     normalized = dict(entry) if isinstance(entry, dict) else {}
     url = _normalize_download_url(normalized.get("url", ""))
@@ -985,6 +1015,22 @@ def _task_gimy_failed_stream_filters(task):
     )
 
 
+def _filter_gimy_failed_stream_candidates(task, candidates):
+    failed_urls, failed_hosts = _task_gimy_failed_stream_filters(task)
+    filtered = []
+    for candidate in candidates or []:
+        normalized_candidate = _normalize_download_url(candidate)
+        if not normalized_candidate:
+            continue
+        if normalized_candidate in failed_urls:
+            continue
+        if urllib.parse.urlsplit(normalized_candidate).netloc.lower() in failed_hosts:
+            continue
+        if normalized_candidate not in filtered:
+            filtered.append(normalized_candidate)
+    return filtered
+
+
 def _task_resolved_url(task, fallback_url=""):
     resolved_url = _normalize_download_url(_task_field_value(task, "resolved_url", ""))
     if resolved_url:
@@ -1172,6 +1218,17 @@ def _extract_json_script_blocks(text):
     return re.findall(r"<script[^>]+type=[\"']application/json[\"'][^>]*>(.*?)</script>", text, re.IGNORECASE | re.DOTALL)
 
 
+def _extract_inline_script_blocks(text):
+    if not isinstance(text, str) or not text:
+        return []
+    blocks = []
+    for match in re.finditer(r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script>", text, re.IGNORECASE | re.DOTALL):
+        block = str(match.group(1) or "").strip()
+        if block:
+            blocks.append(block)
+    return blocks
+
+
 def _walk_media_urls(value, results):
     if isinstance(value, dict):
         for key, item in value.items():
@@ -1340,35 +1397,77 @@ def _extract_facebook_media_candidates(page_html):
 
 
 def _extract_missav_m3u8_candidates(page_html):
+    raw_html = str(page_html or "")
+    html_variants = [raw_html]
+    unescaped_html = html.unescape(raw_html)
+    if unescaped_html != raw_html:
+        html_variants.append(unescaped_html)
+    slash_unescaped_html = raw_html.replace("\\/", "/")
+    if slash_unescaped_html not in html_variants:
+        html_variants.append(slash_unescaped_html)
+    fully_unescaped_html = html.unescape(slash_unescaped_html)
+    if fully_unescaped_html not in html_variants:
+        html_variants.append(fully_unescaped_html)
+
     candidates = []
-    direct_m = re.search(r'source="([^"]+\.m3u8[^"]*)"', page_html, re.IGNORECASE)
-    if direct_m:
-        candidates.append(html.unescape(direct_m.group(1)).strip())
-    any_m = re.search(r'(https?://[^"\'\s]+\.m3u8[^"\'\s]*)', page_html)
-    if any_m:
-        candidates.append(html.unescape(any_m.group(1)).strip())
-    packed_tokens_m = re.search(r"'(m3u8\|[^']+)'", page_html)
-    packed_template_m = re.search(r"8://7\.6/5-4-3-2-1/d\.0", page_html)
-    if packed_tokens_m and packed_template_m:
-        tokens = packed_tokens_m.group(1).split("|")
+    for variant in html_variants:
+        candidates.extend(_extract_candidate_media_urls(variant, allowed_exts=(".m3u8", ".mpd")))
+        for blob in _extract_json_script_blocks(variant):
+            candidates.extend(_extract_candidate_media_urls(blob, allowed_exts=(".m3u8", ".mpd")))
+            try:
+                parsed = json.loads(blob)
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                nested = []
+                _walk_media_urls(parsed, nested)
+                for candidate in nested:
+                    if _looks_like_manifest_url(candidate):
+                        candidates.append(candidate)
+        direct_m = re.search(r'source\s*=\s*"([^"]+\.m3u8[^"]*)"', variant, re.IGNORECASE)
+        if direct_m:
+            candidates.append(html.unescape(direct_m.group(1)).strip())
+        for match in re.finditer(r'(?:(?:https?:)?//[^"\'\s<]+?\.m3u8(?:\?[^"\'\s<]*)?)', variant, re.IGNORECASE):
+            candidate = html.unescape(match.group(0)).replace("\\/", "/").strip()
+            if candidate.startswith("//"):
+                candidate = "https:" + candidate
+            if candidate.startswith("http://") or candidate.startswith("https://"):
+                candidates.append(candidate)
+        for match in re.finditer(r'(https?:\\?/\\?/[^"\'\s<]+?\.m3u8(?:\?[^"\'\s<]*)?)', variant, re.IGNORECASE):
+            candidate = html.unescape(match.group(1)).replace("\\/", "/").strip()
+            if candidate.startswith("http://") or candidate.startswith("https://"):
+                candidates.append(candidate)
+        for match in re.finditer(r'"hls"\s*:\s*"([^"]+\.m3u8[^"]*)"', variant, re.IGNORECASE):
+            candidates.append(html.unescape(match.group(1)).replace("\\/", "/").strip())
+        for match in re.finditer(r'"playlist"\s*:\s*"([^"]+\.m3u8[^"]*)"', variant, re.IGNORECASE):
+            candidates.append(html.unescape(match.group(1)).replace("\\/", "/").strip())
+        for match in re.finditer(r'"(?:file|src|source|video)"\s*:\s*"([^"]+\.m3u8[^"]*)"', variant, re.IGNORECASE):
+            candidates.append(html.unescape(match.group(1)).replace("\\/", "/").strip())
+        packed_tokens_m = re.search(r"m3u8\|([A-Za-z0-9|]+)", variant)
+        if packed_tokens_m:
+            tokens = ["m3u8"] + packed_tokens_m.group(1).split("|")
 
-        def decode_token(token):
-            if token.isdigit():
-                idx = int(token)
-                if 0 <= idx < len(tokens):
-                    return tokens[idx]
-            return token
+            def _decode_packed_missav_template(template):
+                def repl(match):
+                    token = match.group(1).lower()
+                    try:
+                        idx = int(token, 16)
+                    except ValueError:
+                        return match.group(0)
+                    if 0 <= idx < len(tokens):
+                        return tokens[idx]
+                    return match.group(0)
 
-        if len(tokens) > 13:
-            candidates.append(
-                f"{tokens[8]}://{tokens[7]}.{tokens[6]}/{tokens[5]}-{tokens[4]}-{tokens[3]}-{tokens[2]}-{tokens[1]}/{tokens[13]}.{tokens[0]}"
-            )
-        for source_m in re.finditer(r"8://7\.6/5-4-3-2-1/a/([0-9]+)\.0", page_html):
-            decoded = decode_token(source_m.group(1))
-            if decoded:
-                candidates.append(
-                    f"{tokens[8]}://{tokens[7]}.{tokens[6]}/{tokens[5]}-{tokens[4]}-{tokens[3]}-{tokens[2]}-{tokens[1]}/{tokens[14]}/{decoded}.{tokens[0]}"
-                )
+                decoded = re.sub(r"\b([0-9a-f])\b", repl, template, flags=re.IGNORECASE)
+                decoded = html.unescape(decoded).replace("\\/", "/").strip()
+                if decoded.startswith("//"):
+                    decoded = "https:" + decoded
+                return decoded
+
+            for packed_template in re.findall(r"\b[0-9a-f]+://[0-9a-f]+\.[0-9a-f]+/[0-9a-f./-]+", variant, re.IGNORECASE):
+                decoded = _decode_packed_missav_template(packed_template)
+                if _looks_like_manifest_url(decoded):
+                    candidates.append(decoded)
     ordered = _dedupe_download_urls(candidates)
     playlist_prefixes = {
         candidate.lower()[: -len("/playlist.m3u8")]
@@ -1384,6 +1483,33 @@ def _extract_missav_m3u8_candidates(page_html):
                 continue
         filtered.append(candidate)
     return filtered
+
+
+def _extract_missav_media_candidates(page_html):
+    manifest_candidates = _extract_missav_m3u8_candidates(page_html)
+    direct_candidates = []
+    page_text = str(page_html or "")
+    generic_candidates = _extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
+    script_blobs = _extract_json_script_blocks(page_text) + _extract_inline_script_blocks(page_text)
+    for blob in script_blobs:
+        generic_candidates.extend(_extract_candidate_media_urls(blob, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+        try:
+            parsed = json.loads(blob)
+        except Exception:
+            continue
+        nested = []
+        _walk_media_urls(parsed, nested)
+        generic_candidates.extend(nested)
+    for candidate in _dedupe_download_urls(generic_candidates):
+        if _looks_like_manifest_url(candidate):
+            if candidate not in manifest_candidates:
+                manifest_candidates.append(candidate)
+        elif _looks_like_http_media_url(candidate):
+            direct_candidates.append(candidate)
+    return {
+        "manifests": _dedupe_download_urls(manifest_candidates),
+        "direct_media": _dedupe_download_urls(direct_candidates),
+    }
 
 
 def _extract_movieffm_m3u8_candidates(page_html):
@@ -1982,6 +2108,21 @@ def format_transfer_rate(bytes_per_second):
     if value >= 1024:
         return f"{value / 1024:.2f} KB/s"
     return f"{value:.0f} B/s"
+
+
+def format_transfer_size(downloaded_bytes=None, total_bytes=None):
+    try:
+        downloaded = None if downloaded_bytes is None else max(float(downloaded_bytes or 0), 0.0)
+        total = None if total_bytes is None else max(float(total_bytes or 0), 0.0)
+    except (TypeError, ValueError):
+        return "-"
+    if total and total > 0 and downloaded is not None:
+        return f"{downloaded / (1024 * 1024):.1f} / {total / (1024 * 1024):.1f} MB"
+    if downloaded is not None and downloaded > 0:
+        return f"{downloaded / (1024 * 1024):.1f} MB"
+    if total and total > 0:
+        return f"{total / (1024 * 1024):.1f} MB"
+    return "-"
 
 
 def format_eta(seconds):
@@ -2818,38 +2959,25 @@ class DownloadManagerApp:
             try:
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(new_url, impersonate="chrome110", timeout=15)
-                links_info = []
-                for link, title in re.findall(r'<h2 class="entry-title"><a href="([^"]+)"[^>]*>(.*?)</a>', resp.text):
-                    normalized_link = _normalize_download_url(urllib.parse.urljoin(new_url, html.unescape(link)))
-                    if not _is_anime1_episode_url(normalized_link):
-                        continue
-                    clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
-                    if not clean_title:
-                        continue
-                    links_info.append((normalized_link.rstrip("/"), clean_title))
-                deduped_links = []
-                seen_links = set()
-                for link, title in links_info:
-                    if link in seen_links:
-                        continue
-                    seen_links.add(link)
-                    deduped_links.append((link, title))
-                links_info = deduped_links
+                links_info = _extract_anime1_category_links(new_url, resp.text)
                 if not links_info:
                     self._schedule_warning(t("msg_fetch_anime1_empty"))
                     return
-                for link, title in reversed(links_info):
-                    clean_title = html.unescape(title).replace("&#8211;", "-").strip()
-                    self.root.after(
-                        0,
-                        lambda _link=link, _title=clean_title: self._final_add_download(
-                            _link,
+
+                def enqueue():
+                    ordered_links = list(reversed(links_info))
+                    targets = self._choose_playlist_targets(ordered_links, ordered_links[0])
+                    for link, title in targets:
+                        clean_title = html.unescape(title).replace("&#8211;", "-").strip()
+                        self._final_add_download(
+                            link,
                             is_mp3,
-                            _title,
+                            clean_title,
                             source_site="anime1",
                             extra_task_data=self._build_extra_task_data(source_page=new_url),
-                        ),
-                    )
+                        )
+
+                self._schedule_ui_call(enqueue)
             except Exception as e:
                 self._schedule_error(t("msg_fetch_anime1_failed", error=e))
 
@@ -3898,21 +4026,6 @@ class DownloadManagerApp:
         if updates:
             self._update_task_state_entry(task, **updates)
 
-    def _should_reuse_cached_resolved_url(self, task, cached_resolved_url):
-        normalized_url = _normalize_download_url(cached_resolved_url)
-        if not normalized_url:
-            return False
-        source_site = self._get_task_source_site(task)
-        if source_site != "gimy":
-            return True
-        if not _looks_like_manifest_url(normalized_url):
-            return True
-        saved_at = _task_resolved_url_saved_at(task)
-        if saved_at <= 0:
-            return False
-        age = max(time.time() - saved_at, 0.0)
-        return age <= GIMY_RESOLVED_URL_CACHE_TTL_SECONDS
-
     def _log_m3u8_route_selected(self, task, item_id, media_url, source_site=None, fallback_urls=None):
         site = self._get_task_source_site(task, fallback_site=source_site or "")
         effective_fallback_urls = fallback_urls if fallback_urls is not None else self._get_task_fallback_urls(task)
@@ -4111,6 +4224,13 @@ class DownloadManagerApp:
             if os.path.exists(os.path.join(save_dir, f"{safe_name}{ext}")):
                 self._mark_existing_file_complete(item_id, message)
                 return True
+        return False
+
+    def _set_output_path_and_complete_if_exists(self, task, item_id, output_path, message=None, temp=False):
+        self._set_task_output_path(task, item_id, output_path, temp=temp)
+        if self._has_nonempty_file(output_path):
+            self._mark_existing_file_complete(item_id, message or self._eta_file_exists_text())
+            return True
         return False
 
     def _find_output_file_candidate(self, save_dir, safe_name, preferred_ext=None):
@@ -5030,9 +5150,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id, {})
         safe_name = self._get_task_output_basename(task, "Audio")
         out_path = os.path.join(save_dir, f"{safe_name}.mp3")
-        self._set_task_output_path(task, item_id, out_path)
-        if os.path.exists(out_path):
-            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
+        if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
 
         ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
@@ -5384,6 +5502,39 @@ class DownloadManagerApp:
         if eta_seconds not in (None, ""):
             speed_text = f"{speed_text} | {format_eta(float(eta_seconds))}"
         self._set_task_speed_eta_text(item_id, speed_text)
+
+    def _make_yt_dlp_progress_hook(self, task, item_id, save_dir):
+        def progress_hook(d):
+            task_state = _task_state_value(self.tasks.get(item_id, {}))
+            if self._is_pause_requested_state(task_state):
+                raise StopDownloadException("pause requested")
+            if self._is_delete_requested_state(task_state):
+                raise KeyboardInterrupt()
+            status = _event_status(d)
+            if status == "downloading":
+                target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
+                required_bytes = max(int(total) - int(downloaded), 0) if total else None
+                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
+                    raise StopDownloadException("disk space low")
+            if status == "finished":
+                self._set_task_processing_ui(item_id)
+                return
+            if status != "downloading":
+                return
+            _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
+            _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=total)
+            self._set_task_size_text(item_id, format_transfer_size(downloaded, total))
+            percent = format_progress_percent(downloaded, total) if total else None
+            if percent is not None:
+                self._set_task_progress_percent_ui(item_id, percent)
+            speed = _event_speed(d)
+            eta = _event_eta(d)
+            self._set_task_transfer_rate_ui(item_id, speed, eta)
+            status_text = self._downloading_status_text()
+            if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
+                self._set_task_downloading_ui(item_id)
+
+        return progress_hook
 
     def _set_task_status_text(self, item_id, value):
         self._set_task_column_text(item_id, "status", value)
@@ -5834,38 +5985,10 @@ class DownloadManagerApp:
         safe_name = self._get_task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
-        self._set_task_output_path(task, item_id, out_path)
-        if os.path.exists(out_path):
-            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
+        if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
 
-        def progress_hook(d):
-            task_state = _task_state_value(self.tasks.get(item_id, {}))
-            if self._is_pause_requested_state(task_state):
-                raise StopDownloadException("pause requested")
-            if self._is_delete_requested_state(task_state):
-                raise KeyboardInterrupt()
-            status = _event_status(d)
-            if status == "downloading":
-                target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
-                required_bytes = max(int(total) - int(downloaded), 0) if total else None
-                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
-                    raise StopDownloadException("disk space low")
-            if status == "finished":
-                self._set_task_processing_ui(item_id)
-                return
-            if status != "downloading":
-                return
-            _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=None)
-            percent = format_progress_percent(downloaded, total) if total else None
-            if percent is not None:
-                self._set_task_progress_percent_ui(item_id, percent)
-            speed = _event_speed(d)
-            eta = _event_eta(d)
-            self._set_task_transfer_rate_ui(item_id, speed, eta)
-            status_text = self._downloading_status_text()
-            if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
-                self._set_task_downloading_ui(item_id)
+        progress_hook = self._make_yt_dlp_progress_hook(task, item_id, save_dir)
 
         native_work_dir = self._get_system_temp_dir()
         ydl_opts = {
@@ -6002,9 +6125,7 @@ class DownloadManagerApp:
         safe_name = self._get_task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
-        self._set_task_output_path(task, item_id, out_path)
-        if os.path.exists(out_path):
-            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
+        if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
         resume_key = self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url)) or url
         temp_out_path = self._get_stable_resume_base(url, ext=ext, resume_key=resume_key)
@@ -6804,6 +6925,124 @@ class DownloadManagerApp:
         self._last_state_persist_signature = signature
         self._last_state_persist_at = now
 
+    def _flush_task_resume_artifacts(self, task):
+        temp_path = self._get_task_output_path(task, prefer_temp=True)
+        if not temp_path:
+            return
+        progress_path = temp_path + ".progress.json"
+        persisted = self._load_resume_progress_info(progress_path)
+        best_seconds = max(float(persisted.get("seconds", 0.0) or 0.0), 0.0)
+        best_bytes = max(int(persisted.get("bytes", 0) or 0), 0)
+        source_url = str(
+            persisted.get("source_url", "") or self._get_task_source_page(task, fallback_url=self._get_task_url(task)) or ""
+        )
+        root, ext = os.path.splitext(temp_path)
+        candidate_paths = [temp_path]
+        if ext:
+            candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
+        for candidate_path in candidate_paths:
+            if not self._has_nonempty_file(candidate_path):
+                continue
+            best_bytes = max(best_bytes, self._get_existing_file_size(candidate_path))
+            info = self._probe_media_info(candidate_path)
+            if info.get("valid"):
+                best_seconds = max(best_seconds, float(info.get("duration", 0.0) or 0.0))
+        if best_seconds > 0.0 or best_bytes > 0:
+            self._save_resume_progress(progress_path, best_seconds, source_url=source_url, bytes_done=best_bytes)
+
+    def _prepare_shutdown_resume_state(self):
+        active_processes = []
+        for item_id, task in self.tasks.items():
+            state = _task_state_value(task)
+            if state == "DOWNLOADING":
+                _set_task_stop_fields(task, "PAUSE_REQUESTED", stop_reason=STOP_REASON_PAUSE, resume_requested=True)
+                self._set_task_paused_ui(item_id)
+                proc = _task_process_handle(task)
+                if proc is not None:
+                    active_processes.append((item_id, task, proc))
+            elif state == "QUEUED":
+                _set_task_stop_fields(task, "PAUSED", stop_reason=None, resume_requested=True)
+                self._set_task_paused_ui(item_id)
+        for item_id, task, proc in active_processes:
+            media_url = self._get_task_url(task)
+            try:
+                self._terminate_ffmpeg_process(task, item_id, proc, media_url, "app_closing")
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+    def _wait_for_shutdown_downloads(self, timeout_seconds=5.0):
+        deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
+        while time.time() < deadline:
+            active_found = False
+            for task in self.tasks.values():
+                proc = _task_process_handle(task)
+                if proc is None:
+                    continue
+                try:
+                    if proc.poll() is None:
+                        active_found = True
+                        break
+                except Exception:
+                    active_found = True
+                    break
+            if not active_found:
+                break
+            time.sleep(0.1)
+
+    def _wait_for_shutdown_resume_artifacts(self, timeout_seconds=2.0, stable_polls=3):
+        deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
+        last_snapshot = None
+        stable_count = 0
+        while time.time() < deadline:
+            snapshot = []
+            for task in self._iter_live_tasks():
+                temp_path = self._get_task_output_path(task, prefer_temp=True)
+                if not temp_path:
+                    continue
+                root, ext = os.path.splitext(temp_path)
+                candidate_paths = [temp_path]
+                if ext:
+                    candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
+                for candidate_path in candidate_paths:
+                    try:
+                        if os.path.exists(candidate_path):
+                            snapshot.append((candidate_path, os.path.getsize(candidate_path)))
+                    except OSError:
+                        continue
+            snapshot.sort()
+            snapshot = tuple(snapshot)
+            if snapshot == last_snapshot:
+                stable_count += 1
+                if stable_count >= max(int(stable_polls or 1), 1):
+                    break
+            else:
+                last_snapshot = snapshot
+                stable_count = 0
+            time.sleep(0.15)
+
+    def _flush_live_resume_state(self):
+        for task in self._iter_live_tasks():
+            try:
+                self._flush_task_resume_artifacts(task)
+            except Exception:
+                continue
+
+    def _force_kill_child_processes(self):
+        try:
+            import psutil
+
+            parent = psutil.Process(os.getpid())
+            for child in parent.children(recursive=True):
+                try:
+                    child.kill()
+                except Exception:
+                    continue
+        except Exception:
+            return
+
     def _process_queue(self):
         domain_counts = {}
         source_page_counts = {}
@@ -6913,8 +7152,11 @@ class DownloadManagerApp:
                 )
                 anime1_dl_lock.acquire()
                 has_anime1_lock = True
-            should_reuse_cached_url = self._should_reuse_cached_resolved_url(task, cached_resolved_url)
-            if self._get_task_resume_requested(task) and cached_resolved_url and cached_resolved_url != _normalize_download_url(url) and should_reuse_cached_url:
+            if (
+                self._get_task_resume_requested(task)
+                and cached_resolved_url
+                and cached_resolved_url != _normalize_download_url(url)
+            ):
                 self._download_with_cached_resolved_link(
                     task,
                     item_id,
@@ -6924,10 +7166,6 @@ class DownloadManagerApp:
                     use_impersonate,
                     is_mp3,
                 )
-            elif self._get_task_resume_requested(task) and cached_resolved_url and cached_resolved_url != _normalize_download_url(url):
-                self._clear_cached_resolved_link(task)
-                self._set_task_fallback_parser_ui(item_id, "已記錄連結過期，重新分析頁面...")
-                self._download_task_internal(url, item_id, save_dir, use_impersonate, is_mp3)
             else:
                 self._download_task_internal(url, item_id, save_dir, use_impersonate, is_mp3)
             if has_anime1_lock:
@@ -6995,7 +7233,9 @@ class DownloadManagerApp:
                 return
             if status != "downloading":
                 return
-            _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=None)
+            _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
+            _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=total)
+            self._set_task_size_text(item_id, format_transfer_size(downloaded, total))
             percent = format_progress_percent(downloaded, total) if total else None
             if percent is not None:
                 self._set_task_progress_percent_ui(item_id, percent)
@@ -7632,6 +7872,8 @@ class DownloadManagerApp:
                 if "播放失效" in resp_text or "播放失败" in resp_text or '<p class="p-2 text-error"' in resp_text:
                     last_gimy_error = Exception("Gimy episode page reports playback failure")
                     continue
+            direct_fallback_candidates = _filter_gimy_failed_stream_candidates(task, direct_fallback_candidates)
+            external_source_urls = _filter_gimy_failed_stream_candidates(task, external_source_urls)
             ordered_direct_candidates = _dedupe_download_urls(stream_candidates + direct_fallback_candidates)
             preferred_media_urls = [candidate for candidate in external_source_urls if _looks_like_http_media_url(candidate)]
             if preferred_media_urls:
@@ -7938,16 +8180,9 @@ class DownloadManagerApp:
                             elif candidate_kind == "external" and normalized_candidate and normalized_candidate not in external_source_urls:
                                 external_source_urls.append(normalized_candidate)
             candidates = _dedupe_download_urls(candidates)
-            gimy_failed_stream_urls, gimy_failed_stream_hosts = _task_gimy_failed_stream_filters(task)
-            if gimy_failed_stream_urls:
-                candidates = [candidate for candidate in candidates if candidate not in gimy_failed_stream_urls]
-                direct_fallback_candidates = [candidate for candidate in direct_fallback_candidates if candidate not in gimy_failed_stream_urls]
-            if gimy_failed_stream_hosts:
-                candidates = [candidate for candidate in candidates if urllib.parse.urlsplit(candidate).netloc.lower() not in gimy_failed_stream_hosts]
-                direct_fallback_candidates = [
-                    candidate for candidate in direct_fallback_candidates
-                    if urllib.parse.urlsplit(candidate).netloc.lower() not in gimy_failed_stream_hosts
-                ]
+            candidates = _filter_gimy_failed_stream_candidates(task, candidates)
+            direct_fallback_candidates = _filter_gimy_failed_stream_candidates(task, direct_fallback_candidates)
+            external_source_urls = _filter_gimy_failed_stream_candidates(task, external_source_urls)
             stream_url = candidates[0] if candidates else None
             if not stream_url:
                 supported_external_pages = [
@@ -8037,11 +8272,29 @@ class DownloadManagerApp:
             self._set_task_site_parsing_ui(item_id, "eta_site_missav", "正在解析 MissAV 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": url})
-            candidates = _extract_missav_m3u8_candidates(resp.text)
-            if not candidates:
+            media_candidates = _extract_missav_media_candidates(resp.text)
+            candidates = media_candidates.get("manifests") or []
+            direct_media_candidates = media_candidates.get("direct_media") or []
+            if not candidates and not direct_media_candidates:
+                write_error_log(
+                    "missav parser candidates missing",
+                    Exception("MissAV parser found no usable media candidates"),
+                    item_id=item_id,
+                    url=url,
+                    html_size=len(resp.text or ""),
+                    has_next_data="__NEXT_DATA__" in (resp.text or ""),
+                    has_playlist_token="playlist" in (resp.text or "").lower(),
+                    has_m3u8_token=".m3u8" in (resp.text or "").lower(),
+                )
                 raise Exception("Failed to extract MissAV stream URL")
             page_title = _extract_html_title(resp.text, short_name)
-            _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=candidates[1:])
+            if direct_media_candidates and not candidates:
+                direct_media_url = direct_media_candidates[0]
+                _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=direct_media_candidates[1:])
+                self._set_task_direct_media_ui(item_id)
+                self._download_direct_media(item_id, direct_media_url, save_dir, is_mp3=is_mp3, referer=url)
+                return
+            _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=candidates[1:] or direct_media_candidates)
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="missav")
             self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
@@ -8391,35 +8644,28 @@ class DownloadManagerApp:
             _set_task_state_fields(task, "ERROR")
 
     def on_closing(self):
-        def _kill_children():
-            try:
-                import psutil
-
-                parent = psutil.Process(os.getpid())
-                for child in parent.children(recursive=True):
-                    try:
-                        child.kill()
-                    except Exception:
-                        continue
-            except Exception:
-                return
-
         current_downloading = self._count_tasks_in_states("DOWNLOADING")
         if current_downloading > 0:
             if self._ask_warning_yesno(t("msg_close_warn", count=current_downloading)):
                 try:
+                    self._prepare_shutdown_resume_state()
+                    self._wait_for_shutdown_downloads()
+                    self._wait_for_shutdown_resume_artifacts()
+                    self._flush_live_resume_state()
                     self.persist_unfinished_state(force=True)
                 except Exception:
                     pass
-                _kill_children()
+                self._force_kill_child_processes()
                 self.root.destroy()
                 os._exit(0)
             return
         try:
+            self._wait_for_shutdown_resume_artifacts(timeout_seconds=0.5, stable_polls=2)
+            self._flush_live_resume_state()
             self.persist_unfinished_state(force=True)
         except Exception:
             pass
-        _kill_children()
+        self._force_kill_child_processes()
         self.root.destroy()
         os._exit(0)
 
