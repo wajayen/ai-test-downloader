@@ -45,18 +45,10 @@ else:  # pragma: no cover - optional integration
     except Exception:
         TkinterDnD = None
 
-try:
-    import yt_dlp  # noqa: F401
-except Exception:  # pragma: no cover - readable reconstruction only
-    yt_dlp = None
-
-try:
-    from mega import Mega as MegaClient  # type: ignore
-except Exception:  # pragma: no cover - optional integration
-    MegaClient = None
+yt_dlp = None
 
 
-APP_BUILD = "20260429-2380"
+APP_BUILD = "20260430-2410"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -93,15 +85,21 @@ FFMPEG_HLS_RECONNECT_OPTIONS = (
     "-reconnect_delay_max", "10",
     "-reconnect_max_retries", "20",
 )
+FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS = "15000000"
 FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
+    "gimy": 15.0,
     "movieffm": 15.0,
 }
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 3
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
+    "gimy": 2,
     "movieffm": 8,
 }
+GIMY_DIRECT_STREAM_FALLBACK_LIMIT = 1
+GIMY_EPISODE_PAGE_PARSE_FALLBACK_LIMIT = 2
+GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
 IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1")
@@ -193,6 +191,7 @@ NATIVE_HLS_PREFERRED_HOSTS = frozenset((
     "play.xluuss.com",
     "hd.ijycnd.com",
 ))
+GIMY_RESOLVED_URL_CACHE_TTL_SECONDS = 180
 
 RE_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 state_lock = threading.RLock()
@@ -652,6 +651,13 @@ def _normalize_state_entry(entry):
     fallback_urls = normalized.get("fallback_urls", [])
     normalized["fallback_urls"] = [u for u in fallback_urls if isinstance(u, str) and u.strip()] if isinstance(fallback_urls, list) else []
     normalized["source_page"] = _normalize_download_url(normalized.get("source_page", ""))
+    normalized["resolved_url"] = _normalize_download_url(normalized.get("resolved_url", ""))
+    try:
+        normalized["resolved_url_saved_at"] = float(normalized.get("resolved_url_saved_at", 0) or 0)
+    except (TypeError, ValueError):
+        normalized["resolved_url_saved_at"] = 0.0
+    page_refresh_candidates = normalized.get("page_refresh_candidates", [])
+    normalized["page_refresh_candidates"] = [u for u in page_refresh_candidates if isinstance(u, str) and u.strip()] if isinstance(page_refresh_candidates, list) else []
     return normalized
 
 
@@ -919,6 +925,72 @@ def _task_stop_reason_value(task, default=None):
 
 def _task_process_handle(task, default=None):
     return _task_field_value(task, "_proc", default)
+
+
+def _task_gimy_refresh_history(task):
+    raw_history = _task_field_value(task, "_gimy_refresh_history", [])
+    if isinstance(raw_history, str):
+        raw_history = [raw_history]
+    normalized_history = []
+    for candidate in raw_history or []:
+        normalized_candidate = _normalize_download_url(candidate)
+        if normalized_candidate and normalized_candidate not in normalized_history:
+            normalized_history.append(normalized_candidate)
+    return normalized_history
+
+
+def _task_gimy_page_refresh_candidates(task):
+    raw_candidates = _task_field_value(task, "_gimy_page_refresh_candidates", None)
+    if raw_candidates is None:
+        raw_candidates = _task_field_value(task, "page_refresh_candidates", [])
+    if isinstance(raw_candidates, str):
+        raw_candidates = [raw_candidates]
+    normalized_candidates = []
+    for candidate in raw_candidates or []:
+        normalized_candidate = _normalize_download_url(candidate)
+        if normalized_candidate and normalized_candidate not in normalized_candidates:
+            normalized_candidates.append(normalized_candidate)
+    return normalized_candidates
+
+
+def _task_resolved_url(task, fallback_url=""):
+    resolved_url = _normalize_download_url(_task_field_value(task, "resolved_url", ""))
+    if resolved_url:
+        return resolved_url
+    return _normalize_download_url(fallback_url)
+
+
+def _task_resolved_url_saved_at(task, default=0.0):
+    try:
+        return float(_task_field_value(task, "resolved_url_saved_at", default) or default)
+    except (TypeError, ValueError):
+        return float(default or 0.0)
+
+
+def _task_gimy_detail_refresh_done(task):
+    return bool(_task_field_value(task, "_gimy_detail_refresh_done", False))
+
+
+def _task_gimy_source_refresh_history(task):
+    raw_history = _task_field_value(task, "_gimy_source_refresh_history", [])
+    if isinstance(raw_history, str):
+        raw_history = [raw_history]
+    normalized_history = []
+    for candidate in raw_history or []:
+        normalized_candidate = _normalize_download_url(candidate)
+        if normalized_candidate and normalized_candidate not in normalized_history:
+            normalized_history.append(normalized_candidate)
+    return normalized_history
+
+
+def _filter_gimy_untried_page_candidates(task, candidates):
+    tried = set(_task_gimy_refresh_history(task))
+    filtered = []
+    for candidate in candidates or []:
+        normalized_candidate = _normalize_download_url(candidate)
+        if normalized_candidate and normalized_candidate not in tried and normalized_candidate not in filtered:
+            filtered.append(normalized_candidate)
+    return filtered
 
 
 def _event_downloaded_bytes(info, default=0):
@@ -1413,12 +1485,125 @@ def _extract_gimy_episode_page_urls(page_html, page_url, current_url=None):
     return urls
 
 
+def _derive_gimy_detail_page_urls(page_url):
+    normalized = _normalize_download_url(page_url)
+    if not normalized:
+        return []
+    parsed = urllib.parse.urlsplit(normalized)
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'gimy01.tv'}"
+    path = parsed.path or ""
+    urls = []
+    match = re.search(r"/eps/(\d+)-\d+(?:-\d+)?\.html", path)
+    if match:
+        vod_id = match.group(1)
+        for relative_path in (f"/vod/{vod_id}.html", f"/detail/{vod_id}.html", f"/voddetail/{vod_id}.html"):
+            candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
+            if candidate and candidate not in urls:
+                urls.append(candidate)
+    return urls
+
+
+def _collect_gimy_detail_page_urls(*page_urls):
+    urls = []
+    for page_url in page_urls:
+        for candidate in _derive_gimy_detail_page_urls(page_url):
+            normalized_candidate = _normalize_download_url(candidate)
+            if normalized_candidate and normalized_candidate not in urls:
+                urls.append(normalized_candidate)
+    return urls
+
+
+def _is_gimy_episode_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    return "/eps/" in urllib.parse.urlsplit(normalized).path.lower()
+
+
 def _looks_like_direct_media_url(url):
     normalized = _normalize_download_url(url)
     if not normalized:
         return False
     lower = normalized.lower()
     return any(token in lower for token in (".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".mp3", ".m4a"))
+
+
+def _looks_like_manifest_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    lower = normalized.lower()
+    return ".m3u8" in lower or ".mpd" in lower
+
+
+def _infer_media_extension_from_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized)
+    candidates = [parsed.path or ""]
+    query_map = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    for key in ("response-content-disposition", "filename", "file", "name"):
+        for value in query_map.get(key, []):
+            candidates.append(str(value))
+    for candidate in candidates:
+        decoded_candidate = urllib.parse.unquote(str(candidate or ""))
+        lowered_candidate = decoded_candidate.lower()
+        for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mkv", ".webm", ".m4a", ".mp3"):
+            if ext in lowered_candidate:
+                return ext
+    return ""
+
+
+def _looks_like_http_media_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    if _infer_media_extension_from_url(normalized):
+        return True
+    parsed = urllib.parse.urlsplit(normalized)
+    lower_path = (parsed.path or "").lower()
+    return lower_path.endswith((".mp4", ".mkv", ".webm", ".m4a", ".mp3"))
+
+
+def _classify_gimy_stream_candidate(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return "", ""
+    if _looks_like_manifest_url(normalized):
+        return "manifest", normalized
+    if re.match(r"^https?://", normalized, re.IGNORECASE):
+        return "external", normalized
+    return "", normalized
+
+
+def _is_supported_download_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    netloc = urllib.parse.urlsplit(normalized).netloc.lower()
+    supported_markers = (
+        "gimy",
+        "movieffm",
+        "missav",
+        "avjoy",
+        "hanime1.me",
+        "anime1",
+        "instagram.com",
+        "facebook.com",
+        "threads.net",
+        "twitter.com",
+        "x.com",
+        "fxtwitter.com",
+        "vxtwitter.com",
+        "youtube.com",
+        "youtu.be",
+        "jable",
+        "njavtv",
+        "xiaoyakankan",
+        "tiktok.com",
+    )
+    return any(marker in netloc for marker in supported_markers)
 
 
 def save_state_entries(entries):
@@ -1460,6 +1645,17 @@ def get_curl_cffi_requests():
         return c_req
     except Exception as exc:
         raise RuntimeError("curl_cffi is unavailable in this environment") from exc
+
+
+def get_yt_dlp_module():
+    global yt_dlp
+    if yt_dlp is None:
+        try:
+            import yt_dlp as yt_dlp_module  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("yt-dlp is unavailable in this environment") from exc
+        yt_dlp = yt_dlp_module
+    return yt_dlp
 
 
 class UIThrottler:
@@ -1550,7 +1746,7 @@ def load_state():
 
 def _match_forced_m3u8_site(url, task=None):
     normalized_url = _normalize_download_url(url)
-    if not normalized_url.lower().endswith(".m3u8"):
+    if not _looks_like_manifest_url(normalized_url):
         return None
     source_site = _task_source_site_name(task)
     if source_site in FORCED_M3U8_SITE_RULES:
@@ -1570,6 +1766,8 @@ def _should_prefer_native_hls(url, task=None):
     source_site = _task_source_site_name(task)
     if source_site != "gimy":
         return False
+    if _looks_like_manifest_url(url):
+        return True
     if host in NATIVE_HLS_PREFERRED_HOSTS:
         return True
     return host.endswith(".xluuss.com")
@@ -1604,6 +1802,10 @@ def _ffmpeg_hls_input_options(headers, task=None):
         "ALL",
         "-allowed_segment_extensions",
         "ALL",
+        "-rw_timeout",
+        FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS,
+        "-http_persistent",
+        "0",
         "-headers",
         headers,
     ]
@@ -2517,6 +2719,8 @@ class DownloadManagerApp:
             extra_task_data = {
                 "fallback_urls": self._get_task_fallback_urls(task),
                 "source_page": self._get_task_source_page(task),
+                "resolved_url": _task_resolved_url(task),
+                "page_refresh_candidates": _task_gimy_page_refresh_candidates(task),
             }
             if not url:
                 continue
@@ -3496,12 +3700,21 @@ class DownloadManagerApp:
         self.tree.focus(item_id)
         self.tree.see(item_id)
 
-    def _build_extra_task_data(self, source_page=None, fallback_urls=None):
+    def _build_extra_task_data(self, source_page=None, fallback_urls=None, resolved_url=None, resolved_url_saved_at=None, page_refresh_candidates=None):
         data = {}
         if source_page:
             data["source_page"] = source_page
         if fallback_urls:
             data["fallback_urls"] = self._normalize_fallback_urls(fallback_urls)
+        if resolved_url:
+            data["resolved_url"] = _normalize_download_url(resolved_url)
+        if resolved_url_saved_at is not None:
+            try:
+                data["resolved_url_saved_at"] = float(resolved_url_saved_at or 0)
+            except (TypeError, ValueError):
+                data["resolved_url_saved_at"] = 0.0
+        if page_refresh_candidates:
+            data["page_refresh_candidates"] = self._normalize_fallback_urls(page_refresh_candidates)
         return data
 
     def _normalize_fallback_urls(self, fallback_urls, primary_url=None):
@@ -3531,6 +3744,9 @@ class DownloadManagerApp:
         return self._build_extra_task_data(
             source_page=self._get_task_source_page(task, fallback_url=fallback_url),
             fallback_urls=self._get_task_fallback_urls(task, primary_url=primary_url),
+            resolved_url=_task_resolved_url(task),
+            resolved_url_saved_at=_task_resolved_url_saved_at(task),
+            page_refresh_candidates=_task_gimy_page_refresh_candidates(task),
         )
 
     def _get_task_name_text(self, task, fallback_name=""):
@@ -3582,14 +3798,68 @@ class DownloadManagerApp:
             updates["source_page"] = _normalize_download_url(fields["source_page"])
         if "fallback_urls" in fields and fields["fallback_urls"] is not None:
             updates["fallback_urls"] = self._normalize_fallback_urls(fields["fallback_urls"], primary_url=url)
+        if "resolved_url" in fields and fields["resolved_url"] is not None:
+            updates["resolved_url"] = _normalize_download_url(fields["resolved_url"])
+        if "resolved_url_saved_at" in fields and fields["resolved_url_saved_at"] is not None:
+            try:
+                updates["resolved_url_saved_at"] = float(fields["resolved_url_saved_at"] or 0)
+            except (TypeError, ValueError):
+                updates["resolved_url_saved_at"] = 0.0
+        if "page_refresh_candidates" in fields and fields["page_refresh_candidates"] is not None:
+            updates["page_refresh_candidates"] = self._normalize_fallback_urls(fields["page_refresh_candidates"])
         if updates:
             update_state_entry(url, **updates)
 
+    def _cache_task_resolved_link(self, task, resolved_url, fallback_urls=None, page_refresh_candidates=None):
+        if not task:
+            return
+        updates = {}
+        normalized_resolved_url = _normalize_download_url(resolved_url)
+        if normalized_resolved_url:
+            resolved_url_saved_at = time.time()
+            _set_task_aux_fields(task, resolved_url=normalized_resolved_url, resolved_url_saved_at=resolved_url_saved_at)
+            updates["resolved_url"] = normalized_resolved_url
+            updates["resolved_url_saved_at"] = resolved_url_saved_at
+        if page_refresh_candidates is not None:
+            normalized_page_refresh_candidates = self._normalize_fallback_urls(page_refresh_candidates)
+            _set_task_aux_fields(
+                task,
+                _gimy_page_refresh_candidates=normalized_page_refresh_candidates,
+                page_refresh_candidates=normalized_page_refresh_candidates,
+            )
+            updates["page_refresh_candidates"] = normalized_page_refresh_candidates
+        if fallback_urls is not None:
+            updates["fallback_urls"] = self._normalize_fallback_urls(fallback_urls, primary_url=self._get_task_url(task))
+        if updates:
+            self._update_task_state_entry(task, **updates)
+
+    def _should_reuse_cached_resolved_url(self, task, cached_resolved_url):
+        normalized_url = _normalize_download_url(cached_resolved_url)
+        if not normalized_url:
+            return False
+        source_site = self._get_task_source_site(task)
+        if source_site != "gimy":
+            return True
+        if not _looks_like_manifest_url(normalized_url):
+            return True
+        saved_at = _task_resolved_url_saved_at(task)
+        if saved_at <= 0:
+            return False
+        age = max(time.time() - saved_at, 0.0)
+        return age <= GIMY_RESOLVED_URL_CACHE_TTL_SECONDS
+
     def _log_m3u8_route_selected(self, task, item_id, media_url, source_site=None, fallback_urls=None):
         site = self._get_task_source_site(task, fallback_site=source_site or "")
+        effective_fallback_urls = fallback_urls if fallback_urls is not None else self._get_task_fallback_urls(task)
+        self._cache_task_resolved_link(
+            task,
+            media_url,
+            fallback_urls=effective_fallback_urls,
+            page_refresh_candidates=_task_gimy_page_refresh_candidates(task) if site == "gimy" else None,
+        )
         fallback_count = len(
             self._normalize_fallback_urls(
-                fallback_urls if fallback_urls is not None else self._get_task_fallback_urls(task),
+                effective_fallback_urls,
                 primary_url=media_url,
             )
         )
@@ -3734,9 +4004,12 @@ class DownloadManagerApp:
                     "source_site": source_site or None,
                     "fallback_urls": list(fallback_urls),
                     "source_page": source_page,
+                    "resolved_url": _task_resolved_url(task),
+                    "resolved_url_saved_at": _task_resolved_url_saved_at(task),
+                    "page_refresh_candidates": list(_task_gimy_page_refresh_candidates(task)),
                 }
             )
-            signature_append((url, name, is_mp3, source_site, fallback_urls, source_page))
+            signature_append((url, name, is_mp3, source_site, fallback_urls, source_page, _task_resolved_url(task), _task_resolved_url_saved_at(task), tuple(_task_gimy_page_refresh_candidates(task))))
         return entries, tuple(signature_parts)
 
     def _mark_existing_file_complete(self, item_id, message):
@@ -3824,7 +4097,7 @@ class DownloadManagerApp:
             add_candidate(info.get("_filename"))
             add_candidate(info.get("filename"))
             try:
-                add_candidate(yt_dlp.YoutubeDL({}).prepare_filename(info) if yt_dlp is not None else "")
+                add_candidate(get_yt_dlp_module().YoutubeDL({}).prepare_filename(info))
             except Exception:
                 pass
             for requested in info.get("requested_downloads") or []:
@@ -5246,6 +5519,8 @@ class DownloadManagerApp:
 
     def _download_http_media(self, item_id, url, out_path, headers=None, session=None):
         headers = dict(headers or {})
+        task = self.tasks.get(item_id, {})
+        self._cache_task_resolved_link(task, url, fallback_urls=self._get_task_fallback_urls(task, primary_url=url))
         pause_note = self._disk_full_pause_text()
         if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=pause_note):
             return
@@ -5458,9 +5733,16 @@ class DownloadManagerApp:
         self._mark_task_finished(item_id)
 
     def _download_m3u8_with_ytdlp_native(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net"):
-        if yt_dlp is None:
-            raise RuntimeError("yt-dlp is not available for native HLS fallback")
+        yt_dlp_module = get_yt_dlp_module()
+        if yt_dlp_module is None:
+            raise RuntimeError("yt-dlp module is not available")
         task = self.tasks.get(item_id, {})
+        self._cache_task_resolved_link(
+            task,
+            url,
+            fallback_urls=self._get_task_fallback_urls(task, primary_url=url),
+            page_refresh_candidates=_task_gimy_page_refresh_candidates(task) if self._get_task_source_site(task) == "gimy" else None,
+        )
         native_options = _native_hls_download_options(task)
         safe_name = self._get_task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
@@ -5544,8 +5826,22 @@ class DownloadManagerApp:
             hls_use_mpegts=ydl_opts["hls_use_mpegts"],
         )
         info = None
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
+            if _looks_like_manifest_url(url):
+                protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
+                direct_info = {
+                    "id": safe_name,
+                    "title": safe_name,
+                    "url": url,
+                    "ext": "mp4" if not is_mp3 else "m4a",
+                    "protocol": protocol,
+                    "http_headers": dict(ydl_opts.get("http_headers") or {}),
+                    "webpage_url": referer,
+                    "original_url": url,
+                }
+                info = ydl.process_ie_result(direct_info, download=True)
+            else:
+                info = ydl.extract_info(url, download=True)
         actual_output = self._wait_for_yt_dlp_output_path(info, save_dir, safe_name, out_path, preferred_ext=ext)
         if actual_output:
             if os.path.normcase(os.path.abspath(actual_output)) != os.path.normcase(os.path.abspath(out_path)):
@@ -5632,9 +5928,13 @@ class DownloadManagerApp:
             raise FileNotFoundError("ffmpeg.exe was not found in the application directory")
         ffmpeg_version = _get_ffmpeg_version_summary(ffmpeg_path)
 
+        source_site = self._get_task_source_site(task)
         raw_fallback_urls = self._get_task_fallback_urls(task, primary_url=url)
         direct_fallback_urls = [candidate for candidate in raw_fallback_urls if _looks_like_direct_media_url(candidate)]
-        deferred_fallback_urls = [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls]
+        page_refresh_candidates = _task_gimy_page_refresh_candidates(task) if source_site == "gimy" else [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls]
+        detail_refresh_done = _task_gimy_detail_refresh_done(task)
+        if source_site == "gimy" and len(direct_fallback_urls) > GIMY_DIRECT_STREAM_FALLBACK_LIMIT:
+            direct_fallback_urls = direct_fallback_urls[:GIMY_DIRECT_STREAM_FALLBACK_LIMIT]
         candidate_urls = _dedupe_download_urls([url] + direct_fallback_urls)
 
         duration_box = {}
@@ -6085,10 +6385,44 @@ class DownloadManagerApp:
                 )
 
             last_error = Exception(f"FFmpeg exited with code {return_code}: {' | '.join(recent_lines)[:240]}")
-        if last_error and self._get_task_source_site(task) == "gimy":
-            refresh_url = next((candidate for candidate in deferred_fallback_urls if candidate), "") or self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url))
-            refresh_url = _normalize_download_url(refresh_url)
-            if refresh_url and refresh_url != _normalize_download_url(url):
+        if last_error and source_site == "gimy":
+            current_page_url = self._get_task_url(task, fallback_url=url)
+            source_page_url = self._get_task_source_page(task, fallback_url=current_page_url)
+            refresh_history = _task_gimy_source_refresh_history(task)
+            current_candidate_urls = [candidate for candidate in (current_page_url, source_page_url) if candidate]
+            for current_candidate_url in current_candidate_urls:
+                normalized_current_candidate = _normalize_download_url(current_candidate_url)
+                if normalized_current_candidate and normalized_current_candidate not in refresh_history:
+                    refresh_history.append(normalized_current_candidate)
+
+            parse_refresh_history = _task_gimy_refresh_history(task)
+            available_refresh_candidates = []
+            for candidate in page_refresh_candidates:
+                normalized_candidate = _normalize_download_url(candidate)
+                if (
+                    normalized_candidate
+                    and normalized_candidate not in refresh_history
+                    and normalized_candidate not in parse_refresh_history
+                ):
+                    available_refresh_candidates.append(normalized_candidate)
+
+            refresh_url = next((candidate for candidate in available_refresh_candidates if candidate), "")
+            if not refresh_url:
+                normalized_source_page = _normalize_download_url(source_page_url)
+                if normalized_source_page and normalized_source_page not in refresh_history:
+                    refresh_url = normalized_source_page
+
+            if refresh_url and refresh_url != _normalize_download_url(url) and len(refresh_history) < GIMY_SOURCE_PAGE_REFRESH_LIMIT:
+                gimy_parse_history = _task_gimy_refresh_history(task)
+                if _is_gimy_episode_page_url(refresh_url) and refresh_url not in gimy_parse_history:
+                    gimy_parse_history = gimy_parse_history + [refresh_url]
+                _set_task_aux_fields(
+                    task,
+                    _gimy_source_refresh_history=refresh_history + [refresh_url],
+                    _gimy_refresh_history=gimy_parse_history,
+                    _gimy_detail_refresh_done=False,
+                )
+                self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
                 write_error_log(
                     "gimy source page refresh",
                     self._ffmpeg_event_exception("refreshing gimy source page after direct stream failures"),
@@ -6096,6 +6430,7 @@ class DownloadManagerApp:
                     stream_url=url,
                     refresh_url=refresh_url,
                     fallback_count=len(raw_fallback_urls),
+                    refresh_attempts=len(refresh_history) + 1,
                 )
                 return self._download_task_internal(
                     refresh_url,
@@ -6104,6 +6439,49 @@ class DownloadManagerApp:
                     self._should_use_impersonation(self._get_task_url(task), self._get_task_source_site(task)),
                     is_mp3,
                 )
+            if len(refresh_history) >= GIMY_SOURCE_PAGE_REFRESH_LIMIT:
+                write_error_log(
+                    "gimy source page refresh limit",
+                    self._ffmpeg_event_exception("gimy source page refresh limit reached"),
+                    item_id=item_id,
+                    stream_url=url,
+                    refresh_attempts=len(refresh_history),
+                    fallback_count=len(raw_fallback_urls),
+                    refresh_history=refresh_history,
+                )
+                if not detail_refresh_done:
+                    detail_page_candidates = []
+                    for candidate in _derive_gimy_detail_page_urls(self._get_task_source_page(task, fallback_url=url) or url):
+                        normalized_candidate = _normalize_download_url(candidate)
+                        if normalized_candidate and normalized_candidate not in detail_page_candidates:
+                            detail_page_candidates.append(normalized_candidate)
+                    if detail_page_candidates:
+                        detail_refresh_url = detail_page_candidates[0]
+                        detail_refresh_history = list(_task_gimy_refresh_history(task))
+                        if detail_refresh_url not in detail_refresh_history:
+                            detail_refresh_history.append(detail_refresh_url)
+                        _set_task_aux_fields(
+                            task,
+                            _gimy_detail_refresh_done=True,
+                            _gimy_refresh_history=detail_refresh_history,
+                            _gimy_source_refresh_history=[],
+                        )
+                        self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重建 Gimy 播放線...")
+                        write_error_log(
+                            "gimy detail page rebuild",
+                            self._ffmpeg_event_exception("rebuilding gimy episode sources from detail page"),
+                            item_id=item_id,
+                            stream_url=url,
+                            refresh_url=detail_refresh_url,
+                            refresh_attempts=len(refresh_history) + 1,
+                        )
+                        return self._download_task_internal(
+                            detail_refresh_url,
+                            item_id,
+                            save_dir,
+                            self._should_use_impersonation(self._get_task_url(task), self._get_task_source_site(task)),
+                            is_mp3,
+                        )
         if last_error:
             raise last_error
         raise Exception("FFmpeg download failed without candidates")
@@ -6265,6 +6643,8 @@ class DownloadManagerApp:
     def download_task(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         has_anime1_lock = False
         try:
+            task = self.tasks.get(item_id, {})
+            cached_resolved_url = _task_resolved_url(task)
             url_lower = url.lower()
             if ("//anime1.me/" in url_lower or "//anime1.pw/" in url_lower) and use_impersonate:
                 self._set_task_processing_ui(
@@ -6273,7 +6653,40 @@ class DownloadManagerApp:
                 )
                 anime1_dl_lock.acquire()
                 has_anime1_lock = True
-            self._download_task_internal(url, item_id, save_dir, use_impersonate, is_mp3)
+            should_reuse_cached_url = self._should_reuse_cached_resolved_url(task, cached_resolved_url)
+            if self._get_task_resume_requested(task) and cached_resolved_url and cached_resolved_url != _normalize_download_url(url) and should_reuse_cached_url:
+                try:
+                    self._set_task_fallback_parser_ui(item_id, "使用已記錄下載連結續傳...")
+                    self._download_task_internal(cached_resolved_url, item_id, save_dir, use_impersonate, is_mp3)
+                except (StopDownloadException, KeyboardInterrupt):
+                    raise
+                except Exception as cached_exc:
+                    write_error_log(
+                        "cached resolved url failed",
+                        cached_exc,
+                        item_id=item_id,
+                        source_url=url,
+                        resolved_url=cached_resolved_url,
+                        source_site=self._get_task_source_site(task) or None,
+                    )
+                    _set_task_aux_fields(
+                        task,
+                        resolved_url="",
+                        resolved_url_saved_at=0.0,
+                        page_refresh_candidates=[],
+                        _gimy_page_refresh_candidates=[],
+                        _gimy_source_refresh_history=[],
+                    )
+                    self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0, page_refresh_candidates=[])
+                    self._set_task_fallback_parser_ui(item_id, "已記錄連結失效，重新分析頁面...")
+                    self._download_task_internal(url, item_id, save_dir, use_impersonate, is_mp3)
+            elif self._get_task_resume_requested(task) and cached_resolved_url and cached_resolved_url != _normalize_download_url(url):
+                _set_task_aux_fields(task, resolved_url="", resolved_url_saved_at=0.0)
+                self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0)
+                self._set_task_fallback_parser_ui(item_id, "已記錄連結過期，重新分析頁面...")
+                self._download_task_internal(url, item_id, save_dir, use_impersonate, is_mp3)
+            else:
+                self._download_task_internal(url, item_id, save_dir, use_impersonate, is_mp3)
             if has_anime1_lock:
                 anime1_dl_lock.release()
                 has_anime1_lock = False
@@ -6379,8 +6792,13 @@ class DownloadManagerApp:
             ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
 
         social_cookie_sources = []
+        yt_dlp_module = None
 
         def _run_yt_dlp(target_url):
+            if yt_dlp_module is None:
+                module = get_yt_dlp_module()
+            else:
+                module = yt_dlp_module
             attempt_sources = [None]
             for source in social_cookie_sources:
                 if source not in attempt_sources:
@@ -6394,7 +6812,7 @@ class DownloadManagerApp:
                     current_opts.pop("cookiesfrombrowser", None)
                 try:
                     with ytdl_init_lock:
-                        ydl = yt_dlp.YoutubeDL(current_opts)
+                        ydl = module.YoutubeDL(current_opts)
                     ydl.download([target_url])
                     return
                 except (StopDownloadException, KeyboardInterrupt):
@@ -6549,9 +6967,7 @@ class DownloadManagerApp:
 
         parsed_url = urllib.parse.urlparse(url)
         if _is_mega_url(url):
-            self._set_task_site_parsing_ui(item_id, "eta_site_mega", "正在解析 MEGA...")
-            self._download_mega_public_file(item_id, url, save_dir, is_mp3=is_mp3)
-            return
+            raise Exception("MEGA support has been removed")
         if any(host in parsed_url.netloc for host in ("instagram.com", "facebook.com", "threads.net")):
             social_cookie_sources = [source for source in _detect_browser_cookie_sources() if source and source[0] == "firefox"]
             if social_cookie_sources:
@@ -6578,10 +6994,13 @@ class DownloadManagerApp:
             self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=referer, origin=origin)
             return
 
-        is_direct_media = any(parsed_url.path.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm", ".m4a", ".mp3"))
+        inferred_direct_media_ext = _infer_media_extension_from_url(url)
+        is_direct_media = bool(inferred_direct_media_ext) or any(parsed_url.path.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mkv", ".webm", ".m4a", ".mp3"))
         if is_direct_media:
             self._set_task_direct_media_ui(item_id)
             filename = os.path.basename(parsed_url.path) or "downloaded_file"
+            if (not os.path.splitext(filename)[1]) and inferred_direct_media_ext:
+                filename = f"{self._get_task_output_basename(task, 'downloaded_file')}{inferred_direct_media_ext}"
             self._set_task_output_path(task, item_id, os.path.join(save_dir, filename))
             self._set_task_name_text(item_id, filename)
             try:
@@ -6770,18 +7189,39 @@ class DownloadManagerApp:
             entries = self._extract_gimy_detail_entries(resp_text, base, drama_name)
             if not entries:
                 raise Exception("Gimy detail page did not expose a playable episode")
+            refresh_history = _task_gimy_refresh_history(task)
             if self._is_gimy_movie_detail(entries):
                 ordered_entries = sorted(entries, key=lambda entry: self._gimy_movie_source_priority(entry.get("title", "")))
-                primary = ordered_entries[0]
+                primary = next(
+                    (
+                        entry for entry in ordered_entries
+                        if _normalize_download_url(entry.get("url")) not in refresh_history
+                    ),
+                    ordered_entries[0],
+                )
                 first_episode_url = primary["url"]
                 first_episode_name = drama_name
-                fallback_urls = [entry["url"] for entry in ordered_entries[1:] if entry["url"] != primary["url"]]
+                fallback_urls = [
+                    entry["url"] for entry in ordered_entries
+                    if entry["url"] != primary["url"]
+                ]
             else:
                 episode_entries = self._group_gimy_episode_entries(entries)
-                primary = episode_entries[0]
+                primary = next(
+                    (
+                        entry for entry in episode_entries
+                        if _normalize_download_url(entry.get("url")) not in refresh_history
+                    ),
+                    episode_entries[0],
+                )
                 first_episode_url = primary["url"]
                 first_episode_name = primary["full_name"]
-                fallback_urls = primary.get("fallback_urls", [])
+                fallback_urls = list(primary.get("fallback_urls", []))
+                for entry in episode_entries:
+                    entry_url = entry.get("url")
+                    if entry_url and entry_url != first_episode_url and entry_url not in fallback_urls:
+                        fallback_urls.append(entry_url)
+            _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=first_episode_name or drama_name, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             self._download_task_internal(first_episode_url, item_id, save_dir, use_impersonate, is_mp3)
             return
@@ -6851,8 +7291,15 @@ class DownloadManagerApp:
                                 parse_data = json.loads(parse_text)
                                 for key in ("url", "video", "playurl"):
                                     parsed_candidate = _normalize_download_url(parse_data.get(key))
-                                    if parsed_candidate and parsed_candidate not in local_candidates:
-                                        local_candidates.append(parsed_candidate)
+                                    if not parsed_candidate:
+                                        continue
+                                    candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(parsed_candidate)
+                                    if candidate_kind == "manifest":
+                                        if normalized_candidate not in local_candidates:
+                                            local_candidates.append(normalized_candidate)
+                                    elif candidate_kind == "external":
+                                        if normalized_candidate not in local_external_urls:
+                                            local_external_urls.append(normalized_candidate)
                             except Exception as inner_exc:
                                 local_error = inner_exc
                     player_title = (local_player_data.get("vod_data") or {}).get("vod_name")
@@ -6892,24 +7339,25 @@ class DownloadManagerApp:
                 for alternate_episode_url in alternate_episode_urls:
                     if alternate_episode_url not in deferred_episode_urls:
                         deferred_episode_urls.append(alternate_episode_url)
-                for alternate_episode_url in alternate_episode_urls[:8]:
-                    try:
-                        alternate_text = gimy_fetch_text(alternate_episode_url, url, gimy_impersonate)
-                    except Exception as e:
-                        last_gimy_error = e
-                        continue
-                    alternate_result = extend_gimy_stream_candidates(alternate_episode_url, alternate_text, url, gimy_impersonate)
-                    if alternate_result["error"] is not None:
-                        last_gimy_error = alternate_result["error"]
-                    for candidate_url in alternate_result["candidates"]:
-                        if candidate_url not in stream_candidates:
-                            stream_candidates.append(candidate_url)
-                    for candidate_url in alternate_result["direct_urls"]:
-                        if candidate_url not in direct_fallback_candidates:
-                            direct_fallback_candidates.append(candidate_url)
-                    for candidate_url in alternate_result["external_urls"]:
-                        if candidate_url not in external_source_urls:
-                            external_source_urls.append(candidate_url)
+                if not (stream_candidates or direct_fallback_candidates or external_source_urls):
+                    for alternate_episode_url in alternate_episode_urls[:8]:
+                        try:
+                            alternate_text = gimy_fetch_text(alternate_episode_url, url, gimy_impersonate)
+                        except Exception as e:
+                            last_gimy_error = e
+                            continue
+                        alternate_result = extend_gimy_stream_candidates(alternate_episode_url, alternate_text, url, gimy_impersonate)
+                        if alternate_result["error"] is not None:
+                            last_gimy_error = alternate_result["error"]
+                        for candidate_url in alternate_result["candidates"]:
+                            if candidate_url not in stream_candidates:
+                                stream_candidates.append(candidate_url)
+                        for candidate_url in alternate_result["direct_urls"]:
+                            if candidate_url not in direct_fallback_candidates:
+                                direct_fallback_candidates.append(candidate_url)
+                        for candidate_url in alternate_result["external_urls"]:
+                            if candidate_url not in external_source_urls:
+                                external_source_urls.append(candidate_url)
 
                 if stream_candidates or direct_fallback_candidates or external_source_urls:
                     break
@@ -6917,14 +7365,208 @@ class DownloadManagerApp:
                     last_gimy_error = Exception("Gimy episode page reports playback failure")
                     continue
             ordered_direct_candidates = _dedupe_download_urls(stream_candidates + direct_fallback_candidates)
-            if not ordered_direct_candidates and external_source_urls:
-                external_url = external_source_urls[0]
-                fallback_urls = external_source_urls[1:] if len(external_source_urls) > 1 else []
+            preferred_media_urls = [candidate for candidate in external_source_urls if _looks_like_http_media_url(candidate)]
+            if preferred_media_urls:
+                media_url = preferred_media_urls[0]
+                direct_media_fallback_urls = [
+                    candidate
+                    for candidate in (preferred_media_urls[1:] + ordered_direct_candidates + deferred_episode_urls)
+                    if candidate and candidate != media_url and candidate != url
+                ]
+                _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
+                _set_task_identity(
+                    name=page_title,
+                    source_site="gimy",
+                    source_page=self._get_task_source_page(task, fallback_url=url) or url,
+                    fallback_urls=direct_media_fallback_urls,
+                )
+                if is_mp3:
+                    self._set_task_found_media_ui(item_id)
+                    self._download_direct_media_audio_with_ffmpeg(
+                        item_id,
+                        media_url,
+                        save_dir,
+                        referer=url,
+                        origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                    )
+                    return
+                media_ext = _infer_media_extension_from_url(media_url) or ".mp4"
+                out_name = f"{self._get_task_output_basename(task, page_title or 'Video')}{media_ext}"
+                out_path = os.path.join(save_dir, out_name)
+                self._set_task_output_path(task, item_id, out_path)
+                self._set_task_name_text(item_id, out_name)
+                self._set_task_found_media_ui(item_id)
+                self._download_http_media(
+                    item_id,
+                    media_url,
+                    out_path,
+                    headers={
+                        "Referer": url,
+                        "Origin": f"{parsed_url.scheme}://{parsed_url.netloc}",
+                        "User-Agent": DEFAULT_USER_AGENT,
+                    },
+                )
+                return
+            supported_external_pages = [
+                candidate for candidate in external_source_urls
+                if _is_supported_download_page_url(candidate)
+            ]
+            if not ordered_direct_candidates and supported_external_pages:
+                external_url = supported_external_pages[0]
+                fallback_urls = [candidate for candidate in (supported_external_pages[1:] + deferred_episode_urls) if candidate and candidate != external_url]
+                _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
+                _set_task_aux_fields(task, _gimy_source_refresh_history=[])
                 _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
                 self._set_task_found_media_ui(item_id)
                 self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
             if not ordered_direct_candidates:
+                current_page_url = self._get_task_url(task, fallback_url=url)
+                source_page_url = self._get_task_source_page(task, fallback_url=current_page_url)
+                refresh_history = _task_gimy_refresh_history(task)
+                for current_candidate_url in (current_page_url, source_page_url):
+                    normalized_current_candidate = _normalize_download_url(current_candidate_url)
+                    if normalized_current_candidate and normalized_current_candidate not in refresh_history:
+                        refresh_history.append(normalized_current_candidate)
+                episode_refresh_attempts = sum(
+                    1 for candidate in refresh_history
+                    if _is_gimy_episode_page_url(candidate)
+                )
+                if _is_gimy_episode_page_url(current_page_url or url):
+                    episode_refresh_attempts = max(episode_refresh_attempts - 1, 0)
+                available_episode_page_candidates = []
+                for candidate in deferred_episode_urls:
+                    normalized_candidate = _normalize_download_url(candidate)
+                    if normalized_candidate and normalized_candidate not in refresh_history:
+                        available_episode_page_candidates.append(normalized_candidate)
+                if available_episode_page_candidates and episode_refresh_attempts < GIMY_EPISODE_PAGE_PARSE_FALLBACK_LIMIT:
+                    refresh_url = available_episode_page_candidates[0]
+                    _set_task_aux_fields(
+                        task,
+                        _gimy_refresh_history=refresh_history + [refresh_url],
+                        _gimy_page_refresh_candidates=[
+                            candidate for candidate in available_episode_page_candidates[1:]
+                            if candidate != refresh_url
+                        ],
+                    )
+                    self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
+                    write_error_log(
+                        "gimy episode page refresh",
+                        self._ffmpeg_event_exception("refreshing gimy episode page after parse-stage source mismatch"),
+                        item_id=item_id,
+                        page_url=current_page_url or url,
+                        refresh_url=refresh_url,
+                        refresh_attempts=episode_refresh_attempts + 1,
+                        deferred_count=len(available_episode_page_candidates),
+                    )
+                    return self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
+                if not _task_gimy_detail_refresh_done(task):
+                    detail_page_candidates = _collect_gimy_detail_page_urls(
+                        self._get_task_source_page(task, fallback_url=url) or url,
+                        current_page_url,
+                        source_page_url,
+                        url,
+                    )
+                    if detail_page_candidates:
+                        detail_refresh_url = detail_page_candidates[0]
+                        normalized_detail_refresh_url = _normalize_download_url(detail_refresh_url)
+                        detail_refresh_history = list(refresh_history)
+                        if normalized_detail_refresh_url and normalized_detail_refresh_url not in detail_refresh_history:
+                            detail_refresh_history.append(normalized_detail_refresh_url)
+                        _set_task_aux_fields(
+                            task,
+                            _gimy_detail_refresh_done=True,
+                            _gimy_refresh_history=detail_refresh_history,
+                            _gimy_page_refresh_candidates=[],
+                        )
+                        self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重建 Gimy 播放線...")
+                        write_error_log(
+                            "gimy detail page rebuild",
+                            self._ffmpeg_event_exception("rebuilding gimy episode sources after parse-stage source mismatch"),
+                            item_id=item_id,
+                            page_url=url,
+                            refresh_url=detail_refresh_url,
+                            deferred_count=len(deferred_episode_urls),
+                        )
+                        return self._download_task_internal(detail_refresh_url, item_id, save_dir, use_impersonate, is_mp3)
+                if available_episode_page_candidates:
+                    for alternate_episode_url in available_episode_page_candidates[:8]:
+                        try:
+                            alternate_text = gimy_fetch_text(alternate_episode_url, url, gimy_impersonate)
+                        except Exception as e:
+                            last_gimy_error = e
+                            continue
+                        alternate_result = extend_gimy_stream_candidates(alternate_episode_url, alternate_text, url, gimy_impersonate)
+                        if alternate_result["error"] is not None:
+                            last_gimy_error = alternate_result["error"]
+                        for candidate_url in alternate_result["candidates"]:
+                            if candidate_url not in stream_candidates:
+                                stream_candidates.append(candidate_url)
+                        for candidate_url in alternate_result["direct_urls"]:
+                            if candidate_url not in direct_fallback_candidates:
+                                direct_fallback_candidates.append(candidate_url)
+                        for candidate_url in alternate_result["external_urls"]:
+                            if candidate_url not in external_source_urls:
+                                external_source_urls.append(candidate_url)
+                        if stream_candidates or direct_fallback_candidates or external_source_urls:
+                            break
+                if stream_candidates or direct_fallback_candidates or external_source_urls:
+                    ordered_direct_candidates = _dedupe_download_urls(stream_candidates + direct_fallback_candidates)
+                    preferred_media_urls = [candidate for candidate in external_source_urls if _looks_like_http_media_url(candidate)]
+                    if preferred_media_urls:
+                        media_url = preferred_media_urls[0]
+                        direct_media_fallback_urls = [
+                            candidate
+                            for candidate in (preferred_media_urls[1:] + ordered_direct_candidates + deferred_episode_urls)
+                            if candidate and candidate != media_url and candidate != url
+                        ]
+                        _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
+                        _set_task_identity(
+                            name=page_title,
+                            source_site="gimy",
+                            source_page=self._get_task_source_page(task, fallback_url=url) or url,
+                            fallback_urls=direct_media_fallback_urls,
+                        )
+                        if is_mp3:
+                            self._set_task_found_media_ui(item_id)
+                            self._download_direct_media_audio_with_ffmpeg(
+                                item_id,
+                                media_url,
+                                save_dir,
+                                referer=url,
+                                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                            )
+                            return
+                        media_ext = _infer_media_extension_from_url(media_url) or ".mp4"
+                        out_name = f"{self._get_task_output_basename(task, page_title or 'Video')}{media_ext}"
+                        out_path = os.path.join(save_dir, out_name)
+                        self._set_task_output_path(task, item_id, out_path)
+                        self._set_task_name_text(item_id, out_name)
+                        self._set_task_found_media_ui(item_id)
+                        self._download_http_media(
+                            item_id,
+                            media_url,
+                            out_path,
+                            headers={
+                                "Referer": url,
+                                "Origin": f"{parsed_url.scheme}://{parsed_url.netloc}",
+                                "User-Agent": DEFAULT_USER_AGENT,
+                            },
+                        )
+                        return
+                    supported_external_pages = [
+                        candidate for candidate in external_source_urls
+                        if _is_supported_download_page_url(candidate)
+                    ]
+                    if not ordered_direct_candidates and supported_external_pages:
+                        external_url = supported_external_pages[0]
+                        fallback_urls = [candidate for candidate in (supported_external_pages[1:] + deferred_episode_urls) if candidate and candidate != external_url]
+                        _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
+                        _set_task_aux_fields(task, _gimy_source_refresh_history=[])
+                        _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
+                        self._set_task_found_media_ui(item_id)
+                        self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
+                        return
                 if last_gimy_error:
                     raise last_gimy_error
                 raise Exception("Gimy iframe stream URL missing")
@@ -6957,6 +7599,11 @@ class DownloadManagerApp:
                 if candidate and candidate not in ordered_candidates and candidate != url
             ]
             fallback_urls = (ordered_candidates[1:] if len(ordered_candidates) > 1 else []) + deferred_fallback_urls
+            _set_task_aux_fields(
+                task,
+                _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_fallback_urls),
+            )
+            _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
             self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
@@ -6980,6 +7627,8 @@ class DownloadManagerApp:
                 raise Exception("Gimy stream URL missing")
             page_title = _extract_html_title(resp.text, short_name)
             fallback_urls = candidates[1:] if len(candidates) > 1 else []
+            _set_task_aux_fields(task, _gimy_page_refresh_candidates=[])
+            _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
