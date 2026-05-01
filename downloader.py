@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260501-2460"
+APP_BUILD = "20260501-2470"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1532,6 +1532,34 @@ def _extract_movieffm_m3u8_candidates(page_html):
     return _dedupe_download_urls(candidates)
 
 
+def _normalize_mixdrop_watch_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return None
+    parsed = urllib.parse.urlsplit(normalized)
+    host = parsed.netloc.lower()
+    if "mixdrop.ag" not in host and "m1xdrop.click" not in host:
+        return normalized
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if len(path_parts) >= 2 and path_parts[0] in ("e", "f"):
+        ref = path_parts[1]
+        return urllib.parse.urlunsplit((parsed.scheme or "https", parsed.netloc, f"/e/{ref}", "", ""))
+    return normalized
+
+
+def _is_mixdrop_direct_media(url, source_page=""):
+    media_url = _normalize_download_url(url)
+    referer_url = _normalize_download_url(source_page)
+    if not media_url:
+        return False
+    media_host = urllib.parse.urlsplit(media_url).netloc.lower()
+    referer_host = urllib.parse.urlsplit(referer_url).netloc.lower() if referer_url else ""
+    return (
+        "mxcontent.net" in media_host
+        and any(host in referer_host for host in ("mixdrop.ag", "m1xdrop.click"))
+    )
+
+
 def _extract_movieffm_external_source_urls(page_html):
     candidates = []
     allowed_hosts = ("mixdrop.ag", "m1xdrop.click")
@@ -1540,12 +1568,12 @@ def _extract_movieffm_external_source_urls(page_html):
     for match in re.finditer(r'"videos"\s*:\s*\[(.*?)\]', normalized_html, re.IGNORECASE | re.DOTALL):
         block = match.group(1)
         for url_match in re.finditer(r'"url"\s*:\s*"([^"]+)"', block, re.IGNORECASE):
-            candidate = _normalize_download_url(url_match.group(1).strip())
+            candidate = _normalize_mixdrop_watch_url(url_match.group(1).strip())
             host = urllib.parse.urlsplit(candidate).netloc.lower() if candidate else ""
             if candidate and any(allowed_host in host for allowed_host in allowed_hosts) and candidate not in candidates:
                 candidates.append(candidate)
     for match in re.finditer(r'href=["\']([^"\']+\?download[^"\']*)["\']', normalized_html, re.IGNORECASE):
-        candidate = _normalize_download_url(match.group(1).strip())
+        candidate = _normalize_mixdrop_watch_url(match.group(1).strip())
         host = urllib.parse.urlsplit(candidate).netloc.lower() if candidate else ""
         if candidate and any(allowed_host in host for allowed_host in allowed_hosts) and candidate not in candidates:
             candidates.append(candidate)
@@ -1610,6 +1638,106 @@ def _movieffm_numbered_episode_key(name_text):
         return ""
     num = int(match.group(1))
     return f"{num:02d}" if num < 100 else str(num)
+
+
+_EPISODE_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "兩": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+
+def _parse_chinese_episode_number(text):
+    cleaned = re.sub(r"\s+", "", str(text or ""))
+    if not cleaned:
+        return None
+    if cleaned == "十":
+        return 10
+    if cleaned.startswith("十"):
+        tail = cleaned[1:]
+        if tail and all(char in _EPISODE_CHINESE_DIGITS for char in tail):
+            return 10 + _EPISODE_CHINESE_DIGITS.get(tail, 0)
+    if cleaned.endswith("十"):
+        head = cleaned[:-1]
+        if head and all(char in _EPISODE_CHINESE_DIGITS for char in head):
+            return _EPISODE_CHINESE_DIGITS.get(head, 0) * 10
+    if "十" in cleaned:
+        head, _, tail = cleaned.partition("十")
+        if (
+            head
+            and tail
+            and all(char in _EPISODE_CHINESE_DIGITS for char in head)
+            and all(char in _EPISODE_CHINESE_DIGITS for char in tail)
+        ):
+            return _EPISODE_CHINESE_DIGITS.get(head, 0) * 10 + _EPISODE_CHINESE_DIGITS.get(tail, 0)
+    if all(char in _EPISODE_CHINESE_DIGITS for char in cleaned):
+        value = 0
+        for char in cleaned:
+            value = value * 10 + _EPISODE_CHINESE_DIGITS[char]
+        return value
+    return None
+
+
+def _extract_episode_order_number(value):
+    text = html.unescape(str(value or ""))
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return None
+    for pattern in (
+        r"第\s*0*(\d{1,4})\s*[集話章回期]",
+        r"\bEP?\s*0*(\d{1,4})\b",
+        r"\bE0*(\d{1,4})\b",
+        r"\b0*(\d{1,4})\b",
+    ):
+        match = re.search(pattern, normalized, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                continue
+    zh_match = re.search(r"第\s*([零〇一二兩三四五六七八九十]+)\s*[集話章回期]", normalized)
+    if zh_match:
+        parsed = _parse_chinese_episode_number(zh_match.group(1))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _natural_download_target_key(target):
+    if isinstance(target, (tuple, list)):
+        url = str(target[0]) if target else ""
+        label = " ".join(str(part) for part in target[1:] if part not in (None, ""))
+    elif isinstance(target, dict):
+        url = str(target.get("url", ""))
+        label = " ".join(
+            str(part)
+            for part in (
+                target.get("full_name"),
+                target.get("title"),
+                target.get("name"),
+            )
+            if part not in (None, "")
+        )
+    else:
+        url = str(target or "")
+        label = url
+    number = _extract_episode_order_number(label)
+    if number is None:
+        number = _extract_episode_order_number(url)
+    return (number is None, number if number is not None else 0, label.lower(), url.lower())
+
+
+def _sort_download_targets_naturally(targets):
+    return sorted(list(targets or []), key=_natural_download_target_key)
 
 
 def _collect_movieffm_drama_episodes(page_html, page_url, fallback_title="MovieFFM"):
@@ -2850,7 +2978,9 @@ class DownloadManagerApp:
         self.tree.bind("<Delete>", self._handle_delete_key)
         self.tree.bind("<BackSpace>", self._handle_delete_key)
         self.tree.bind("<Control-a>", self.select_all_tasks)
-        self.tree.bind("<B1-Motion>", self.drag_select)
+        self.tree.bind("<ButtonPress-1>", self._begin_tree_reorder)
+        self.tree.bind("<B1-Motion>", self._drag_reorder_tree)
+        self.tree.bind("<ButtonRelease-1>", self._end_tree_reorder)
         self.tree.bind("<<TreeviewSelect>>", self._handle_tree_select)
         self._refresh_ui_summary()
 
@@ -2871,10 +3001,92 @@ class DownloadManagerApp:
         for child in children:
             self._register_drop_targets(child)
 
-    def drag_select(self, event):
+    def _begin_tree_reorder(self, event):
+        if self.tree is None:
+            return
+        region = self.tree.identify("region", event.x, event.y)
         item_id = self.tree.identify_row(event.y)
-        if item_id:
-            self.tree.selection_add(item_id)
+        self._tree_drag_anchor = ""
+        self._tree_drag_changed = False
+        self._tree_drag_last_order = ()
+        if region not in ("tree", "cell") or not item_id:
+            return
+        selected = list(self.tree.selection())
+        if item_id not in selected:
+            self.tree.selection_set(item_id)
+            selected = [item_id]
+        self._focus_tree_item(item_id)
+        self._tree_drag_anchor = item_id
+        self._tree_drag_selection = tuple(
+            entry_id for entry_id in self.tree.get_children() if entry_id in selected
+        )
+        return "break"
+
+    def _drag_reorder_tree(self, event):
+        if self.tree is None:
+            return
+        anchor = getattr(self, "_tree_drag_anchor", "")
+        selected = list(getattr(self, "_tree_drag_selection", ()))
+        if not anchor or not selected:
+            return
+        children = list(self.tree.get_children())
+        selected = [entry_id for entry_id in children if entry_id in selected]
+        if not selected:
+            return
+        target = self.tree.identify_row(event.y)
+        remaining = [entry_id for entry_id in children if entry_id not in selected]
+        if not remaining:
+            return "break"
+        if target and target in remaining:
+            insert_at = remaining.index(target)
+            bbox = self.tree.bbox(target)
+            if bbox:
+                midpoint = bbox[1] + (bbox[3] / 2.0)
+                if event.y > midpoint:
+                    insert_at += 1
+        elif target:
+            return "break"
+        else:
+            insert_at = 0 if event.y < 0 else len(remaining)
+        new_order = tuple(remaining[:insert_at] + selected + remaining[insert_at:])
+        if new_order == tuple(children) or new_order == getattr(self, "_tree_drag_last_order", ()):
+            return "break"
+        for index, entry_id in enumerate(new_order):
+            self.tree.move(entry_id, "", index)
+        self.tree.selection_set(selected)
+        self._focus_tree_item(selected[0])
+        self._tree_drag_changed = True
+        self._tree_drag_last_order = new_order
+        return "break"
+
+    def _rebuild_task_order_from_tree(self):
+        if self.tree is None or not self.tasks:
+            return
+        ordered_ids = [item_id for item_id in self.tree.get_children() if item_id in self.tasks]
+        if not ordered_ids:
+            return
+        if ordered_ids == list(self.tasks.keys()):
+            return
+        existing_tasks = self.tasks
+        reordered_tasks = {item_id: existing_tasks[item_id] for item_id in ordered_ids}
+        for item_id, task in existing_tasks.items():
+            if item_id not in reordered_tasks:
+                reordered_tasks[item_id] = task
+        self.tasks = reordered_tasks
+        try:
+            self.persist_unfinished_state(force=True)
+        except Exception:
+            pass
+        self._schedule_process_queue()
+
+    def _end_tree_reorder(self, event=None):
+        if getattr(self, "_tree_drag_changed", False):
+            self._rebuild_task_order_from_tree()
+            self._refresh_ui_summary()
+        self._tree_drag_anchor = ""
+        self._tree_drag_selection = ()
+        self._tree_drag_changed = False
+        self._tree_drag_last_order = ()
 
     def show_tree_menu(self, event):
         item_id = self.tree.identify_row(event.y)
@@ -3301,6 +3513,7 @@ class DownloadManagerApp:
     def _choose_playlist_targets(self, episodes, selected_episode=None):
         if not episodes:
             return []
+        episodes = _sort_download_targets_naturally(episodes)
         default_target = selected_episode if selected_episode in episodes else episodes[0]
         if len(episodes) > 1 and self._ask_warning_yesno(self._playlist_add_all_text(len(episodes))):
             return episodes
@@ -7037,8 +7250,7 @@ class DownloadManagerApp:
                 continue
             if _task_state_value(self.tasks.get(item_id, {})) != "FINISHED":
                 continue
-            self.tree.delete(item_id)
-            del self.tasks[item_id]
+            self._delete_finished_task(item_id)
         self.persist_unfinished_state(force=True)
 
     def persist_unfinished_state(self, force=False):
@@ -7614,10 +7826,39 @@ class DownloadManagerApp:
                 filename = f"{self._get_task_output_basename(task, 'downloaded_file')}{inferred_direct_media_ext}"
             self._set_task_output_path(task, item_id, os.path.join(save_dir, filename))
             self._set_task_name_text(item_id, filename)
+            direct_headers = {"User-Agent": DEFAULT_USER_AGENT}
+            direct_referer = self._get_task_source_page(task)
+            direct_session = None
+            if direct_referer:
+                direct_headers["Referer"] = direct_referer
+                parsed_referer = urllib.parse.urlsplit(direct_referer)
+                if parsed_referer.scheme and parsed_referer.netloc:
+                    direct_headers["Origin"] = f"{parsed_referer.scheme}://{parsed_referer.netloc}"
+            if _is_mixdrop_direct_media(url, direct_referer):
+                c_req = get_curl_cffi_requests()
+                direct_session = c_req.Session(impersonate="chrome120")
+                warmup_referer = self._get_task_url(task, fallback_url="https://www.movieffm.net/") or "https://www.movieffm.net/"
+                try:
+                    direct_session.get(
+                        direct_referer,
+                        headers={"Referer": warmup_referer, "User-Agent": DEFAULT_USER_AGENT},
+                        timeout=20,
+                    )
+                except Exception:
+                    try:
+                        direct_session.get(
+                            direct_referer,
+                            headers={"Referer": direct_referer, "User-Agent": DEFAULT_USER_AGENT},
+                            timeout=20,
+                        )
+                    except Exception:
+                        direct_session = None
             try:
-                self._download_http_media(item_id, url, self._get_task_output_path(task), headers={"User-Agent": DEFAULT_USER_AGENT})
+                self._download_http_media(item_id, url, self._get_task_output_path(task), headers=direct_headers, session=direct_session)
                 return
             except Exception as e:
+                if _is_mixdrop_direct_media(url, direct_referer):
+                    raise
                 self._set_task_fallback_parser_ui(item_id, f"Direct media download failed: {str(e)[:30]}")
 
         if "jable.tv" in parsed_url.netloc:
@@ -8484,28 +8725,37 @@ class DownloadManagerApp:
         if any(host in parsed_url.netloc for host in ("mixdrop.ag", "m1xdrop.click")):
             self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析外部播放來源...")
             c_req = get_curl_cffi_requests()
-            safe_referer = self._get_task_source_page(task) or "https://www.movieffm.net/"
-            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": safe_referer})
+            source_page_referer = self._get_task_source_page(task) or "https://www.movieffm.net/"
+            watch_url = _normalize_mixdrop_watch_url(url) or url
+            mixdrop_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            mixdrop_session = c_req.Session(impersonate="chrome120")
+            resp = mixdrop_session.get(watch_url, timeout=20, headers={"Referer": source_page_referer, "User-Agent": DEFAULT_USER_AGENT})
             candidates = _extract_mixdrop_media_candidates(resp.text)
             media_url = next((candidate for candidate in candidates if _looks_like_http_media_url(candidate)), None)
             if not media_url:
                 media_url = next((candidate for candidate in candidates if _looks_like_manifest_url(candidate)), None)
             if not media_url:
                 raise Exception("MixDrop media URL missing")
-            page_title = self._get_task_name(task) or short_name or _extract_html_title(resp.text, short_name)
+            page_title = self._get_task_name_text(task, short_name) or short_name or _extract_html_title(resp.text, short_name)
             fallback_urls = [candidate for candidate in candidates if candidate != media_url]
-            _set_task_identity(name=page_title, source_site=self._get_task_source_site(task) or "movieffm", source_page=self._get_task_source_page(task) or url, fallback_urls=fallback_urls)
+            _set_task_identity(name=page_title, source_site=self._get_task_source_site(task) or "movieffm", source_page=watch_url, fallback_urls=fallback_urls)
             if _looks_like_manifest_url(media_url):
                 self._log_m3u8_route_selected(task, item_id, media_url, source_site=self._get_task_source_site(task) or "movieffm", fallback_urls=fallback_urls)
-                self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+                self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=watch_url, origin=mixdrop_origin)
             elif is_mp3:
                 self._set_task_found_media_ui(item_id)
-                self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+                self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=watch_url, origin=mixdrop_origin)
             else:
                 self._set_task_found_media_ui(item_id)
                 ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
                 out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
-                self._download_http_media(item_id, media_url, os.path.join(save_dir, out_name + ext), headers={"Referer": safe_referer, "Origin": f"{parsed_url.scheme}://{parsed_url.netloc}", "User-Agent": ydl_opts["http_headers"]["User-Agent"]})
+                self._download_http_media(
+                    item_id,
+                    media_url,
+                    os.path.join(save_dir, out_name + ext),
+                    headers={"Referer": watch_url, "Origin": mixdrop_origin, "User-Agent": ydl_opts["http_headers"]["User-Agent"]},
+                    session=mixdrop_session,
+                )
             return
 
         if "threads.net" in parsed_url.netloc or parsed_url.netloc.startswith("www.threads."):
