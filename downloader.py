@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260430-2450"
+APP_BUILD = "20260501-2460"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1031,6 +1031,13 @@ def _filter_gimy_failed_stream_candidates(task, candidates):
     return filtered
 
 
+def _filter_gimy_candidate_groups(task, *candidate_groups):
+    return tuple(
+        _filter_gimy_failed_stream_candidates(task, candidates)
+        for candidates in candidate_groups
+    )
+
+
 def _task_resolved_url(task, fallback_url=""):
     resolved_url = _normalize_download_url(_task_field_value(task, "resolved_url", ""))
     if resolved_url:
@@ -1525,6 +1532,50 @@ def _extract_movieffm_m3u8_candidates(page_html):
     return _dedupe_download_urls(candidates)
 
 
+def _extract_movieffm_external_source_urls(page_html):
+    candidates = []
+    allowed_hosts = ("mixdrop.ag", "m1xdrop.click")
+    raw_html = str(page_html or "")
+    normalized_html = html.unescape(raw_html).replace("\\/", "/")
+    for match in re.finditer(r'"videos"\s*:\s*\[(.*?)\]', normalized_html, re.IGNORECASE | re.DOTALL):
+        block = match.group(1)
+        for url_match in re.finditer(r'"url"\s*:\s*"([^"]+)"', block, re.IGNORECASE):
+            candidate = _normalize_download_url(url_match.group(1).strip())
+            host = urllib.parse.urlsplit(candidate).netloc.lower() if candidate else ""
+            if candidate and any(allowed_host in host for allowed_host in allowed_hosts) and candidate not in candidates:
+                candidates.append(candidate)
+    for match in re.finditer(r'href=["\']([^"\']+\?download[^"\']*)["\']', normalized_html, re.IGNORECASE):
+        candidate = _normalize_download_url(match.group(1).strip())
+        host = urllib.parse.urlsplit(candidate).netloc.lower() if candidate else ""
+        if candidate and any(allowed_host in host for allowed_host in allowed_hosts) and candidate not in candidates:
+            candidates.append(candidate)
+    return _dedupe_download_urls(candidates)
+
+
+def _extract_mixdrop_media_candidates(page_html):
+    candidates = []
+    raw_html = str(page_html or "")
+    html_variants = []
+    for variant in (
+        raw_html,
+        html.unescape(raw_html),
+        raw_html.replace("\\/", "/"),
+        html.unescape(raw_html.replace("\\/", "/")),
+    ):
+        if variant and variant not in html_variants:
+            html_variants.append(variant)
+    for variant in html_variants:
+        candidates.extend(_extract_candidate_media_urls(variant, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+    unpacked = unpack_packed_javascript(raw_html)
+    if unpacked:
+        candidates.extend(_extract_candidate_media_urls(unpacked, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+        for match in re.finditer(r'wurl\s*[:=]\s*["\']([^"\']+)["\']', unpacked, re.IGNORECASE):
+            candidate = _normalize_download_url(match.group(1).strip())
+            if candidate:
+                candidates.append(candidate)
+    return _dedupe_download_urls(candidates)
+
+
 def _extract_movieffm_detail_page_urls(page_html, current_url=None):
     current_url = _normalize_download_url(current_url)
     detail_urls = []
@@ -1652,17 +1703,31 @@ def _build_gimy_iframe_urls(page_url, player_data):
     return urls
 
 
+def _extract_gimy_inline_iframe_urls(page_html, page_url):
+    parsed = urllib.parse.urlsplit(str(page_url or ""))
+    base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'gimy01.tv'}"
+    urls = []
+    for match in re.finditer(r'<iframe[^>]+src=["\']([^"\']+)["\']', str(page_html or ""), re.IGNORECASE):
+        iframe_src = html.unescape(str(match.group(1) or "")).replace("\\/", "/").strip()
+        if not iframe_src:
+            continue
+        full_url = _normalize_download_url(urllib.parse.urljoin(base, iframe_src))
+        if full_url and full_url not in urls:
+            urls.append(full_url)
+    return urls
+
+
 def _extract_gimy_episode_page_urls(page_html, page_url, current_url=None):
     parsed_page = urllib.parse.urlsplit(str(page_url or ""))
     page_base = f"{parsed_page.scheme or 'https'}://{parsed_page.netloc or 'gimy01.tv'}"
     current_nid = None
-    current_match = re.search(r"/eps/\d+-\d+-(\d+)\.html", str(current_url or page_url or ""))
+    current_match = re.search(r"/eps/\d+-(\d+)(?:-(\d+))?\.html", str(current_url or page_url or ""))
     if current_match:
-        current_nid = current_match.group(1)
+        current_nid = current_match.group(2) or current_match.group(1)
     urls = []
-    for match in re.finditer(r'href=["\'](/eps/\d+-\d+-(\d+)\.html)["\']', str(page_html or ""), re.IGNORECASE):
+    for match in re.finditer(r'href=["\'](/eps/\d+-(\d+)(?:-(\d+))?\.html)["\']', str(page_html or ""), re.IGNORECASE):
         relative_url = match.group(1)
-        nid = match.group(2)
+        nid = match.group(3) or match.group(2)
         if current_nid and nid != current_nid:
             continue
         full_url = _normalize_download_url(urllib.parse.urljoin(page_base, relative_url))
@@ -4198,6 +4263,39 @@ class DownloadManagerApp:
         if task:
             self._finalize_completed_task(task, clear_resume_requested=True)
 
+    def _is_incomplete_gimy_video_artifact(self, task, output_path, expected_duration=None):
+        if self._get_task_source_site(task) != "gimy":
+            return False
+        if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
+            return False
+        info = self._probe_media_info(output_path)
+        if not info.get("exists") or not info.get("size"):
+            return True
+        duration = float(info.get("duration", 0.0) or 0.0)
+        size = int(info.get("size", 0) or 0)
+        if size < 1024 * 1024 and duration < 60.0:
+            return True
+        try:
+            expected_total_bytes = max(int(task.get("total_bytes", 0) or 0), 0)
+        except Exception:
+            expected_total_bytes = 0
+        if expected_total_bytes > 20 * 1024 * 1024 and size > 0 and size < expected_total_bytes * 0.8:
+            return True
+        expected_seconds = max(float(expected_duration or 0.0), 0.0)
+        try:
+            ext = os.path.splitext(output_path)[1].lstrip(".") or "mp4"
+            resume_key = self._get_task_resolved_url(task, fallback_url=self._get_task_url(task))
+            temp_root = self._get_stable_resume_base(self._get_task_url(task), ext=ext, resume_key=resume_key)
+            progress_info = self._load_resume_progress_info(f"{temp_root}.part.progress.json")
+            stored_source = str(progress_info.get("source_url", "") or "")
+            if resume_key and stored_source == resume_key:
+                expected_seconds = max(expected_seconds, float(progress_info.get("seconds", 0.0) or 0.0))
+        except Exception:
+            pass
+        if expected_seconds > 300.0 and duration > 0.0 and duration + max(60.0, expected_seconds * 0.2) < expected_seconds:
+            return True
+        return False
+
     def _count_live_tasks(self):
         count = 0
         for _ in self._iter_live_tasks():
@@ -4210,6 +4308,15 @@ class DownloadManagerApp:
             return False
         explicit_output = self._get_task_output_path(task)
         if self._has_nonempty_file(explicit_output):
+            if self._is_incomplete_gimy_video_artifact(task, explicit_output):
+                write_error_log(
+                    "gimy existing output rejected",
+                    Exception("existing gimy output appears incomplete"),
+                    item_id=item_id,
+                    output=explicit_output,
+                    source_site=self._get_task_source_site(task) or None,
+                )
+                return False
             self._set_task_output_path(task, item_id, explicit_output)
             self._mark_existing_file_complete(item_id, self._message_file_exists_text())
             return True
@@ -4229,6 +4336,15 @@ class DownloadManagerApp:
     def _set_output_path_and_complete_if_exists(self, task, item_id, output_path, message=None, temp=False):
         self._set_task_output_path(task, item_id, output_path, temp=temp)
         if self._has_nonempty_file(output_path):
+            if not temp and self._is_incomplete_gimy_video_artifact(task, output_path):
+                write_error_log(
+                    "gimy existing output rejected",
+                    Exception("existing gimy output appears incomplete"),
+                    item_id=item_id,
+                    output=output_path,
+                    source_site=self._get_task_source_site(task) or None,
+                )
+                return False
             self._mark_existing_file_complete(item_id, message or self._eta_file_exists_text())
             return True
         return False
@@ -5503,6 +5619,12 @@ class DownloadManagerApp:
             speed_text = f"{speed_text} | {format_eta(float(eta_seconds))}"
         self._set_task_speed_eta_text(item_id, speed_text)
 
+    def _set_task_known_total_size_ui(self, task, item_id, total_size, downloaded_bytes=0):
+        if not total_size or total_size <= 0:
+            return
+        _set_task_transfer_metrics(task, downloaded_bytes=downloaded_bytes, total_bytes=total_size)
+        self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
+
     def _make_yt_dlp_progress_hook(self, task, item_id, save_dir):
         def progress_hook(d):
             task_state = _task_state_value(self.tasks.get(item_id, {}))
@@ -5616,8 +5738,7 @@ class DownloadManagerApp:
                     raise KeyboardInterrupt()
                 if output_path and total_size and total_size > 0 and os.path.exists(output_path):
                     downloaded = self._get_existing_file_size(output_path)
-                    _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=total_size)
-                    self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
+                    self._set_task_known_total_size_ui(task, item_id, total_size, downloaded_bytes=downloaded)
                     percent = format_progress_percent(downloaded, total_size, cap_at_99=True)
                     if percent is not None:
                         self._set_task_progress_percent_ui(item_id, percent)
@@ -5667,7 +5788,9 @@ class DownloadManagerApp:
                 safe_name += ".bin"
             source_out_path = os.path.join(save_dir, safe_name)
             if is_mp3:
-                out_path = self._set_task_output_path(task, item_id, os.path.join(save_dir, f"{os.path.splitext(safe_name)[0]}.mp3"))
+                out_path = os.path.join(save_dir, f"{os.path.splitext(safe_name)[0]}.mp3")
+                if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
+                    return
                 _set_task_aux_fields(task, temp_filename=source_out_path)
             else:
                 out_path = self._set_task_output_path(task, item_id, source_out_path)
@@ -5681,12 +5804,8 @@ class DownloadManagerApp:
         display_name = os.path.splitext(safe_name)[0] if is_mp3 and safe_name else safe_name
         self._set_task_mega_identity(item_id, task, url, display_name)
 
-        if is_mp3 and out_path and os.path.exists(out_path):
-            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
-            return
         if total_size and total_size > 0:
-            _set_task_transfer_metrics(task, downloaded_bytes=0, total_bytes=total_size)
-            self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
+            self._set_task_known_total_size_ui(task, item_id, total_size)
             if (not is_mp3) and out_path and self._get_existing_file_size(out_path) >= total_size:
                 self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
                 return
@@ -5879,7 +5998,7 @@ class DownloadManagerApp:
                         if percent is not None:
                             self._set_task_progress_percent_ui(item_id, percent)
                         if total_size > 0:
-                            self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
+                            self._set_task_known_total_size_ui(task, item_id, total_size, downloaded_bytes=downloaded)
                             eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
                             self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
                         else:
@@ -5939,7 +6058,8 @@ class DownloadManagerApp:
                         percent = format_progress_percent(multi_downloaded, total_size, cap_at_99=True)
                         if percent is not None:
                             self._set_task_progress_percent_ui(item_id, percent)
-                            self._set_task_size_text(item_id, f"{total_size / 1024 / 1024:.1f} MB")
+                            task = self.tasks.get(item_id, {})
+                            self._set_task_known_total_size_ui(task, item_id, total_size, downloaded_bytes=multi_downloaded)
                             eta = max((total_size - multi_downloaded) / max(speed_bps, 1.0), 0.0)
                             self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
                         time.sleep(0.5)
@@ -6698,6 +6818,15 @@ class DownloadManagerApp:
                 if not is_mp3:
                     looks_truncated = total_duration > 30 and final_duration > 0 and final_duration < min(5.0, total_duration * 0.01)
                     looks_invalid = (not final_info.get("valid")) and final_size < 1024 * 1024
+                    if self._get_task_source_site(task) == "gimy":
+                        looks_truncated = looks_truncated or (
+                            total_duration > 300.0
+                            and final_duration > 0.0
+                            and final_duration < total_duration * 0.8
+                        )
+                        looks_invalid = looks_invalid or (
+                            final_size < 5 * 1024 * 1024 and final_duration < 300.0
+                        )
                     if looks_truncated or looks_invalid:
                         last_error = Exception(
                             f"FFmpeg produced an incomplete output artifact: size={final_size} duration={final_duration:.3f}"
@@ -7598,6 +7727,7 @@ class DownloadManagerApp:
                 return
             player_data = _extract_player_js_object(resp.text, "player_aaaa")
             candidates = []
+            external_source_urls = []
             if player_data:
                 primary_url = _normalize_download_url(player_data.get("url"))
                 if primary_url:
@@ -7608,12 +7738,18 @@ class DownloadManagerApp:
                         candidates.extend(value)
             if not candidates:
                 candidates = _extract_movieffm_m3u8_candidates(resp.text)
-            if not candidates and not player_data:
+            if not candidates:
+                external_source_urls = _extract_movieffm_external_source_urls(resp.text)
+            if not candidates and not player_data and not external_source_urls:
                 raise Exception("MovieFFM player data not found")
             candidates = _dedupe_download_urls(candidates)
+            external_source_urls = _dedupe_download_urls(external_source_urls)
+            page_title = _extract_html_title(resp.text, short_name)
+            if not candidates and external_source_urls:
+                _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=external_source_urls[1:])
+                return self._download_task_internal(external_source_urls[0], item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
             if not candidates:
                 raise Exception("MovieFFM stream URL missing")
-            page_title = _extract_html_title(resp.text, short_name)
             _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=candidates[1:])
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="movieffm")
             self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer="https://www.movieffm.net/", origin="https://www.movieffm.net")
@@ -7773,42 +7909,54 @@ class DownloadManagerApp:
                     for candidate_url in _collect_player_m3u8_candidates(local_player_data, base_url=page_link):
                         if candidate_url not in local_candidates:
                             local_candidates.append(candidate_url)
-                    for iframe_url in _build_gimy_iframe_urls(page_link, local_player_data):
-                        try:
-                            iframe_text = gimy_fetch_text(iframe_url, referer_value, impersonate_name)
-                        except Exception as inner_exc:
-                            local_error = inner_exc
-                            continue
-                        iframe_player_data = _extract_player_js_object(iframe_text, "player_data", "player_aaaa", "player")
-                        if iframe_player_data:
-                            for candidate_url in _collect_player_m3u8_candidates(iframe_player_data, base_url=iframe_url):
-                                if candidate_url not in local_candidates:
-                                    local_candidates.append(candidate_url)
-                        for stream_url in _extract_m3u8_candidates_from_text(iframe_text, base_url=iframe_url):
-                            if stream_url not in local_candidates:
-                                local_candidates.append(stream_url)
-                        parse_source = urllib.parse.parse_qs(urllib.parse.urlsplit(iframe_url).query).get("url", [""])[0]
-                        if parse_source and "parse.php" in iframe_text:
-                            parse_api = urllib.parse.urljoin(iframe_url, f"parse.php?url={urllib.parse.quote(parse_source, safe='')}")
-                            try:
-                                parse_text = gimy_fetch_text(parse_api, iframe_url, impersonate_name)
-                                parse_data = json.loads(parse_text)
-                                for key in ("url", "video", "playurl"):
-                                    parsed_candidate = _normalize_download_url(parse_data.get(key))
-                                    if not parsed_candidate:
-                                        continue
-                                    candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(parsed_candidate)
-                                    if candidate_kind == "manifest":
-                                        if normalized_candidate not in local_candidates:
-                                            local_candidates.append(normalized_candidate)
-                                    elif candidate_kind == "external":
-                                        if normalized_candidate not in local_external_urls:
-                                            local_external_urls.append(normalized_candidate)
-                            except Exception as inner_exc:
-                                local_error = inner_exc
                     player_title = (local_player_data.get("vod_data") or {}).get("vod_name")
                     if player_title:
                         local_title = re.sub(r"\s+", " ", str(player_title)).strip()
+                iframe_urls = _extract_gimy_inline_iframe_urls(page_text, page_link)
+                if local_player_data:
+                    for iframe_url in _build_gimy_iframe_urls(page_link, local_player_data):
+                        if iframe_url not in iframe_urls:
+                            iframe_urls.append(iframe_url)
+                for iframe_url in iframe_urls:
+                    try:
+                        iframe_text = gimy_fetch_text(iframe_url, referer_value, impersonate_name)
+                    except Exception as inner_exc:
+                        local_error = inner_exc
+                        continue
+                    iframe_player_data = _extract_player_js_object(iframe_text, "player_data", "player_aaaa", "player")
+                    if iframe_player_data:
+                        iframe_direct_url = _normalize_download_url(iframe_player_data.get("url"))
+                        if iframe_direct_url:
+                            candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(iframe_direct_url)
+                            if candidate_kind == "manifest" and normalized_candidate and normalized_candidate not in local_direct_urls:
+                                local_direct_urls.append(normalized_candidate)
+                            elif candidate_kind == "external" and normalized_candidate and normalized_candidate not in local_external_urls:
+                                local_external_urls.append(normalized_candidate)
+                        for candidate_url in _collect_player_m3u8_candidates(iframe_player_data, base_url=iframe_url):
+                            if candidate_url not in local_candidates:
+                                local_candidates.append(candidate_url)
+                    for stream_url in _extract_m3u8_candidates_from_text(iframe_text, base_url=iframe_url):
+                        if stream_url not in local_candidates:
+                            local_candidates.append(stream_url)
+                    parse_source = urllib.parse.parse_qs(urllib.parse.urlsplit(iframe_url).query).get("url", [""])[0]
+                    if parse_source and "parse.php" in iframe_text:
+                        parse_api = urllib.parse.urljoin(iframe_url, f"parse.php?url={urllib.parse.quote(parse_source, safe='')}")
+                        try:
+                            parse_text = gimy_fetch_text(parse_api, iframe_url, impersonate_name)
+                            parse_data = json.loads(parse_text)
+                            for key in ("url", "video", "playurl"):
+                                parsed_candidate = _normalize_download_url(parse_data.get(key))
+                                if not parsed_candidate:
+                                    continue
+                                candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(parsed_candidate)
+                                if candidate_kind == "manifest":
+                                    if normalized_candidate not in local_candidates:
+                                        local_candidates.append(normalized_candidate)
+                                elif candidate_kind == "external":
+                                    if normalized_candidate not in local_external_urls:
+                                        local_external_urls.append(normalized_candidate)
+                        except Exception as inner_exc:
+                            local_error = inner_exc
                 for direct_stream in _extract_m3u8_candidates_from_text(page_text, base_url=page_link):
                     if direct_stream not in local_candidates:
                         local_candidates.append(direct_stream)
@@ -7872,8 +8020,11 @@ class DownloadManagerApp:
                 if "播放失效" in resp_text or "播放失败" in resp_text or '<p class="p-2 text-error"' in resp_text:
                     last_gimy_error = Exception("Gimy episode page reports playback failure")
                     continue
-            direct_fallback_candidates = _filter_gimy_failed_stream_candidates(task, direct_fallback_candidates)
-            external_source_urls = _filter_gimy_failed_stream_candidates(task, external_source_urls)
+            direct_fallback_candidates, external_source_urls = _filter_gimy_candidate_groups(
+                task,
+                direct_fallback_candidates,
+                external_source_urls,
+            )
             ordered_direct_candidates = _dedupe_download_urls(stream_candidates + direct_fallback_candidates)
             preferred_media_urls = [candidate for candidate in external_source_urls if _looks_like_http_media_url(candidate)]
             if preferred_media_urls:
@@ -8125,22 +8276,26 @@ class DownloadManagerApp:
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
             player_data = _extract_player_js_object(resp.text, "player_data", "player_aaaa")
-            if not player_data:
-                raise Exception("Gimy player_data not found")
             direct_fallback_candidates = []
             external_source_urls = []
-            direct_url = _normalize_download_url(player_data.get("url"))
-            if direct_url:
-                candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(direct_url)
-                if candidate_kind == "manifest" and normalized_candidate:
-                    direct_fallback_candidates.append(normalized_candidate)
-                elif candidate_kind == "external" and normalized_candidate:
-                    external_source_urls.append(normalized_candidate)
-            candidates = _collect_player_m3u8_candidates(player_data, base_url=url)
+            if player_data:
+                direct_url = _normalize_download_url(player_data.get("url"))
+                if direct_url:
+                    candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(direct_url)
+                    if candidate_kind == "manifest" and normalized_candidate:
+                        direct_fallback_candidates.append(normalized_candidate)
+                    elif candidate_kind == "external" and normalized_candidate:
+                        external_source_urls.append(normalized_candidate)
+            candidates = _collect_player_m3u8_candidates(player_data, base_url=url) if player_data else []
             for candidate_url in _extract_m3u8_candidates_from_text(resp.text, base_url=url):
                 if candidate_url not in candidates:
                     candidates.append(candidate_url)
-            for iframe_url in _build_gimy_iframe_urls(url, player_data):
+            iframe_urls = _extract_gimy_inline_iframe_urls(resp.text, url)
+            if player_data:
+                for iframe_url in _build_gimy_iframe_urls(url, player_data):
+                    if iframe_url not in iframe_urls:
+                        iframe_urls.append(iframe_url)
+            for iframe_url in iframe_urls:
                 try:
                     iframe_resp = c_req.get(iframe_url, impersonate="chrome110", timeout=12, headers={"Referer": f"{parsed_url.scheme}://{parsed_url.netloc}/"})
                     iframe_text = iframe_resp.text
@@ -8180,9 +8335,12 @@ class DownloadManagerApp:
                             elif candidate_kind == "external" and normalized_candidate and normalized_candidate not in external_source_urls:
                                 external_source_urls.append(normalized_candidate)
             candidates = _dedupe_download_urls(candidates)
-            candidates = _filter_gimy_failed_stream_candidates(task, candidates)
-            direct_fallback_candidates = _filter_gimy_failed_stream_candidates(task, direct_fallback_candidates)
-            external_source_urls = _filter_gimy_failed_stream_candidates(task, external_source_urls)
+            candidates, direct_fallback_candidates, external_source_urls = _filter_gimy_candidate_groups(
+                task,
+                candidates,
+                direct_fallback_candidates,
+                external_source_urls,
+            )
             stream_url = candidates[0] if candidates else None
             if not stream_url:
                 supported_external_pages = [
@@ -8321,6 +8479,33 @@ class DownloadManagerApp:
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             else:
                 self._download_http_media(item_id, media_url, out_path, headers={"Referer": safe_referer, "Origin": f"{parsed_url.scheme}://{parsed_url.netloc}", "User-Agent": ydl_opts["http_headers"]["User-Agent"]})
+            return
+
+        if any(host in parsed_url.netloc for host in ("mixdrop.ag", "m1xdrop.click")):
+            self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析外部播放來源...")
+            c_req = get_curl_cffi_requests()
+            safe_referer = self._get_task_source_page(task) or "https://www.movieffm.net/"
+            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": safe_referer})
+            candidates = _extract_mixdrop_media_candidates(resp.text)
+            media_url = next((candidate for candidate in candidates if _looks_like_http_media_url(candidate)), None)
+            if not media_url:
+                media_url = next((candidate for candidate in candidates if _looks_like_manifest_url(candidate)), None)
+            if not media_url:
+                raise Exception("MixDrop media URL missing")
+            page_title = self._get_task_name(task) or short_name or _extract_html_title(resp.text, short_name)
+            fallback_urls = [candidate for candidate in candidates if candidate != media_url]
+            _set_task_identity(name=page_title, source_site=self._get_task_source_site(task) or "movieffm", source_page=self._get_task_source_page(task) or url, fallback_urls=fallback_urls)
+            if _looks_like_manifest_url(media_url):
+                self._log_m3u8_route_selected(task, item_id, media_url, source_site=self._get_task_source_site(task) or "movieffm", fallback_urls=fallback_urls)
+                self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+            elif is_mp3:
+                self._set_task_found_media_ui(item_id)
+                self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+            else:
+                self._set_task_found_media_ui(item_id)
+                ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                self._download_http_media(item_id, media_url, os.path.join(save_dir, out_name + ext), headers={"Referer": safe_referer, "Origin": f"{parsed_url.scheme}://{parsed_url.netloc}", "User-Agent": ydl_opts["http_headers"]["User-Agent"]})
             return
 
         if "threads.net" in parsed_url.netloc or parsed_url.netloc.startswith("www.threads."):
