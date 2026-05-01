@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260501-2470"
+APP_BUILD = "20260501-2480"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1558,6 +1558,60 @@ def _is_mixdrop_direct_media(url, source_page=""):
         "mxcontent.net" in media_host
         and any(host in referer_host for host in ("mixdrop.ag", "m1xdrop.click"))
     )
+
+
+def _derive_mixdrop_watch_url_from_task(task, fallback_url=""):
+    task = task or {}
+    candidates = [
+        _normalize_download_url(_task_field_value(task, "source_page", "")),
+        _normalize_download_url(fallback_url),
+        _normalize_download_url(_task_field_value(task, "url", "")),
+    ]
+    candidates.extend(_task_fallback_urls_list(task, primary_url=_task_field_value(task, "url", "")))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = _normalize_mixdrop_watch_url(candidate)
+        host = urllib.parse.urlsplit(normalized).netloc.lower() if normalized else ""
+        if normalized and any(mix_host in host for mix_host in ("mixdrop.ag", "m1xdrop.click")):
+            return normalized
+    return ""
+
+
+def _derive_mixdrop_watch_url_from_media_url(media_url, preferred_host="mixdrop.ag"):
+    normalized_media_url = _normalize_download_url(media_url)
+    if not normalized_media_url:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized_media_url)
+    media_host = parsed.netloc.lower()
+    if "mxcontent.net" not in media_host:
+        return ""
+    ref_match = re.search(r"/([A-Za-z0-9]+)\.(?:mp4|mkv|webm|m4a|mp3)(?:$|\?)", parsed.path, re.IGNORECASE)
+    if not ref_match:
+        return ""
+    ref = ref_match.group(1)
+    target_host = preferred_host or "mixdrop.ag"
+    return f"https://{target_host}/e/{ref}"
+
+
+def _is_expired_signed_media_url(url, now_ts=None):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlsplit(normalized)
+    host = parsed.netloc.lower()
+    if "mxcontent.net" not in host:
+        return False
+    query_map = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    expiry_values = query_map.get("e", [])
+    if not expiry_values:
+        return False
+    try:
+        expiry_ts = int(float(expiry_values[0]))
+    except Exception:
+        return False
+    current_ts = int(now_ts if now_ts is not None else time.time())
+    return expiry_ts <= current_ts + 30
 
 
 def _extract_movieffm_external_source_urls(page_html):
@@ -4281,6 +4335,35 @@ class DownloadManagerApp:
         if updates:
             update_state_entry(url, **updates)
 
+    def _set_cached_resolved_link_state(self, task, resolved_url=None, resolved_url_saved_at=None, page_refresh_candidates=None, clear_source_refresh_history=False):
+        if not task:
+            return
+        normalized_page_refresh_candidates = None
+        aux_updates = {}
+        state_updates = {}
+        if resolved_url is not None:
+            normalized_resolved_url = _normalize_download_url(resolved_url)
+            aux_updates["resolved_url"] = normalized_resolved_url
+            state_updates["resolved_url"] = normalized_resolved_url
+        if resolved_url_saved_at is not None:
+            try:
+                normalized_saved_at = float(resolved_url_saved_at or 0)
+            except (TypeError, ValueError):
+                normalized_saved_at = 0.0
+            aux_updates["resolved_url_saved_at"] = normalized_saved_at
+            state_updates["resolved_url_saved_at"] = normalized_saved_at
+        if page_refresh_candidates is not None:
+            normalized_page_refresh_candidates = self._normalize_fallback_urls(page_refresh_candidates)
+            aux_updates["page_refresh_candidates"] = normalized_page_refresh_candidates
+            aux_updates["_gimy_page_refresh_candidates"] = normalized_page_refresh_candidates
+            state_updates["page_refresh_candidates"] = normalized_page_refresh_candidates
+        if clear_source_refresh_history:
+            aux_updates["_gimy_source_refresh_history"] = []
+        if aux_updates:
+            _set_task_aux_fields(task, **aux_updates)
+        if state_updates:
+            self._update_task_state_entry(task, **state_updates)
+
     def _cache_task_resolved_link(self, task, resolved_url, fallback_urls=None, page_refresh_candidates=None):
         if not task:
             return
@@ -4288,17 +4371,20 @@ class DownloadManagerApp:
         normalized_resolved_url = _normalize_download_url(resolved_url)
         if normalized_resolved_url:
             resolved_url_saved_at = time.time()
-            _set_task_aux_fields(task, resolved_url=normalized_resolved_url, resolved_url_saved_at=resolved_url_saved_at)
+            self._set_cached_resolved_link_state(
+                task,
+                resolved_url=normalized_resolved_url,
+                resolved_url_saved_at=resolved_url_saved_at,
+                page_refresh_candidates=page_refresh_candidates,
+            )
             updates["resolved_url"] = normalized_resolved_url
             updates["resolved_url_saved_at"] = resolved_url_saved_at
-        if page_refresh_candidates is not None:
-            normalized_page_refresh_candidates = self._normalize_fallback_urls(page_refresh_candidates)
-            _set_task_aux_fields(
+        elif page_refresh_candidates is not None:
+            self._set_cached_resolved_link_state(
                 task,
-                _gimy_page_refresh_candidates=normalized_page_refresh_candidates,
-                page_refresh_candidates=normalized_page_refresh_candidates,
+                page_refresh_candidates=page_refresh_candidates,
             )
-            updates["page_refresh_candidates"] = normalized_page_refresh_candidates
+            updates["page_refresh_candidates"] = self._normalize_fallback_urls(page_refresh_candidates)
         if fallback_urls is not None:
             updates["fallback_urls"] = self._normalize_fallback_urls(fallback_urls, primary_url=self._get_task_url(task))
         if updates:
@@ -4476,6 +4562,22 @@ class DownloadManagerApp:
         if task:
             self._finalize_completed_task(task, clear_resume_requested=True)
 
+    def _can_accept_existing_output(self, task, item_id, output_path, temp=False):
+        if not self._has_nonempty_file(output_path):
+            return False
+        if temp:
+            return True
+        if self._is_incomplete_gimy_video_artifact(task, output_path):
+            write_error_log(
+                "gimy existing output rejected",
+                Exception("existing gimy output appears incomplete"),
+                item_id=item_id,
+                output=output_path,
+                source_site=self._get_task_source_site(task) or None,
+            )
+            return False
+        return True
+
     def _is_incomplete_gimy_video_artifact(self, task, output_path, expected_duration=None):
         if self._get_task_source_site(task) != "gimy":
             return False
@@ -4520,16 +4622,7 @@ class DownloadManagerApp:
         if self._get_task_resume_requested(task):
             return False
         explicit_output = self._get_task_output_path(task)
-        if self._has_nonempty_file(explicit_output):
-            if self._is_incomplete_gimy_video_artifact(task, explicit_output):
-                write_error_log(
-                    "gimy existing output rejected",
-                    Exception("existing gimy output appears incomplete"),
-                    item_id=item_id,
-                    output=explicit_output,
-                    source_site=self._get_task_source_site(task) or None,
-                )
-                return False
+        if self._can_accept_existing_output(task, item_id, explicit_output):
             self._set_task_output_path(task, item_id, explicit_output)
             self._mark_existing_file_complete(item_id, self._message_file_exists_text())
             return True
@@ -4548,16 +4641,7 @@ class DownloadManagerApp:
 
     def _set_output_path_and_complete_if_exists(self, task, item_id, output_path, message=None, temp=False):
         self._set_task_output_path(task, item_id, output_path, temp=temp)
-        if self._has_nonempty_file(output_path):
-            if not temp and self._is_incomplete_gimy_video_artifact(task, output_path):
-                write_error_log(
-                    "gimy existing output rejected",
-                    Exception("existing gimy output appears incomplete"),
-                    item_id=item_id,
-                    output=output_path,
-                    source_site=self._get_task_source_site(task) or None,
-                )
-                return False
+        if self._can_accept_existing_output(task, item_id, output_path, temp=temp):
             self._mark_existing_file_complete(item_id, message or self._eta_file_exists_text())
             return True
         return False
@@ -5350,6 +5434,19 @@ class DownloadManagerApp:
         except (TypeError, ValueError):
             return 0.0
 
+    def _sanitize_resume_seconds(self, resume_seconds, total_duration):
+        try:
+            seconds_value = max(float(resume_seconds or 0.0), 0.0)
+            duration_value = max(float(total_duration or 0.0), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if seconds_value <= 0 or duration_value <= 0:
+            return seconds_value
+        if seconds_value < duration_value:
+            return seconds_value
+        tail_seconds = min(5.0, max(1.0, duration_value * 0.01))
+        return max(duration_value - tail_seconds, 0.0)
+
     def _probe_http_download_info(self, url, headers=None, session=None):
         headers = dict(headers or {})
         if "User-Agent" not in headers:
@@ -5753,6 +5850,21 @@ class DownloadManagerApp:
     def _set_task_site_parsing_ui(self, item_id, key, fallback):
         self._set_task_parse_ui(item_id, key=key, fallback=fallback)
 
+    def _set_task_gimy_status_ui(self, item_id, mode="parsing"):
+        if mode == "refresh":
+            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
+            return
+        if mode == "rebuild":
+            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重建 Gimy 播放線...")
+            return
+        self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在解析 Gimy 頁面...")
+
+    def _set_task_movieffm_status_ui(self, item_id, mode="page"):
+        if mode == "external":
+            self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析外部播放來源...")
+            return
+        self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析 MovieFFM 頁面...")
+
     def _set_task_direct_media_ui(self, item_id):
         self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="直接媒體下載")
 
@@ -5761,6 +5873,13 @@ class DownloadManagerApp:
 
     def _set_task_found_stream_ui(self, item_id):
         self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="已取得串流網址")
+
+    def _set_task_cached_link_reanalysis_ui(self, item_id, expired=False):
+        if expired:
+            message = "已記錄連結已過期，重新分析頁面..."
+        else:
+            message = "已記錄連結失效，重新分析頁面..."
+        self._set_task_parse_ui(item_id, message=message)
 
     def _set_task_fallback_parser_ui(self, item_id, message):
         self._set_task_parse_ui(item_id, message=message)
@@ -6615,7 +6734,7 @@ class DownloadManagerApp:
                     _gimy_refresh_history=gimy_parse_history,
                     _gimy_detail_refresh_done=False,
                 )
-                self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
+                self._set_task_gimy_status_ui(item_id, "refresh")
                 write_error_log(
                     "gimy source page refresh",
                     exc_obj,
@@ -6797,6 +6916,8 @@ class DownloadManagerApp:
                         allowed_drift = max(30.0, total_duration * 0.05)
                         if abs(resume_seconds - estimated_resume_seconds) > allowed_drift:
                             resume_seconds = min(resume_seconds, estimated_resume_seconds)
+            if total_duration > 0 and resume_seconds > 0:
+                resume_seconds = self._sanitize_resume_seconds(resume_seconds, total_duration)
             average_media_bps = 0.0
             if base_bytes > 0 and resume_seconds > 0:
                 average_media_bps = base_bytes / resume_seconds
@@ -7449,18 +7570,32 @@ class DownloadManagerApp:
                         continue
 
     def _clear_cached_resolved_link(self, task):
-        _set_task_aux_fields(
+        self._set_cached_resolved_link_state(
             task,
             resolved_url="",
             resolved_url_saved_at=0.0,
             page_refresh_candidates=[],
-            _gimy_page_refresh_candidates=[],
-            _gimy_source_refresh_history=[],
+            clear_source_refresh_history=True,
         )
-        self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0, page_refresh_candidates=[])
+
+    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False):
+        self._clear_cached_resolved_link(task)
+        self._set_task_cached_link_reanalysis_ui(item_id, expired=expired)
+        self._download_task_internal(source_url, item_id, save_dir, use_impersonate, is_mp3)
 
     def _download_with_cached_resolved_link(self, task, item_id, source_url, cached_resolved_url, save_dir, use_impersonate, is_mp3):
         self._set_task_fallback_parser_ui(item_id, "使用已記錄下載連結續傳...")
+        if _is_expired_signed_media_url(cached_resolved_url):
+            write_error_log(
+                "cached resolved url expired",
+                Exception("signed direct media URL expired"),
+                item_id=item_id,
+                source_url=source_url,
+                resolved_url=cached_resolved_url,
+                source_site=self._get_task_source_site(task) or None,
+            )
+            self._retry_source_after_cached_link_failure(task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=True)
+            return True
         try:
             self._download_task_internal(cached_resolved_url, item_id, save_dir, use_impersonate, is_mp3)
             return True
@@ -7475,9 +7610,7 @@ class DownloadManagerApp:
                 resolved_url=cached_resolved_url,
                 source_site=self._get_task_source_site(task) or None,
             )
-            self._clear_cached_resolved_link(task)
-            self._set_task_fallback_parser_ui(item_id, "已記錄連結失效，重新分析頁面...")
-            self._download_task_internal(source_url, item_id, save_dir, use_impersonate, is_mp3)
+            self._retry_source_after_cached_link_failure(task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False)
             return True
 
     def download_task(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
@@ -7828,6 +7961,25 @@ class DownloadManagerApp:
             self._set_task_name_text(item_id, filename)
             direct_headers = {"User-Agent": DEFAULT_USER_AGENT}
             direct_referer = self._get_task_source_page(task)
+            derived_mixdrop_watch_url = ""
+            if "mxcontent.net" in parsed_url.netloc.lower():
+                derived_mixdrop_watch_url = _derive_mixdrop_watch_url_from_task(task, fallback_url=url)
+                if not derived_mixdrop_watch_url:
+                    preferred_mixdrop_host = ""
+                    for candidate in (
+                        self._get_task_source_page(task),
+                        self._get_task_url(task),
+                    ):
+                        candidate_host = urllib.parse.urlsplit(_normalize_download_url(candidate)).netloc.lower() if candidate else ""
+                        if "m1xdrop.click" in candidate_host:
+                            preferred_mixdrop_host = "m1xdrop.click"
+                            break
+                        if "mixdrop.ag" in candidate_host:
+                            preferred_mixdrop_host = "mixdrop.ag"
+                            break
+                    derived_mixdrop_watch_url = _derive_mixdrop_watch_url_from_media_url(url, preferred_host=preferred_mixdrop_host or "mixdrop.ag")
+                if derived_mixdrop_watch_url:
+                    direct_referer = derived_mixdrop_watch_url
             direct_session = None
             if direct_referer:
                 direct_headers["Referer"] = direct_referer
@@ -7960,7 +8112,7 @@ class DownloadManagerApp:
                 self._set_task_parse_error_ui(item_id, e)
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" not in parsed_url.path:
-            self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析 MovieFFM 頁面...")
+            self._set_task_movieffm_status_ui(item_id, "page")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://www.movieffm.net/"})
             if "/tvshows/" in parsed_url.path:
@@ -7997,7 +8149,7 @@ class DownloadManagerApp:
             return
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" in parsed_url.path:
-            self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析 MovieFFM 頁面...")
+            self._set_task_movieffm_status_ui(item_id, "page")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
             drama_title, episodes, episode_fallbacks = _collect_movieffm_drama_episodes(resp.text, url, short_name or "MovieFFM")
@@ -8016,7 +8168,7 @@ class DownloadManagerApp:
             return
 
         if "gimy" in parsed_url.netloc and ("/detail/" in parsed_url.path or "/voddetail/" in parsed_url.path or "/voddetail2/" in parsed_url.path or "/vod/" in parsed_url.path):
-            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在解析 Gimy 頁面...")
+            self._set_task_gimy_status_ui(item_id, "parsing")
             c_req = get_curl_cffi_requests()
             headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": url}
             resp_text = None
@@ -8107,7 +8259,7 @@ class DownloadManagerApp:
             return
 
         if "gimy" in parsed_url.netloc and "/eps/" in parsed_url.path:
-            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在解析 Gimy 頁面...")
+            self._set_task_gimy_status_ui(item_id, "parsing")
             c_req = get_curl_cffi_requests()
             stream_candidates = []
             direct_fallback_candidates = []
@@ -8351,7 +8503,7 @@ class DownloadManagerApp:
                             if candidate != refresh_url
                         ],
                     )
-                    self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
+                    self._set_task_gimy_status_ui(item_id, "refresh")
                     write_error_log(
                         "gimy episode page refresh",
                         self._ffmpeg_event_exception("refreshing gimy episode page after parse-stage source mismatch"),
@@ -8381,7 +8533,7 @@ class DownloadManagerApp:
                             _gimy_refresh_history=detail_refresh_history,
                             _gimy_page_refresh_candidates=[],
                         )
-                        self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重建 Gimy 播放線...")
+                        self._set_task_gimy_status_ui(item_id, "rebuild")
                         write_error_log(
                             "gimy detail page rebuild",
                             self._ffmpeg_event_exception("rebuilding gimy episode sources after parse-stage source mismatch"),
@@ -8513,7 +8665,7 @@ class DownloadManagerApp:
             return
 
         if "gimy" in parsed_url.netloc and ("/play/" in parsed_url.path or "/vodplay/" in parsed_url.path or "/video/" in parsed_url.path):
-            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在解析 Gimy 頁面...")
+            self._set_task_gimy_status_ui(item_id, "parsing")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
             player_data = _extract_player_js_object(resp.text, "player_data", "player_aaaa")
@@ -8623,7 +8775,7 @@ class DownloadManagerApp:
                         resolved_url_saved_at=0.0,
                     )
                     self._update_task_state_entry(task, resolved_url="", resolved_url_saved_at=0.0, page_refresh_candidates=remaining_candidates)
-                    self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
+                    self._set_task_gimy_status_ui(item_id, "refresh")
                     write_error_log(
                         "gimy play page retry",
                         self._ffmpeg_event_exception("retrying alternate gimy play page after stream URL missing"),
@@ -8723,7 +8875,7 @@ class DownloadManagerApp:
             return
 
         if any(host in parsed_url.netloc for host in ("mixdrop.ag", "m1xdrop.click")):
-            self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析外部播放來源...")
+            self._set_task_movieffm_status_ui(item_id, "external")
             c_req = get_curl_cffi_requests()
             source_page_referer = self._get_task_source_page(task) or "https://www.movieffm.net/"
             watch_url = _normalize_mixdrop_watch_url(url) or url
