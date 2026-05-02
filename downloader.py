@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260501-2490"
+APP_BUILD = "20260502-2500"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -698,9 +698,14 @@ def _normalize_download_url(url):
     raw = html.unescape(url).strip()
     if not raw:
         return ""
+    lowered_raw = raw.lower()
+    if raw.startswith("[") and ("url=" in lowered_raw or "pmoive" in lowered_raw):
+        return ""
     parsed = urllib.parse.urlsplit(raw)
     scheme = (parsed.scheme or "https").lower()
     netloc = parsed.netloc.lower()
+    if parsed.scheme and not netloc:
+        return ""
     query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     if netloc in ("www.youtube.com", "youtube.com", "m.youtube.com") and parsed.path == "/watch":
         query_map = {}
@@ -1616,21 +1621,32 @@ def _is_expired_signed_media_url(url, now_ts=None):
 
 def _extract_movieffm_external_source_urls(page_html):
     candidates = []
-    allowed_hosts = ("mixdrop.ag", "m1xdrop.click")
+    allowed_hosts = ("mixdrop.ag", "m1xdrop.click", "dood.so", "dood.pm", "dood.wf", "dood.re", "dood.yt")
     raw_html = str(page_html or "")
     normalized_html = html.unescape(raw_html).replace("\\/", "/")
+
+    def _append_candidate(raw_candidate):
+        candidate = _normalize_download_url(str(raw_candidate or "").strip())
+        host = urllib.parse.urlsplit(candidate).netloc.lower() if candidate else ""
+        if not candidate:
+            return
+        if not any(allowed_host in host for allowed_host in allowed_hosts):
+            return
+        if candidate not in candidates:
+            candidates.append(candidate)
+
     for match in re.finditer(r'"videos"\s*:\s*\[(.*?)\]', normalized_html, re.IGNORECASE | re.DOTALL):
         block = match.group(1)
         for url_match in re.finditer(r'"url"\s*:\s*"([^"]+)"', block, re.IGNORECASE):
-            candidate = _normalize_mixdrop_watch_url(url_match.group(1).strip())
-            host = urllib.parse.urlsplit(candidate).netloc.lower() if candidate else ""
-            if candidate and any(allowed_host in host for allowed_host in allowed_hosts) and candidate not in candidates:
-                candidates.append(candidate)
+            raw_candidate = url_match.group(1).strip()
+            normalized_candidate = _normalize_mixdrop_watch_url(raw_candidate) or raw_candidate
+            _append_candidate(normalized_candidate)
     for match in re.finditer(r'href=["\']([^"\']+\?download[^"\']*)["\']', normalized_html, re.IGNORECASE):
-        candidate = _normalize_mixdrop_watch_url(match.group(1).strip())
-        host = urllib.parse.urlsplit(candidate).netloc.lower() if candidate else ""
-        if candidate and any(allowed_host in host for allowed_host in allowed_hosts) and candidate not in candidates:
-            candidates.append(candidate)
+        raw_candidate = match.group(1).strip()
+        normalized_candidate = _normalize_mixdrop_watch_url(raw_candidate) or raw_candidate
+        _append_candidate(normalized_candidate)
+    for shortcode_match in re.finditer(r'\[pmoive\b[^\]]*\burl\s*=\s*["\']([^"\']+)["\']', normalized_html, re.IGNORECASE):
+        _append_candidate(shortcode_match.group(1))
     return _dedupe_download_urls(candidates)
 
 
@@ -2400,8 +2416,12 @@ def app_version_text():
     return APP_BUILD.split("-")[-1]
 
 
+def app_name_text():
+    return t("app_title")
+
+
 def app_title_text():
-    return f"{t('app_title')} v{app_version_text()}"
+    return f"{app_name_text()} v{app_version_text()}"
 
 
 def _dialog_title_text_fallback(key, fallback):
@@ -2750,9 +2770,9 @@ class DownloadManagerApp:
     def __init__(self, root):
         self.root = root
         self.root.title(app_title_text())
-        self.root.geometry("850x550")
+        self.root.geometry("850x680")
         self.root.resizable(True, True)
-        self.root.minsize(850, 550)
+        self.root.minsize(850, 680)
         try:
             self.root.attributes("-topmost", True)
         except Exception:
@@ -2830,13 +2850,15 @@ class DownloadManagerApp:
         style.configure("App.Horizontal.TScrollbar", arrowsize=14)
 
         header_frame = tk.Frame(self.root, bg="#f4f7fb")
-        header_frame.grid(row=0, column=0, padx=20, pady=(16, 8), sticky="ew")
+        header_frame.grid(row=0, column=0, padx=20, pady=(12, 4), sticky="ew")
         header_frame.columnconfigure(0, weight=1)
+        header_frame.columnconfigure(1, weight=0)
+        header_frame.columnconfigure(2, weight=1)
         center_frame = tk.Frame(header_frame, bg="#f4f7fb")
-        center_frame.grid(row=0, column=0, sticky="n")
+        center_frame.grid(row=0, column=1, sticky="n")
         self.header_title_label = tk.Label(
             center_frame,
-            text=app_title_text(),
+            text=app_name_text(),
             font=("Microsoft JhengHei UI", 18, "bold"),
             bg="#f4f7fb",
             fg="#123b5d",
@@ -2845,8 +2867,10 @@ class DownloadManagerApp:
         )
         self.header_title_label.grid(row=0, column=0, sticky="ew")
         self.overview_var = tk.StringVar(value=t("overview_idle"))
+        right_frame = tk.Frame(header_frame, bg="#f4f7fb")
+        right_frame.grid(row=0, column=2, sticky="ne")
         tk.Label(
-            header_frame,
+            right_frame,
             textvariable=self.overview_var,
             font=("Microsoft JhengHei UI", 9, "bold"),
             bg="#ddebf7",
@@ -2855,14 +2879,17 @@ class DownloadManagerApp:
             pady=5,
             bd=1,
             relief="solid",
-        ).grid(row=0, column=1, padx=(16, 0), sticky="ne")
+        ).grid(row=0, column=0, sticky="e")
 
         action_bar = tk.Frame(self.root, bg="#f4f7fb")
-        action_bar.grid(row=1, column=0, padx=20, pady=(8, 0))
+        action_bar.grid(row=1, column=0, padx=20, pady=(0, 0), sticky="ew")
+        action_bar.columnconfigure(0, weight=1)
+        action_button_frame = tk.Frame(action_bar, bg="#f4f7fb")
+        action_button_frame.grid(row=0, column=0, sticky="")
 
         def make_action_btn(text, command, bg):
             return tk.Button(
-                action_bar,
+                action_button_frame,
                 text=text,
                 command=command,
                 font=("Microsoft JhengHei UI", 9),
@@ -2887,19 +2914,21 @@ class DownloadManagerApp:
             self.root,
             text=t("basic_settings"),
             font=("Microsoft JhengHei UI", 9, "bold"),
+            height=230,
             padx=12,
-            pady=10,
+            pady=14,
             bg="#f8fbff",
             fg="#204a69",
             bd=1,
             relief="groove",
         )
         self.settings_frame = settings_frame
-        settings_frame.grid(row=2, column=0, padx=20, pady=(8, 0), sticky="ew")
+        settings_frame.grid(row=2, column=0, padx=20, pady=(2, 0), sticky="ew")
+        settings_frame.grid_propagate(False)
         settings_frame.columnconfigure(1, weight=1)
 
         self.save_dir_label = tk.Label(settings_frame, text=t("save_dir"), font=("Microsoft JhengHei UI", 9), bg="#f8fbff", fg="#24435b")
-        self.save_dir_label.grid(row=0, column=0, sticky="w", pady=(4, 0))
+        self.save_dir_label.grid(row=0, column=0, sticky="w", pady=(6, 2))
         default_dir = self.config.get("save_dir", "")
         if not default_dir:
             default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
@@ -2924,12 +2953,12 @@ class DownloadManagerApp:
         self.browse_button.grid(row=0, column=2, padx=(10, 0))
 
         input_frame = tk.Frame(settings_frame, bg="#f8fbff")
-        input_frame.grid(row=1, column=0, columnspan=3, pady=(14, 0), sticky="ew")
+        input_frame.grid(row=1, column=0, columnspan=3, pady=(20, 8), sticky="ew")
         input_frame.columnconfigure(0, weight=1)
         self.new_url_label = tk.Label(input_frame, text=t("new_url"), font=("Microsoft JhengHei UI", 9), bg="#f8fbff", fg="#d96c00")
-        self.new_url_label.grid(row=0, column=0, sticky="w", pady=(0, 4))
-        self.url_entry = tk.Entry(input_frame, font=("Segoe UI", 11), relief="groove", bd=1)
-        self.url_entry.grid(row=1, column=0, sticky="ew", ipady=4)
+        self.new_url_label.grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.url_entry = tk.Entry(input_frame, font=("Segoe UI", 9), relief="groove", bd=1)
+        self.url_entry.grid(row=1, column=0, sticky="ew", ipady=1)
         self.url_entry.bind("<Return>", lambda _event: self.add_new_download())
         make_context_menu(self.url_entry)
         self.format_dropdown = ttk.Combobox(
@@ -2967,7 +2996,7 @@ class DownloadManagerApp:
                 return
 
         self.topmost_checkbox = tk.Checkbutton(
-            header_frame,
+            right_frame,
             text=t("chk_topmost"),
             variable=self.topmost_var,
             command=toggle_topmost,
@@ -2976,7 +3005,7 @@ class DownloadManagerApp:
             bg="#f4f7fb",
             activebackground="#f4f7fb",
         )
-        self.topmost_checkbox.grid(row=1, column=1, padx=(16, 0), pady=(6, 0), sticky="ne")
+        self.topmost_checkbox.grid(row=1, column=0, pady=(6, 0), sticky="e")
 
         list_frame = tk.LabelFrame(
             self.root,
@@ -2991,7 +3020,7 @@ class DownloadManagerApp:
             name="list_frame",
         )
         self.list_frame = list_frame
-        list_frame.grid(row=3, column=0, padx=20, pady=(12, 12), sticky="nsew")
+        list_frame.grid(row=3, column=0, padx=20, pady=(10, 12), sticky="nsew")
         list_frame.columnconfigure(0, weight=1)
         list_frame.rowconfigure(0, weight=1)
         self.root.rowconfigure(3, weight=1)
@@ -3202,7 +3231,7 @@ class DownloadManagerApp:
         except Exception:
             pass
         if self.header_title_label is not None:
-            self.header_title_label.configure(text=app_title_text())
+            self.header_title_label.configure(text=app_name_text())
         if self.settings_frame is not None:
             self.settings_frame.configure(text=t("basic_settings"))
         if self.save_dir_label is not None:
@@ -5887,17 +5916,20 @@ class DownloadManagerApp:
     def _set_task_simple_site_status_ui(self, item_id, key, fallback):
         self._set_task_site_parsing_ui(item_id, key, fallback)
 
+    def _set_task_parse_status_key_ui(self, item_id, key, fallback):
+        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
+
     def _set_task_direct_media_ui(self, item_id):
-        self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
+        self._set_task_parse_status_key_ui(item_id, "eta_direct_media", self._eta_direct_media_text())
 
     def _set_task_found_media_ui(self, item_id):
-        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+        self._set_task_parse_status_key_ui(item_id, "eta_found_media", self._eta_found_media_text())
 
     def _set_task_found_stream_ui(self, item_id):
-        self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._eta_found_stream_text())
+        self._set_task_parse_status_key_ui(item_id, "eta_found_stream", self._eta_found_stream_text())
 
     def _set_task_stream_downloading_ui(self, item_id):
-        self._set_task_downloading_ui(item_id, self._eta_found_stream_text())
+        self._set_task_runtime_status_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
 
     def _set_task_cached_link_reanalysis_ui(self, item_id, expired=False):
         if expired:
@@ -5911,6 +5943,9 @@ class DownloadManagerApp:
 
     def _set_task_fallback_parser_ui(self, item_id, message):
         self._set_task_parse_ui(item_id, message=message)
+
+    def _set_task_ytdlp_fallback_ui(self, item_id, site_label):
+        self._set_task_fallback_parser_ui(item_id, f"{site_label} 直連解析失敗，改用 yt-dlp...")
 
     def _set_task_parse_error_ui(self, item_id, error):
         self._set_task_parse_ui(item_id, error=error)
@@ -9060,7 +9095,7 @@ class DownloadManagerApp:
             except Exception as savereels_exc:
                 write_error_log("instagram savereels fallback failed", savereels_exc, url=url, item_id=item_id)
             write_error_log("instagram extractor fallback", Exception("Instagram video URL missing; falling back to yt-dlp"), url=url, item_id=item_id)
-            self._set_task_fallback_parser_ui(item_id, "Instagram 直連解析失敗，改用 yt-dlp...")
+            self._set_task_ytdlp_fallback_ui(item_id, "Instagram")
 
         if "facebook.com" in parsed_url.netloc and any(part in parsed_url.path for part in ("/reel/", "/watch/", "/videos/")):
             self._set_task_simple_site_status_ui(item_id, "eta_site_facebook", "正在解析 Facebook 頁面...")
@@ -9115,7 +9150,7 @@ class DownloadManagerApp:
                     self._download_http_media(item_id, media_url, out_path, headers={"Referer": url, "Origin": "https://www.facebook.com", "User-Agent": ydl_opts["http_headers"]["User-Agent"]})
                 return
             write_error_log("facebook extractor fallback", Exception("Facebook media URL missing; falling back to yt-dlp"), url=url, item_id=item_id)
-            self._set_task_fallback_parser_ui(item_id, "Facebook 直連解析失敗，改用 yt-dlp...")
+            self._set_task_ytdlp_fallback_ui(item_id, "Facebook")
 
         if "/status/" in parsed_url.path and any(host in parsed_url.netloc for host in ("twitter.com", "x.com", "fxtwitter.com", "vxtwitter.com")):
             self._set_task_simple_site_status_ui(item_id, "eta_site_twitter", "正在解析 Twitter/X 頁面...")
