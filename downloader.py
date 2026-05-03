@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260503-2520"
+APP_BUILD = "20260503-2530"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -106,13 +106,13 @@ YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
 HTTP_MULTIPART_TRIGGER_SECONDS = 1.0
 HTTP_MULTIPART_TRIGGER_SPEED_BPS = 2 * 1024 * 1024
 HTTP_MULTIPART_MIN_REMAINING_BYTES = 4 * 1024 * 1024
-HTTP_MULTIPART_PART_COUNT_DEFAULT = 6
+HTTP_MULTIPART_PART_COUNT_DEFAULT = 8
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "anime1": 4,
-    "mixdrop": 8,
-    "movieffm": 8,
+    "mixdrop": 10,
+    "movieffm": 10,
 }
-HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 32 * 1024 * 1024
+HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 16 * 1024 * 1024
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset(("movieffm", "mixdrop"))
 M3U8_TOTAL_BYTES_PROBE_WORKERS = 8
 M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
@@ -2302,7 +2302,11 @@ def _should_prefer_native_hls(url, task=None):
     source_site = _task_source_site_name(task)
     if source_site == "gimy":
         return False
-    if source_site in ("movieffm", "missav"):
+    if source_site == "movieffm":
+        # MovieFFM repeatedly falls back to ffmpeg after native HLS artifact rejection.
+        # Skip the native detour so downloads start on the stable path immediately.
+        return False
+    if source_site == "missav":
         return True
     if any(marker in host for marker in ("qqqrst.com", "ppqrrs.com", "surrit.com")):
         return True
@@ -2352,7 +2356,7 @@ def _http_multipart_part_count(task=None, total_size=0):
     elif total_size and total_size < 64 * 1024 * 1024:
         configured = min(configured, 6)
     configured = max(2, configured)
-    return min(configured, 8)
+    return min(configured, 10)
 
 
 def _should_start_http_multipart_immediately(task=None, total_size=0):
@@ -6160,7 +6164,7 @@ class DownloadManagerApp:
         return False
 
     def _set_task_paused_ui(self, item_id, message="-"):
-        self._set_task_runtime_status_ui(item_id, self._paused_status_text(), message)
+        self._set_task_status_mode_ui(item_id, self._paused_status_text(), message)
 
     def _set_task_column_text(self, item_id, column, value):
         self.update_tree(item_id, column, value, force=True)
@@ -6178,8 +6182,7 @@ class DownloadManagerApp:
         self._set_task_progress_text(item_id, f"{percent:.1f}%")
 
     def _set_task_finished_ui(self, item_id, message="-"):
-        self._set_task_progress_complete_ui(item_id)
-        self._set_task_runtime_status_ui(item_id, self._finished_status_text(), message)
+        self._set_task_status_mode_ui(item_id, self._finished_status_text(), message, complete_progress=True)
 
     def _update_task_size_from_file(self, item_id, filename):
         if filename and os.path.exists(filename):
@@ -6200,9 +6203,15 @@ class DownloadManagerApp:
         if message is not None:
             self._set_task_speed_eta_text(item_id, message)
 
-    def _set_task_downloading_ui(self, item_id, message=None):
-        status_text = self._downloading_status_text()
+    def _set_task_status_mode_ui(self, item_id, status_text, message=None, complete_progress=False, clear_metrics=False):
+        if complete_progress:
+            self._set_task_progress_complete_ui(item_id)
         self._set_task_runtime_status_ui(item_id, status_text, message)
+        if clear_metrics:
+            self._set_task_metrics_unknown_ui(item_id)
+
+    def _set_task_downloading_ui(self, item_id, message=None):
+        self._set_task_status_mode_ui(item_id, self._downloading_status_text(), message)
 
     def _processing_status_text(self):
         return self._status_text("status_processing", "整理中")
@@ -6217,8 +6226,7 @@ class DownloadManagerApp:
         return self._eta_or_status_text(key, fallback)
 
     def _set_task_processing_ui(self, item_id, message=None):
-        status_text = self._processing_status_text()
-        self._set_task_runtime_status_ui(item_id, status_text, message)
+        self._set_task_status_mode_ui(item_id, self._processing_status_text(), message)
 
     def _eta_direct_media_text(self):
         return self._ui_text("eta_direct_media", "直接媒體下載")
@@ -6249,7 +6257,7 @@ class DownloadManagerApp:
 
     def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
         if error is not None:
-            self._set_task_parse_eta_text(item_id, self._site_parse_error_text(error))
+            self._set_task_parse_message_ui(item_id, self._format_site_parse_error(error))
             return
         if message is not None:
             self._set_task_parse_eta_text(item_id, message)
@@ -6257,28 +6265,43 @@ class DownloadManagerApp:
         self._set_task_parse_eta_by_key(item_id, key, fallback)
 
     def _set_task_site_parsing_ui(self, item_id, key, fallback):
-        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
+        self._set_task_parse_status_key_ui(item_id, key, fallback)
+
+    def _set_task_mode_status_ui(self, item_id, mode, mode_map, default_mode):
+        key, fallback = mode_map.get(mode, mode_map[default_mode])
+        self._set_task_site_parsing_ui(item_id, key, fallback)
 
     def _set_task_gimy_status_ui(self, item_id, mode="parsing"):
-        if mode == "refresh":
-            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重新取得 Gimy 串流...")
-            return
-        if mode == "rebuild":
-            self._set_task_gimy_status_ui(item_id, "rebuild")
-            return
-        self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在解析 Gimy 頁面...")
+        self._set_task_mode_status_ui(
+            item_id,
+            mode,
+            {
+                "parsing": ("eta_site_gimy", "正在解析 Gimy 頁面..."),
+                "refresh": ("eta_site_gimy", "正在重新取得 Gimy 串流..."),
+                "rebuild": ("eta_site_gimy", "正在重建 Gimy 播放線..."),
+            },
+            "parsing",
+        )
 
     def _set_task_movieffm_status_ui(self, item_id, mode="page"):
-        if mode == "external":
-            self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析外部播放來源...")
-            return
-        self._set_task_site_parsing_ui(item_id, "eta_site_movieffm", "正在解析 MovieFFM 頁面...")
+        self._set_task_mode_status_ui(
+            item_id,
+            mode,
+            {
+                "page": ("eta_site_movieffm", "正在解析 MovieFFM 頁面..."),
+                "external": ("eta_site_movieffm", "正在解析外部播放來源..."),
+            },
+            "page",
+        )
 
     def _set_task_simple_site_status_ui(self, item_id, key, fallback):
-        self._set_task_site_parsing_ui(item_id, key, fallback)
+        self._set_task_parse_status_key_ui(item_id, key, fallback)
 
     def _set_task_parse_status_key_ui(self, item_id, key, fallback):
         self._set_task_parse_ui(item_id, key=key, fallback=fallback)
+
+    def _set_task_parse_message_ui(self, item_id, message):
+        self._set_task_parse_ui(item_id, message=message)
 
     def _set_task_direct_media_ui(self, item_id):
         self._set_task_parse_status_key_ui(item_id, "eta_direct_media", self._eta_direct_media_text())
@@ -6297,19 +6320,19 @@ class DownloadManagerApp:
             message = "已記錄連結已過期，重新分析頁面..."
         else:
             message = "已記錄連結失效，重新分析頁面..."
-        self._set_task_parse_ui(item_id, message=message)
+        self._set_task_parse_message_ui(item_id, message)
 
     def _set_task_cached_link_resume_ui(self, item_id):
         self._set_task_fallback_parser_ui(item_id, "使用已記錄下載連結續傳...")
 
     def _set_task_fallback_parser_ui(self, item_id, message):
-        self._set_task_parse_ui(item_id, message=message)
+        self._set_task_parse_message_ui(item_id, message)
 
     def _set_task_ytdlp_fallback_ui(self, item_id, site_label):
         self._set_task_fallback_parser_ui(item_id, f"{site_label} 直連解析失敗，改用 yt-dlp...")
 
     def _set_task_parse_error_ui(self, item_id, error):
-        self._set_task_parse_ui(item_id, error=error)
+        self._set_task_parse_message_ui(item_id, self._format_site_parse_error(error))
 
     def _set_task_mega_identity(self, item_id, task, url, safe_name):
         normalized_name = _set_task_name_fields(task, safe_name)
@@ -6340,14 +6363,17 @@ class DownloadManagerApp:
     def _site_parse_error_prefix(self):
         return self._ui_text("err_site_parse", "解析失敗")
 
-    def _site_parse_error_text(self, error, limit=40):
+    def _format_site_parse_error(self, error, limit=40):
         return f"{self._site_parse_error_prefix()}: {str(error)[:max(int(limit or 0), 0)]}"
 
+    def _site_parse_error_text(self, error, limit=40):
+        return self._format_site_parse_error(error, limit=limit)
+
     def _schedule_site_parse_error(self, error, limit=80):
-        self._schedule_error(self._site_parse_error_text(error, limit=limit))
+        self._schedule_error(self._format_site_parse_error(error, limit=limit))
 
     def _set_task_error_ui(self, item_id, message):
-        self._set_task_runtime_status_ui(item_id, self._error_status_text(), message)
+        self._set_task_status_mode_ui(item_id, self._error_status_text(), message)
 
     def _set_task_progress_unknown_ui(self, item_id):
         self._set_task_column_placeholder_ui(item_id, "progress", "--")
@@ -6390,6 +6416,17 @@ class DownloadManagerApp:
         _set_task_transfer_metrics(task, downloaded_bytes=downloaded_bytes, total_bytes=total_size)
         self._set_task_transfer_size_ui(item_id, downloaded_bytes, total_size)
 
+    def _set_task_active_transfer_ui(self, task, item_id, downloaded_bytes, total_bytes=None, speed_bps=None, eta_seconds=None, cap_at_99=False):
+        _set_task_transfer_metrics(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
+        self._set_task_transfer_size_ui(item_id, downloaded_bytes, total_bytes)
+        percent = format_progress_percent(downloaded_bytes, total_bytes, cap_at_99=cap_at_99) if total_bytes else None
+        if percent is not None:
+            self._set_task_progress_percent_ui(item_id, percent)
+        self._set_task_transfer_rate_ui(item_id, speed_bps, eta_seconds)
+        status_text = self._downloading_status_text()
+        if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
+            self._set_task_downloading_ui(item_id)
+
     def _make_yt_dlp_progress_hook(self, task, item_id, save_dir):
         def progress_hook(d):
             task_state = _task_state_value(self.tasks.get(item_id, {}))
@@ -6409,17 +6446,9 @@ class DownloadManagerApp:
             if status != "downloading":
                 return
             _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
-            _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=total)
-            self._set_task_size_text(item_id, format_transfer_size(downloaded, total))
-            percent = format_progress_percent(downloaded, total) if total else None
-            if percent is not None:
-                self._set_task_progress_percent_ui(item_id, percent)
             speed = _event_speed(d)
             eta = _event_eta(d)
-            self._set_task_transfer_rate_ui(item_id, speed, eta)
-            status_text = self._downloading_status_text()
-            if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
-                self._set_task_downloading_ui(item_id)
+            self._set_task_active_transfer_ui(task, item_id, downloaded, total_bytes=total, speed_bps=speed, eta_seconds=eta)
 
         return progress_hook
 
@@ -6427,8 +6456,7 @@ class DownloadManagerApp:
         self._set_task_named_column_text(item_id, "status", value)
 
     def _set_task_queued_ui(self, item_id):
-        self._set_task_status_text(item_id, self._queued_status_text())
-        self._set_task_metrics_unknown_ui(item_id)
+        self._set_task_status_mode_ui(item_id, self._queued_status_text(), clear_metrics=True)
 
     def _download_mega_with_megacmd(self, item_id, url, save_dir, output_path=None, total_size=None):
         task = self.tasks.get(item_id, {})
@@ -6503,16 +6531,20 @@ class DownloadManagerApp:
                     raise KeyboardInterrupt()
                 if output_path and total_size and total_size > 0 and os.path.exists(output_path):
                     downloaded = self._get_existing_file_size(output_path)
-                    self._set_task_known_total_size_ui(task, item_id, total_size, downloaded_bytes=downloaded)
-                    percent = format_progress_percent(downloaded, total_size, cap_at_99=True)
-                    if percent is not None:
-                        self._set_task_progress_percent_ui(item_id, percent)
                     now = time.time()
                     speed_bps = max((downloaded - last_bytes) / max(now - last_time, 0.001), 0.0)
                     last_bytes = downloaded
                     last_time = now
                     eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
-                    self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
+                    self._set_task_active_transfer_ui(
+                        task,
+                        item_id,
+                        downloaded,
+                        total_bytes=total_size,
+                        speed_bps=speed_bps,
+                        eta_seconds=eta,
+                        cap_at_99=True,
+                    )
                 time.sleep(1.0)
         finally:
             _set_task_process_handle(task, None)
