@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260503-2530"
+APP_BUILD = "20260503-2540"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -121,8 +121,11 @@ M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
 }
 M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES = frozenset(("gimy", "movieffm"))
 FFMPEG_PROGRESS_IO_POLL_INTERVAL_SECONDS = 0.75
+FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 1.5
+FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA = 2 * 1024 * 1024
 FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS = 5.0
 FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA = 8 * 1024 * 1024
+UI_THROTTLE_INTERVAL_SECONDS = 1.25
 GIMY_DIRECT_STREAM_FALLBACK_LIMIT = 1
 GIMY_EPISODE_PAGE_PARSE_FALLBACK_LIMIT = 2
 GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
@@ -2940,7 +2943,7 @@ class DownloadManagerApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_ui()
         if self.tree is not None:
-            self.ui_throttler = UIThrottler(self.root, self.tree, update_interval=1.0)
+            self.ui_throttler = UIThrottler(self.root, self.tree, update_interval=UI_THROTTLE_INTERVAL_SECONDS)
             self.throttler = self.ui_throttler
         self.resume_unfinished_tasks()
         self.root.after(400, self._auto_install_ffmpeg_if_missing)
@@ -6244,7 +6247,7 @@ class DownloadManagerApp:
         return self._ui_text("msg_file_exists", "檔案已存在")
 
     def _set_task_name_text(self, item_id, value):
-        self._set_task_column_text(item_id, "name", value)
+        self._set_task_named_column_text(item_id, "name", value)
 
     def _set_task_output_name(self, item_id, path):
         self._set_task_name_text(item_id, _output_name_from_path(path))
@@ -6252,24 +6255,27 @@ class DownloadManagerApp:
     def _set_task_parse_eta_text(self, item_id, value):
         self._set_task_speed_eta_text(item_id, value)
 
-    def _set_task_parse_eta_by_key(self, item_id, key, fallback):
-        self._set_task_parse_eta_text(item_id, self._ui_text(key, fallback))
-
-    def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
-        if error is not None:
-            self._set_task_parse_message_ui(item_id, self._format_site_parse_error(error))
-            return
+    def _set_task_parse_eta_ui(self, item_id, key=None, fallback="", message=None):
         if message is not None:
             self._set_task_parse_eta_text(item_id, message)
             return
-        self._set_task_parse_eta_by_key(item_id, key, fallback)
+        self._set_task_parse_eta_text(item_id, self._ui_text(key, fallback))
+
+    def _set_task_parse_eta_by_key(self, item_id, key, fallback):
+        self._set_task_parse_eta_ui(item_id, key=key, fallback=fallback)
+
+    def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
+        if error is not None:
+            self._set_task_parse_eta_ui(item_id, message=self._format_site_parse_error(error))
+            return
+        self._set_task_parse_eta_ui(item_id, key=key, fallback=fallback, message=message)
 
     def _set_task_site_parsing_ui(self, item_id, key, fallback):
-        self._set_task_parse_status_key_ui(item_id, key, fallback)
+        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
 
     def _set_task_mode_status_ui(self, item_id, mode, mode_map, default_mode):
         key, fallback = mode_map.get(mode, mode_map[default_mode])
-        self._set_task_site_parsing_ui(item_id, key, fallback)
+        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
 
     def _set_task_gimy_status_ui(self, item_id, mode="parsing"):
         self._set_task_mode_status_ui(
@@ -6295,7 +6301,7 @@ class DownloadManagerApp:
         )
 
     def _set_task_simple_site_status_ui(self, item_id, key, fallback):
-        self._set_task_parse_status_key_ui(item_id, key, fallback)
+        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
 
     def _set_task_parse_status_key_ui(self, item_id, key, fallback):
         self._set_task_parse_ui(item_id, key=key, fallback=fallback)
@@ -6304,13 +6310,13 @@ class DownloadManagerApp:
         self._set_task_parse_ui(item_id, message=message)
 
     def _set_task_direct_media_ui(self, item_id):
-        self._set_task_parse_status_key_ui(item_id, "eta_direct_media", self._eta_direct_media_text())
+        self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
 
     def _set_task_found_media_ui(self, item_id):
-        self._set_task_parse_status_key_ui(item_id, "eta_found_media", self._eta_found_media_text())
+        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
 
     def _set_task_found_stream_ui(self, item_id):
-        self._set_task_parse_status_key_ui(item_id, "eta_found_stream", self._eta_found_stream_text())
+        self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._eta_found_stream_text())
 
     def _set_task_stream_downloading_ui(self, item_id):
         self._set_task_runtime_status_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
@@ -6326,13 +6332,13 @@ class DownloadManagerApp:
         self._set_task_fallback_parser_ui(item_id, "使用已記錄下載連結續傳...")
 
     def _set_task_fallback_parser_ui(self, item_id, message):
-        self._set_task_parse_message_ui(item_id, message)
+        self._set_task_parse_ui(item_id, message=message)
 
     def _set_task_ytdlp_fallback_ui(self, item_id, site_label):
         self._set_task_fallback_parser_ui(item_id, f"{site_label} 直連解析失敗，改用 yt-dlp...")
 
     def _set_task_parse_error_ui(self, item_id, error):
-        self._set_task_parse_message_ui(item_id, self._format_site_parse_error(error))
+        self._set_task_parse_ui(item_id, error=error)
 
     def _set_task_mega_identity(self, item_id, task, url, safe_name):
         normalized_name = _set_task_name_fields(task, safe_name)
@@ -6394,7 +6400,7 @@ class DownloadManagerApp:
         self._set_task_column_placeholder_ui(item_id, "speed_eta", "-")
 
     def _set_task_column_placeholder_ui(self, item_id, column, placeholder="-"):
-        self._set_task_column_text(item_id, column, placeholder)
+        self._set_task_named_column_text(item_id, column, placeholder)
 
     def _set_task_transfer_unknown_ui(self, item_id):
         self._set_task_size_unknown_ui(item_id)
@@ -7502,6 +7508,7 @@ class DownloadManagerApp:
             recent_lines = []
             last_ui_update = 0.0
             last_io_poll = 0.0
+            last_progress_ui_bytes = -1
             cached_active_output_bytes = 0
             invalidated_total_bytes = False
             near_complete_since = None
@@ -7572,6 +7579,12 @@ class DownloadManagerApp:
                         except StopDownloadException:
                             return
                         current_bytes = base_bytes + active_output_bytes
+                        should_refresh_progress_ui = (
+                            progress.get("progress") == "end"
+                            or last_progress_ui_bytes < 0
+                            or abs(current_bytes - last_progress_ui_bytes) >= FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA
+                            or (now - last_ui_update) >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS
+                        )
                         if active_total_bytes and active_total_bytes > 0 and progress.get("progress") != "end":
                             if self._should_invalidate_m3u8_total_bytes(current_bytes, active_total_bytes):
                                 estimated_total_bytes = active_total_bytes
@@ -7616,15 +7629,19 @@ class DownloadManagerApp:
                                 else:
                                     near_complete_since = None
                             if percent is not None:
-                                self._set_task_progress_percent_ui(item_id, percent)
+                                if should_refresh_progress_ui:
+                                    self._set_task_progress_percent_ui(item_id, percent)
                             if active_total_bytes and active_total_bytes > 0:
-                                self._set_task_transfer_size_ui(item_id, current_bytes, active_total_bytes)
+                                if should_refresh_progress_ui:
+                                    self._set_task_transfer_size_ui(item_id, current_bytes, active_total_bytes)
                         else:
                             near_complete_since = None
-                            self._set_task_progress_unknown_ui(item_id)
+                            if should_refresh_progress_ui:
+                                self._set_task_progress_unknown_ui(item_id)
                         if not (active_total_bytes and active_total_bytes > 0) and current_bytes > 0:
-                            self._set_task_transfer_size_ui(item_id, current_bytes)
-                        if now - last_ui_update >= 1.0:
+                            if should_refresh_progress_ui:
+                                self._set_task_transfer_size_ui(item_id, current_bytes)
+                        if now - last_ui_update >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS:
                             instant_bps = 0.0
                             if active_output_bytes > 0 and out_ms > 0:
                                 instant_bps = active_output_bytes / max(out_ms / 1_000_000.0, 0.001)
@@ -7638,6 +7655,8 @@ class DownloadManagerApp:
                             elif instant_bps > 0:
                                 self._set_task_transfer_rate_ui(item_id, instant_bps)
                             last_ui_update = now
+                        if should_refresh_progress_ui:
+                            last_progress_ui_bytes = current_bytes
                         checkpoint_seconds = self._get_resume_checkpoint_seconds(
                             active_output_path,
                             total_done_seconds,
