@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260502-2510"
+APP_BUILD = "20260503-2520"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -112,6 +112,8 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "mixdrop": 8,
     "movieffm": 8,
 }
+HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 32 * 1024 * 1024
+HTTP_MULTIPART_IMMEDIATE_SITES = frozenset(("movieffm", "mixdrop"))
 M3U8_TOTAL_BYTES_PROBE_WORKERS = 8
 M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
     "gimy": 6,
@@ -2353,6 +2355,13 @@ def _http_multipart_part_count(task=None, total_size=0):
     return min(configured, 8)
 
 
+def _should_start_http_multipart_immediately(task=None, total_size=0):
+    source_site = _task_source_site_name(task)
+    if source_site not in HTTP_MULTIPART_IMMEDIATE_SITES:
+        return False
+    return max(int(total_size or 0), 0) >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
+
+
 def _ffmpeg_hls_input_options(headers, task=None):
     options = [
         "-protocol_whitelist",
@@ -3131,7 +3140,7 @@ class DownloadManagerApp:
         self.root.rowconfigure(3, weight=1)
 
         columns = ("name", "progress", "size", "speed_eta", "status")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", style="App.Treeview")
+        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", style="App.Treeview", selectmode="extended")
         self.tree.grid(row=0, column=0, sticky="nsew")
         self._configure_task_tree_columns()
         self.tree.tag_configure("row_downloading", background="#ecfdf5")
@@ -3157,10 +3166,14 @@ class DownloadManagerApp:
         self.tree.bind("<Delete>", self._handle_delete_key)
         self.tree.bind("<BackSpace>", self._handle_delete_key)
         self.tree.bind("<Control-a>", self.select_all_tasks)
+        self.tree.bind("<Control-A>", self.select_all_tasks)
         self.tree.bind("<ButtonPress-1>", self._begin_tree_reorder)
         self.tree.bind("<B1-Motion>", self._drag_reorder_tree)
         self.tree.bind("<ButtonRelease-1>", self._end_tree_reorder)
         self.tree.bind("<<TreeviewSelect>>", self._handle_tree_select)
+        self.root.bind_all("<Control-a>", self._handle_select_all_shortcut, add="+")
+        self.root.bind_all("<Control-A>", self._handle_select_all_shortcut, add="+")
+        self.root.bind_all("<Delete>", self._handle_delete_shortcut, add="+")
         self._refresh_ui_summary()
 
     def _configure_task_tree_columns(self):
@@ -3198,58 +3211,106 @@ class DownloadManagerApp:
         if self.tree is None:
             return
         region = self.tree.identify("region", event.x, event.y)
+        column_id = self.tree.identify_column(event.x)
         item_id = self.tree.identify_row(event.y)
         self._tree_drag_anchor = ""
+        self._tree_drag_selection = ()
         self._tree_drag_changed = False
         self._tree_drag_last_order = ()
+        self._tree_drag_start_xy = None
+        self._tree_pointer_selection_anchor = ""
+        self._tree_pointer_selection_changed = False
+        self._tree_pointer_selection_start_xy = None
         if region not in ("tree", "cell") or not item_id:
             return
-        selected = list(self.tree.selection())
-        if item_id not in selected:
-            self.tree.selection_set(item_id)
-            selected = [item_id]
-        self._focus_tree_item(item_id)
+        if event.state & 0x0001 or event.state & 0x0004:
+            return
+        if column_id != "#1":
+            self._tree_pointer_selection_anchor = item_id
+            self._tree_pointer_selection_start_xy = (int(event.x), int(event.y))
+            return
         self._tree_drag_anchor = item_id
-        self._tree_drag_selection = tuple(
-            entry_id for entry_id in self.tree.get_children() if entry_id in selected
-        )
-        return "break"
+        self._tree_drag_start_xy = (int(event.x), int(event.y))
 
     def _drag_reorder_tree(self, event):
         if self.tree is None:
             return
         anchor = getattr(self, "_tree_drag_anchor", "")
-        selected = list(getattr(self, "_tree_drag_selection", ()))
-        if not anchor or not selected:
+        if anchor:
+            start_xy = getattr(self, "_tree_drag_start_xy", None)
+            if start_xy:
+                dx = abs(int(event.x) - int(start_xy[0]))
+                dy = abs(int(event.y) - int(start_xy[1]))
+                if dx < 4 and dy < 4:
+                    return
+            selected = list(getattr(self, "_tree_drag_selection", ()))
+            if not selected:
+                current_selection = list(self.tree.selection())
+                if anchor in current_selection:
+                    selected = [
+                        entry_id for entry_id in self.tree.get_children()
+                        if entry_id in current_selection
+                    ]
+                else:
+                    selected = [anchor]
+                self._tree_drag_selection = tuple(selected)
+            children = list(self.tree.get_children())
+            selected = [entry_id for entry_id in children if entry_id in selected]
+            if not selected:
+                return
+            target = self.tree.identify_row(event.y)
+            remaining = [entry_id for entry_id in children if entry_id not in selected]
+            if not remaining:
+                return "break"
+            if target and target in remaining:
+                insert_at = remaining.index(target)
+                bbox = self.tree.bbox(target)
+                if bbox:
+                    midpoint = bbox[1] + (bbox[3] / 2.0)
+                    if event.y > midpoint:
+                        insert_at += 1
+            elif target:
+                return "break"
+            else:
+                insert_at = 0 if event.y < 0 else len(remaining)
+            new_order = tuple(remaining[:insert_at] + selected + remaining[insert_at:])
+            if new_order == tuple(children) or new_order == getattr(self, "_tree_drag_last_order", ()):
+                return "break"
+            for index, entry_id in enumerate(new_order):
+                self.tree.move(entry_id, "", index)
+            self.tree.selection_set(selected)
+            self._focus_tree_item(selected[0], preserve_selection=True)
+            self._tree_drag_changed = True
+            self._tree_drag_last_order = new_order
+            return "break"
+        selection_anchor = getattr(self, "_tree_pointer_selection_anchor", "")
+        if not selection_anchor:
             return
-        children = list(self.tree.get_children())
-        selected = [entry_id for entry_id in children if entry_id in selected]
+        start_xy = getattr(self, "_tree_pointer_selection_start_xy", None)
+        if start_xy:
+            dx = abs(int(event.x) - int(start_xy[0]))
+            dy = abs(int(event.y) - int(start_xy[1]))
+            if dx < 4 and dy < 4:
+                return
+        target = self.tree.identify_row(event.y)
+        if not target:
+            children = list(self.tree.get_children())
+            if not children:
+                return
+            target = children[0] if event.y < 0 else children[-1]
+        ordered_ids = list(self.tree.get_children())
+        if selection_anchor not in ordered_ids or target not in ordered_ids:
+            return
+        anchor_index = ordered_ids.index(selection_anchor)
+        target_index = ordered_ids.index(target)
+        start_index = min(anchor_index, target_index)
+        end_index = max(anchor_index, target_index)
+        selected = ordered_ids[start_index:end_index + 1]
         if not selected:
             return
-        target = self.tree.identify_row(event.y)
-        remaining = [entry_id for entry_id in children if entry_id not in selected]
-        if not remaining:
-            return "break"
-        if target and target in remaining:
-            insert_at = remaining.index(target)
-            bbox = self.tree.bbox(target)
-            if bbox:
-                midpoint = bbox[1] + (bbox[3] / 2.0)
-                if event.y > midpoint:
-                    insert_at += 1
-        elif target:
-            return "break"
-        else:
-            insert_at = 0 if event.y < 0 else len(remaining)
-        new_order = tuple(remaining[:insert_at] + selected + remaining[insert_at:])
-        if new_order == tuple(children) or new_order == getattr(self, "_tree_drag_last_order", ()):
-            return "break"
-        for index, entry_id in enumerate(new_order):
-            self.tree.move(entry_id, "", index)
         self.tree.selection_set(selected)
-        self._focus_tree_item(selected[0])
-        self._tree_drag_changed = True
-        self._tree_drag_last_order = new_order
+        self._focus_tree_item(target, preserve_selection=True)
+        self._tree_pointer_selection_changed = True
         return "break"
 
     def _rebuild_task_order_from_tree(self):
@@ -3280,6 +3341,12 @@ class DownloadManagerApp:
         self._tree_drag_selection = ()
         self._tree_drag_changed = False
         self._tree_drag_last_order = ()
+        self._tree_drag_start_xy = None
+        if getattr(self, "_tree_pointer_selection_changed", False):
+            self._refresh_ui_summary()
+        self._tree_pointer_selection_anchor = ""
+        self._tree_pointer_selection_changed = False
+        self._tree_pointer_selection_start_xy = None
 
     def show_tree_menu(self, event):
         item_id = self.tree.identify_row(event.y)
@@ -3306,7 +3373,8 @@ class DownloadManagerApp:
         item_ids = list(self.tree.get_children())
         if item_ids:
             self.tree.selection_set(item_ids)
-            self._focus_tree_item(item_ids[0])
+            self.tree.focus(item_ids[0])
+            self.tree.see(item_ids[0])
         self._refresh_ui_summary()
         return "break"
 
@@ -4347,16 +4415,39 @@ class DownloadManagerApp:
             lambda _item_id=item_id, _col=col, _value=value, _force=force: self.update_tree(_item_id, _col, _value, force=_force)
         )
 
+    def _tree_has_focus(self):
+        if self.tree is None:
+            return False
+        try:
+            focus_widget = self.root.focus_get()
+        except Exception:
+            focus_widget = None
+        return focus_widget is self.tree
+
+    def _handle_select_all_shortcut(self, event=None):
+        if not self._tree_has_focus():
+            return
+        return self.select_all_tasks(event)
+
+    def _handle_delete_shortcut(self, event=None):
+        if not self._tree_has_focus():
+            return
+        return self._handle_delete_key(event)
+
     def _handle_delete_key(self, _event=None):
+        if not self._tree_has_focus():
+            return
         self.delete_selected()
+        return "break"
 
     def _handle_tree_select(self, _event=None):
         self._refresh_ui_summary()
 
-    def _focus_tree_item(self, item_id):
+    def _focus_tree_item(self, item_id, preserve_selection=False):
         if not self.tree or not item_id:
             return
-        self.tree.selection_set(item_id)
+        if not preserve_selection:
+            self.tree.selection_set(item_id)
         self.tree.focus(item_id)
         self.tree.see(item_id)
 
@@ -4702,10 +4793,10 @@ class DownloadManagerApp:
             return False
         if temp:
             return True
-        if self._is_incomplete_gimy_video_artifact(task, output_path):
+        if self._is_incomplete_hls_video_artifact(task, output_path):
             write_error_log(
-                "gimy existing output rejected",
-                Exception("existing gimy output appears incomplete"),
+                "existing output rejected",
+                Exception("existing output appears incomplete"),
                 item_id=item_id,
                 output=output_path,
                 source_site=self._get_task_source_site(task) or None,
@@ -4713,13 +4804,15 @@ class DownloadManagerApp:
             return False
         return True
 
-    def _is_incomplete_gimy_video_artifact(self, task, output_path, expected_duration=None):
-        if self._get_task_source_site(task) != "gimy":
+    def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None):
+        if self._get_task_source_site(task) not in ("gimy", "movieffm", "missav"):
             return False
         if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
             return False
         info = self._probe_media_info(output_path)
         if not info.get("exists") or not info.get("size"):
+            return True
+        if not info.get("valid"):
             return True
         duration = float(info.get("duration", 0.0) or 0.0)
         size = int(info.get("size", 0) or 0)
@@ -4734,15 +4827,17 @@ class DownloadManagerApp:
         expected_seconds = max(float(expected_duration or 0.0), 0.0)
         try:
             ext = os.path.splitext(output_path)[1].lstrip(".") or "mp4"
-            resume_key = self._get_task_resolved_url(task, fallback_url=self._get_task_url(task))
+            resume_keys = self._get_task_resume_keys(task, fallback_url=self._get_task_url(task))
+            resume_key = resume_keys[0] if resume_keys else self._get_task_resolved_url(task, fallback_url=self._get_task_url(task))
             temp_root = self._get_stable_resume_base(self._get_task_url(task), ext=ext, resume_key=resume_key)
             progress_info = self._load_resume_progress_info(f"{temp_root}.part.progress.json")
-            stored_source = str(progress_info.get("source_url", "") or "")
-            if resume_key and stored_source == resume_key:
+            if self._resume_progress_matches(progress_info, resume_keys, f"{temp_root}.part.progress.json"):
                 expected_seconds = max(expected_seconds, float(progress_info.get("seconds", 0.0) or 0.0))
         except Exception:
             pass
         if expected_seconds > 300.0 and duration > 0.0 and duration + max(60.0, expected_seconds * 0.2) < expected_seconds:
+            return True
+        if expected_seconds > 300.0 and duration <= 0.0 and size < 64 * 1024 * 1024:
             return True
         return False
 
@@ -4769,7 +4864,9 @@ class DownloadManagerApp:
         message = self._message_file_exists_text()
         safe_name = re.sub(r'[\\\\/:*?"<>|]+', "_", short_name).strip()
         for ext in possible_exts:
-            if os.path.exists(os.path.join(save_dir, f"{safe_name}{ext}")):
+            candidate_output = os.path.join(save_dir, f"{safe_name}{ext}")
+            if self._can_accept_existing_output(task, item_id, candidate_output):
+                self._set_task_output_path(task, item_id, candidate_output)
                 self._mark_existing_file_complete(item_id, message)
                 return True
         return False
@@ -5180,6 +5277,71 @@ class DownloadManagerApp:
         digest = hashlib.sha1(normalized_url.encode("utf-8", errors="ignore")).hexdigest()[:16]
         return os.path.join(self._get_system_temp_dir(), f"downloader_resume_{digest}.{ext}")
 
+    def _build_resume_output_identity_key(self, task, ext="mp4", save_dir=None, fallback_name="Video"):
+        preferred_output = self._get_task_output_path(task)
+        if preferred_output:
+            normalized_output = os.path.normcase(os.path.abspath(preferred_output))
+            return f"output::{normalized_output}"
+        safe_name = self._get_task_output_basename(task, fallback_name)
+        if not safe_name:
+            return ""
+        output_dir = save_dir or self.save_dir_var.get() or _APP_DIR
+        try:
+            output_dir = os.path.abspath(os.path.expanduser(str(output_dir or _APP_DIR)))
+        except Exception:
+            output_dir = str(output_dir or _APP_DIR)
+        normalized_ext = str(ext or "mp4").lstrip(".") or "mp4"
+        candidate_output = os.path.normcase(os.path.join(output_dir, f"{safe_name}.{normalized_ext}"))
+        source_site = (self._get_task_source_site(task) or "").strip().lower()
+        if source_site:
+            return f"{source_site}::{candidate_output}"
+        return f"output::{candidate_output}"
+
+    def _normalize_resume_state_id(self, progress_path):
+        if not progress_path:
+            return ""
+        try:
+            return os.path.normcase(os.path.abspath(str(progress_path)))
+        except Exception:
+            return str(progress_path or "")
+
+    def _get_task_resume_keys(self, task, fallback_url=""):
+        resume_keys = []
+        for candidate in (
+            self._get_task_url(task, fallback_url=fallback_url),
+            self._get_task_source_page(task, fallback_url=fallback_url),
+            fallback_url,
+        ):
+            normalized_candidate = _normalize_download_url(candidate)
+            if normalized_candidate and normalized_candidate not in resume_keys:
+                resume_keys.append(normalized_candidate)
+        return resume_keys
+
+    def _has_resume_artifact_family(self, base_path):
+        if not base_path:
+            return False
+        root, ext = os.path.splitext(base_path)
+        candidate_paths = [
+            base_path,
+            base_path + ".progress.json",
+        ]
+        if ext:
+            candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
+        return any(self._has_nonempty_file(candidate_path) or os.path.exists(candidate_path) for candidate_path in candidate_paths)
+
+    def _resolve_resume_artifact_base(self, task, url, ext="mp4", save_dir=None, fallback_name="Video"):
+        resume_keys = self._get_task_resume_keys(task, fallback_url=url)
+        output_identity_key = self._build_resume_output_identity_key(task, ext=ext, save_dir=save_dir, fallback_name=fallback_name)
+        if output_identity_key and output_identity_key not in resume_keys:
+            resume_keys.insert(0, output_identity_key)
+        primary_key = resume_keys[0] if resume_keys else (_normalize_download_url(url) or str(url or ""))
+        primary_base = self._get_stable_resume_base(url, ext=ext, resume_key=primary_key)
+        for legacy_key in resume_keys[1:]:
+            legacy_base = self._get_stable_resume_base(url, ext=ext, resume_key=legacy_key)
+            if legacy_base != primary_base and self._has_resume_artifact_family(legacy_base):
+                return legacy_base, primary_key, resume_keys
+        return primary_base, primary_key, resume_keys
+
     def _get_system_temp_dir(self):
         return tempfile.gettempdir()
 
@@ -5455,6 +5617,40 @@ class DownloadManagerApp:
                         continue
             return self._has_nonempty_file(src_path)
 
+    def _select_best_resume_artifact_state(self, candidate_paths, persisted=None):
+        persisted = persisted or {}
+        best_state = {
+            "seconds": max(float(persisted.get("seconds", 0.0) or 0.0), 0.0),
+            "bytes": max(int(persisted.get("bytes", 0) or 0), 0),
+            "path": "",
+            "valid": False,
+        }
+        scored_candidates = []
+        for candidate_path in candidate_paths:
+            if not self._has_nonempty_file(candidate_path):
+                continue
+            info = self._probe_media_info(candidate_path)
+            candidate_size = max(int(info.get("size", 0) or 0), 0)
+            candidate_seconds = max(float(info.get("duration", 0.0) or 0.0), 0.0)
+            candidate_valid = bool(info.get("valid"))
+            scored_candidates.append((
+                candidate_valid,
+                candidate_seconds,
+                candidate_size,
+                candidate_path,
+            ))
+        if not scored_candidates:
+            return best_state
+        scored_candidates.sort(reverse=True)
+        best_valid, best_seconds, best_bytes, best_path = scored_candidates[0]
+        best_state.update({
+            "seconds": best_seconds,
+            "bytes": best_bytes,
+            "path": best_path,
+            "valid": bool(best_valid),
+        })
+        return best_state
+
     def _move_file_with_retry(self, src_path, dst_path, attempts=8, delay_seconds=0.5):
         last_error = None
         total_attempts = max(int(attempts or 1), 1)
@@ -5489,18 +5685,29 @@ class DownloadManagerApp:
 
     def _load_resume_progress_info(self, progress_path):
         if not progress_path or not os.path.exists(progress_path):
-            return {"seconds": 0, "bytes": 0, "source_url": ""}
+            return {"seconds": 0, "bytes": 0, "source_url": "", "resume_id": ""}
         try:
             data = _load_json_with_backup(progress_path, {})
             if not isinstance(data, dict):
-                return {"seconds": 0, "bytes": 0, "source_url": ""}
+                return {"seconds": 0, "bytes": 0, "source_url": "", "resume_id": ""}
             return {
                 "seconds": max(float(data.get("seconds", 0) or 0), 0.0),
                 "bytes": max(int(data.get("bytes", 0) or 0), 0),
                 "source_url": str(data.get("source_url", "") or ""),
+                "resume_id": str(data.get("resume_id", "") or ""),
             }
         except Exception:
-            return {"seconds": 0, "bytes": 0, "source_url": ""}
+            return {"seconds": 0, "bytes": 0, "source_url": "", "resume_id": ""}
+
+    def _resume_progress_matches(self, stored_info, resume_keys, progress_path):
+        stored_info = stored_info or {}
+        normalized_keys = set(resume_keys or [])
+        stored_source = _normalize_download_url(stored_info.get("source_url", ""))
+        if stored_source and stored_source in normalized_keys:
+            return True
+        current_resume_id = self._normalize_resume_state_id(progress_path)
+        stored_resume_id = str(stored_info.get("resume_id", "") or "")
+        return bool(current_resume_id and stored_resume_id and current_resume_id == stored_resume_id)
 
     def _load_resume_progress(self, progress_path):
         return self._load_resume_progress_info(progress_path).get("seconds", 0)
@@ -5519,6 +5726,7 @@ class DownloadManagerApp:
         seconds_value = max(float(seconds or 0), 0.0)
         bytes_value = max(int(bytes_done or 0), 0)
         source_value = str(source_url or "")
+        resume_id_value = self._normalize_resume_state_id(progress_path)
         min_interval_seconds = max(float(min_interval_seconds or 0.0), 0.0)
         min_bytes_delta = max(int(min_bytes_delta or 0), 0)
         now = time.time()
@@ -5529,12 +5737,17 @@ class DownloadManagerApp:
                 last_seconds = float(cached.get("seconds", 0.0) or 0.0)
                 last_bytes = int(cached.get("bytes", 0) or 0)
                 last_source = str(cached.get("source_url", "") or "")
+                last_resume_id = str(cached.get("resume_id", "") or "")
                 last_saved_at = float(cached.get("saved_at", 0.0) or 0.0)
-                if source_value == last_source:
+                same_resume_target = (
+                    (source_value and source_value == last_source)
+                    or (resume_id_value and resume_id_value == last_resume_id)
+                )
+                if same_resume_target:
                     seconds_value = max(seconds_value, last_seconds)
                     bytes_value = max(bytes_value, last_bytes)
                 if (
-                    source_value == last_source
+                    same_resume_target
                     and now - last_saved_at < min_interval_seconds
                     and abs(seconds_value - last_seconds) < min_interval_seconds
                     and abs(bytes_value - last_bytes) < min_bytes_delta
@@ -5543,24 +5756,34 @@ class DownloadManagerApp:
                         "seconds": seconds_value,
                         "bytes": bytes_value,
                         "source_url": source_value,
+                        "resume_id": resume_id_value,
                         "saved_at": last_saved_at,
                     }
                     return
         should_load_persisted = True
         if cached:
             cached_source = str(cached.get("source_url", "") or "")
-            if not source_value or source_value == cached_source:
+            cached_resume_id = str(cached.get("resume_id", "") or "")
+            if (
+                (not source_value or source_value == cached_source)
+                or (resume_id_value and resume_id_value == cached_resume_id)
+            ):
                 should_load_persisted = False
         if should_load_persisted:
             persisted = self._load_resume_progress_info(progress_path)
             persisted_source = str(persisted.get("source_url", "") or "")
-            if source_value and persisted_source == source_value:
+            persisted_resume_id = str(persisted.get("resume_id", "") or "")
+            if (
+                (source_value and persisted_source == source_value)
+                or (resume_id_value and persisted_resume_id == resume_id_value)
+            ):
                 seconds_value = max(seconds_value, float(persisted.get("seconds", 0.0) or 0.0))
                 bytes_value = max(bytes_value, int(persisted.get("bytes", 0) or 0))
         payload = {
             "seconds": seconds_value,
             "bytes": bytes_value,
             "source_url": source_value,
+            "resume_id": resume_id_value,
             "updated_at": now,
         }
         try:
@@ -5570,6 +5793,7 @@ class DownloadManagerApp:
                     "seconds": seconds_value,
                     "bytes": bytes_value,
                     "source_url": source_value,
+                    "resume_id": resume_id_value,
                     "saved_at": now,
                 }
         except Exception:
@@ -5598,6 +5822,18 @@ class DownloadManagerApp:
             return seconds_value
         tail_seconds = min(5.0, max(1.0, duration_value * 0.01))
         return max(duration_value - tail_seconds, 0.0)
+
+    def _get_resume_checkpoint_seconds(self, output_path, estimated_seconds, total_duration=0.0):
+        estimated_value = max(float(estimated_seconds or 0.0), 0.0)
+        total_duration_value = max(float(total_duration or 0.0), 0.0)
+        probed_seconds = self._probe_media_duration_seconds(output_path)
+        if probed_seconds > 0.0:
+            if total_duration_value > 0.0:
+                probed_seconds = self._sanitize_resume_seconds(probed_seconds, total_duration_value)
+            return min(estimated_value, probed_seconds) if estimated_value > 0.0 else probed_seconds
+        if total_duration_value > 0.0 and estimated_value > 0.0:
+            return self._sanitize_resume_seconds(estimated_value, total_duration_value)
+        return estimated_value
 
     def _should_reject_resumed_ffmpeg_artifact(self, task, final_size, final_duration, base_bytes, total_duration):
         try:
@@ -6470,6 +6706,13 @@ class DownloadManagerApp:
         start_time = time.time()
         last_update_time = start_time
         last_update_bytes = downloaded
+        immediate_multipart = (
+            not prefer_curl_stream
+            and range_supported
+            and total_size > 0
+            and resume_bytes <= 0
+            and _should_start_http_multipart_immediately(task, total_size=total_size)
+        )
         try:
             with open(out_path, mode) as f:
                 while True:
@@ -6497,6 +6740,9 @@ class DownloadManagerApp:
                         except Exception:
                             pass
                         return
+                    if immediate_multipart and not switched_to_multipart:
+                        switched_to_multipart = True
+                        break
                     if not switched_to_multipart and not prefer_curl_stream and range_supported and total_size > 0:
                         elapsed_probe = time.time() - start_time
                         if elapsed_probe >= HTTP_MULTIPART_TRIGGER_SECONDS:
@@ -6619,8 +6865,13 @@ class DownloadManagerApp:
         if yt_dlp_module is None:
             raise RuntimeError("yt-dlp module is not available")
         task = self.tasks.get(item_id, {})
-        resume_key = self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url)) or url
-        temp_out_path = self._get_stable_resume_base(url, ext="mp3" if is_mp3 else "mp4", resume_key=resume_key)
+        temp_out_path, resume_key, resume_keys = self._resolve_resume_artifact_base(
+            task,
+            url,
+            ext="mp3" if is_mp3 else "mp4",
+            save_dir=save_dir,
+            fallback_name="Audio" if is_mp3 else "Video",
+        )
         temp_root, temp_ext = os.path.splitext(temp_out_path)
         resume_out_path = f"{temp_root}.resume{temp_ext}"
         merged_out_path = f"{temp_root}.merged{temp_ext}"
@@ -6713,16 +6964,25 @@ class DownloadManagerApp:
                     pass
             self._set_task_output_path(task, item_id, actual_output)
         final_output_path = self._get_task_output_path(task, default=out_path) or out_path
-        if self._has_nonempty_file(final_output_path) and self._get_task_source_site(task) == "gimy" and not is_mp3:
+        if self._has_nonempty_file(final_output_path) and not is_mp3:
             final_info = self._probe_media_info(final_output_path)
             final_size = int(final_info.get("size", 0) or 0)
             final_duration = float(final_info.get("duration", 0.0) or 0.0)
-            if final_size < 1024 * 1024 and final_duration < 60.0:
+            expected_duration = 0.0
+            try:
+                if final_size < 64 * 1024 * 1024 or final_duration <= 0.0:
+                    expected_duration = self._get_m3u8_duration(
+                        url,
+                        headers={"Referer": referer, "Origin": origin},
+                    )
+            except Exception:
+                expected_duration = 0.0
+            if self._is_incomplete_hls_video_artifact(task, final_output_path, expected_duration=expected_duration):
                 artifact_exc = Exception(
-                    f"gimy native hls artifact rejected: size={final_size} duration={final_duration:.3f}"
+                    f"{self._get_task_source_site(task) or 'hls'} native hls artifact rejected: size={final_size} duration={final_duration:.3f} expected={expected_duration:.3f}"
                 )
                 write_error_log(
-                    "gimy native hls artifact rejected",
+                    "native hls artifact rejected",
                     artifact_exc,
                     url=url,
                     item_id=item_id,
@@ -6730,6 +6990,7 @@ class DownloadManagerApp:
                     output=final_output_path,
                     size=final_size,
                     duration=final_duration,
+                    expected_duration=expected_duration,
                 )
                 self._remove_artifact_paths(final_output_path, temp_out_path, resume_out_path, merged_out_path, progress_path)
                 raise artifact_exc
@@ -6777,8 +7038,13 @@ class DownloadManagerApp:
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
-        resume_key = self._get_task_source_page(task, fallback_url=self._get_task_url(task, fallback_url=url)) or url
-        temp_out_path = self._get_stable_resume_base(url, ext=ext, resume_key=resume_key)
+        temp_out_path, resume_key, resume_keys = self._resolve_resume_artifact_base(
+            task,
+            url,
+            ext=ext,
+            save_dir=save_dir,
+            fallback_name="Audio" if is_mp3 else "Video",
+        )
         temp_root, temp_ext = os.path.splitext(temp_out_path)
         resume_out_path = f"{temp_root}.resume{temp_ext}"
         merged_out_path = f"{temp_root}.merged{temp_ext}"
@@ -7069,7 +7335,7 @@ class DownloadManagerApp:
             stored_seconds = float(stored_info.get("seconds", 0.0) or 0.0)
             stored_source_url = _normalize_download_url(stored_info.get("source_url", ""))
             current_resume_key = _normalize_download_url(resume_key)
-            same_resume_target = stored_source_url == current_resume_key
+            same_resume_target = self._resume_progress_matches(stored_info, resume_keys, progress_path)
             partial_reason = partial_info.get("reason")
             partial_valid = bool(partial_info.get("valid"))
             size_consistent = partial_size > 0 and stored_bytes > 0 and abs(partial_size - stored_bytes) <= max(1024 * 1024, int(max(partial_size, stored_bytes) * 0.35))
@@ -7103,8 +7369,22 @@ class DownloadManagerApp:
                         stored_bytes=stored_bytes,
                         stored_source_url=stored_source_url,
                     )
-                base_bytes, resume_seconds = self._reset_resume_artifacts(temp_out_path, resume_out_path, merged_out_path, progress_path)
-                resume_mode = "reset"
+                    if same_resume_target and partial_valid and partial_duration > 0:
+                        base_bytes = partial_size
+                        resume_seconds = partial_duration
+                        resume_mode = "media_probe_recovered"
+                        self._save_resume_progress(
+                            progress_path,
+                            partial_duration,
+                            source_url=resume_key,
+                            bytes_done=partial_size,
+                        )
+                    else:
+                        base_bytes, resume_seconds = self._reset_resume_artifacts(temp_out_path, resume_out_path, merged_out_path, progress_path)
+                        resume_mode = "reset"
+                else:
+                    base_bytes, resume_seconds = self._reset_resume_artifacts(temp_out_path, resume_out_path, merged_out_path, progress_path)
+                    resume_mode = "reset"
             if duration_box.get("value"):
                 total_duration = duration_box.get("value", 0.0)
             elif total_duration <= 0:
@@ -7326,9 +7606,14 @@ class DownloadManagerApp:
                             elif instant_bps > 0:
                                 self._set_task_transfer_rate_ui(item_id, instant_bps)
                             last_ui_update = now
+                        checkpoint_seconds = self._get_resume_checkpoint_seconds(
+                            active_output_path,
+                            total_done_seconds,
+                            total_duration=total_duration,
+                        )
                         self._save_resume_progress(
                             progress_path,
-                            total_done_seconds,
+                            checkpoint_seconds,
                             source_url=resume_key,
                             bytes_done=current_bytes,
                             min_interval_seconds=FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
@@ -7632,22 +7917,15 @@ class DownloadManagerApp:
             return
         progress_path = temp_path + ".progress.json"
         persisted = self._load_resume_progress_info(progress_path)
-        best_seconds = max(float(persisted.get("seconds", 0.0) or 0.0), 0.0)
-        best_bytes = max(int(persisted.get("bytes", 0) or 0), 0)
-        source_url = str(
-            persisted.get("source_url", "") or self._get_task_source_page(task, fallback_url=self._get_task_url(task)) or ""
-        )
+        resume_keys = self._get_task_resume_keys(task, fallback_url=self._get_task_url(task))
+        source_url = str(persisted.get("source_url", "") or (resume_keys[0] if resume_keys else ""))
         root, ext = os.path.splitext(temp_path)
         candidate_paths = [temp_path]
         if ext:
             candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
-        for candidate_path in candidate_paths:
-            if not self._has_nonempty_file(candidate_path):
-                continue
-            best_bytes = max(best_bytes, self._get_existing_file_size(candidate_path))
-            info = self._probe_media_info(candidate_path)
-            if info.get("valid"):
-                best_seconds = max(best_seconds, float(info.get("duration", 0.0) or 0.0))
+        best_state = self._select_best_resume_artifact_state(candidate_paths, persisted=persisted)
+        best_seconds = best_state.get("seconds", 0.0)
+        best_bytes = best_state.get("bytes", 0)
         if best_seconds > 0.0 or best_bytes > 0:
             self._save_resume_progress(progress_path, best_seconds, source_url=source_url, bytes_done=best_bytes)
 
