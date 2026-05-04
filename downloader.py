@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260503-2540"
+APP_BUILD = "20260504-2550"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -123,6 +123,8 @@ M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES = frozenset(("gimy", "movieffm"))
 FFMPEG_PROGRESS_IO_POLL_INTERVAL_SECONDS = 0.75
 FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 1.5
 FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA = 2 * 1024 * 1024
+YTDLP_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 1.25
+YTDLP_PROGRESS_UI_MIN_BYTES_DELTA = 1 * 1024 * 1024
 FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS = 5.0
 FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA = 8 * 1024 * 1024
 UI_THROTTLE_INTERVAL_SECONDS = 1.25
@@ -2594,7 +2596,14 @@ def unpack_packed_javascript(text):
 
 
 def default_short_name_for_url(url, is_mp3=False):
-    short_name = url.split("/")[-1] if "/" in url else url
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    path_segments = [segment for segment in parsed.path.split("/") if segment]
+    short_name = path_segments[-1] if path_segments else ""
+    if not short_name:
+        short_name = parsed.netloc or (url if isinstance(url, str) else str(url or ""))
+    short_name = urllib.parse.unquote(short_name).strip()
+    if not short_name:
+        short_name = "download"
     if len(short_name) > 35:
         short_name = short_name[:35] + "..."
     if is_mp3:
@@ -6261,53 +6270,31 @@ class DownloadManagerApp:
             return
         self._set_task_parse_eta_text(item_id, self._ui_text(key, fallback))
 
-    def _set_task_parse_eta_by_key(self, item_id, key, fallback):
-        self._set_task_parse_eta_ui(item_id, key=key, fallback=fallback)
-
     def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
         if error is not None:
             self._set_task_parse_eta_ui(item_id, message=self._format_site_parse_error(error))
             return
         self._set_task_parse_eta_ui(item_id, key=key, fallback=fallback, message=message)
 
-    def _set_task_site_parsing_ui(self, item_id, key, fallback):
-        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
-
-    def _set_task_mode_status_ui(self, item_id, mode, mode_map, default_mode):
-        key, fallback = mode_map.get(mode, mode_map[default_mode])
-        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
-
     def _set_task_gimy_status_ui(self, item_id, mode="parsing"):
-        self._set_task_mode_status_ui(
-            item_id,
-            mode,
-            {
-                "parsing": ("eta_site_gimy", "正在解析 Gimy 頁面..."),
-                "refresh": ("eta_site_gimy", "正在重新取得 Gimy 串流..."),
-                "rebuild": ("eta_site_gimy", "正在重建 Gimy 播放線..."),
-            },
-            "parsing",
-        )
+        mode_map = {
+            "parsing": ("eta_site_gimy", "正在解析 Gimy 頁面..."),
+            "refresh": ("eta_site_gimy", "正在重新取得 Gimy 串流..."),
+            "rebuild": ("eta_site_gimy", "正在重建 Gimy 播放線..."),
+        }
+        key, fallback = mode_map.get(mode, mode_map["parsing"])
+        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
 
     def _set_task_movieffm_status_ui(self, item_id, mode="page"):
-        self._set_task_mode_status_ui(
-            item_id,
-            mode,
-            {
-                "page": ("eta_site_movieffm", "正在解析 MovieFFM 頁面..."),
-                "external": ("eta_site_movieffm", "正在解析外部播放來源..."),
-            },
-            "page",
-        )
+        mode_map = {
+            "page": ("eta_site_movieffm", "正在解析 MovieFFM 頁面..."),
+            "external": ("eta_site_movieffm", "正在解析外部播放來源..."),
+        }
+        key, fallback = mode_map.get(mode, mode_map["page"])
+        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
 
     def _set_task_simple_site_status_ui(self, item_id, key, fallback):
         self._set_task_parse_ui(item_id, key=key, fallback=fallback)
-
-    def _set_task_parse_status_key_ui(self, item_id, key, fallback):
-        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
-
-    def _set_task_parse_message_ui(self, item_id, message):
-        self._set_task_parse_ui(item_id, message=message)
 
     def _set_task_direct_media_ui(self, item_id):
         self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
@@ -6326,19 +6313,10 @@ class DownloadManagerApp:
             message = "已記錄連結已過期，重新分析頁面..."
         else:
             message = "已記錄連結失效，重新分析頁面..."
-        self._set_task_parse_message_ui(item_id, message)
-
-    def _set_task_cached_link_resume_ui(self, item_id):
-        self._set_task_fallback_parser_ui(item_id, "使用已記錄下載連結續傳...")
-
-    def _set_task_fallback_parser_ui(self, item_id, message):
         self._set_task_parse_ui(item_id, message=message)
 
     def _set_task_ytdlp_fallback_ui(self, item_id, site_label):
-        self._set_task_fallback_parser_ui(item_id, f"{site_label} 直連解析失敗，改用 yt-dlp...")
-
-    def _set_task_parse_error_ui(self, item_id, error):
-        self._set_task_parse_ui(item_id, error=error)
+        self._set_task_parse_ui(item_id, message=f"{site_label} 直連解析失敗，改用 yt-dlp...")
 
     def _set_task_mega_identity(self, item_id, task, url, safe_name):
         normalized_name = _set_task_name_fields(task, safe_name)
@@ -6371,9 +6349,6 @@ class DownloadManagerApp:
 
     def _format_site_parse_error(self, error, limit=40):
         return f"{self._site_parse_error_prefix()}: {str(error)[:max(int(limit or 0), 0)]}"
-
-    def _site_parse_error_text(self, error, limit=40):
-        return self._format_site_parse_error(error, limit=limit)
 
     def _schedule_site_parse_error(self, error, limit=80):
         self._schedule_error(self._format_site_parse_error(error, limit=limit))
@@ -6434,7 +6409,11 @@ class DownloadManagerApp:
             self._set_task_downloading_ui(item_id)
 
     def _make_yt_dlp_progress_hook(self, task, item_id, save_dir):
+        last_ui_update = 0.0
+        last_ui_bytes = 0
+
         def progress_hook(d):
+            nonlocal last_ui_update, last_ui_bytes
             task_state = _task_state_value(self.tasks.get(item_id, {}))
             if self._is_pause_requested_state(task_state):
                 raise StopDownloadException("pause requested")
@@ -6454,7 +6433,25 @@ class DownloadManagerApp:
             _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
             speed = _event_speed(d)
             eta = _event_eta(d)
-            self._set_task_active_transfer_ui(task, item_id, downloaded, total_bytes=total, speed_bps=speed, eta_seconds=eta)
+            now = time.time()
+            should_refresh_ui = (
+                downloaded <= 0
+                or total is None
+                or downloaded >= (total or 0)
+                or (downloaded - last_ui_bytes) >= YTDLP_PROGRESS_UI_MIN_BYTES_DELTA
+                or (now - last_ui_update) >= YTDLP_PROGRESS_UI_UPDATE_INTERVAL_SECONDS
+            )
+            if should_refresh_ui:
+                self._set_task_active_transfer_ui(
+                    task,
+                    item_id,
+                    downloaded,
+                    total_bytes=total,
+                    speed_bps=speed,
+                    eta_seconds=eta,
+                )
+                last_ui_update = now
+                last_ui_bytes = downloaded
 
         return progress_hook
 
@@ -7163,7 +7160,7 @@ class DownloadManagerApp:
                 _gimy_refresh_history=detail_refresh_history,
                 _gimy_source_refresh_history=[],
             )
-            self._set_task_site_parsing_ui(item_id, "eta_site_gimy", "正在重建 Gimy 播放線...")
+            self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在重建 Gimy 播放線...")
             write_error_log(
                 "gimy detail page rebuild",
                 self._ffmpeg_event_exception("rebuilding gimy episode sources from detail page"),
@@ -8152,7 +8149,7 @@ class DownloadManagerApp:
         self._download_task_internal(source_url, item_id, save_dir, use_impersonate, is_mp3)
 
     def _download_with_cached_resolved_link(self, task, item_id, source_url, cached_resolved_url, save_dir, use_impersonate, is_mp3):
-        self._set_task_cached_link_resume_ui(item_id)
+        self._set_task_parse_ui(item_id, message="使用已記錄下載連結續傳...")
         if _is_expired_signed_media_url(cached_resolved_url):
             write_error_log(
                 "cached resolved url expired",
@@ -8579,7 +8576,7 @@ class DownloadManagerApp:
             except Exception as e:
                 if _is_mixdrop_direct_media(url, direct_referer):
                     raise
-                self._set_task_fallback_parser_ui(item_id, f"Direct media download failed: {str(e)[:30]}")
+                self._set_task_parse_ui(item_id, message=f"Direct media download failed: {str(e)[:30]}")
 
         if "jable.tv" in parsed_url.netloc:
             self._set_task_simple_site_status_ui(item_id, "eta_site_jable", "正在解析 Jable...")
@@ -8677,7 +8674,7 @@ class DownloadManagerApp:
                 return
             except Exception as e:
                 write_error_log("xiaoyakankan parse failure", e, url=url, item_id=item_id)
-                self._set_task_parse_error_ui(item_id, e)
+                self._set_task_parse_ui(item_id, error=e)
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" not in parsed_url.path:
             self._set_task_movieffm_status_ui(item_id, "page")
@@ -9773,7 +9770,7 @@ class DownloadManagerApp:
                 if not _is_anime1_episode_url(page_url):
                     raise
                 url = page_url
-                self._set_task_parse_error_ui(item_id, e)
+                self._set_task_parse_ui(item_id, error=e)
 
         try:
             _run_yt_dlp(url)
