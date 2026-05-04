@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260504-2550"
+APP_BUILD = "20260504-2560"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -128,6 +128,8 @@ YTDLP_PROGRESS_UI_MIN_BYTES_DELTA = 1 * 1024 * 1024
 FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS = 5.0
 FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA = 8 * 1024 * 1024
 UI_THROTTLE_INTERVAL_SECONDS = 1.25
+STATUS_STYLE_REFRESH_INTERVAL_MS = 240
+SUMMARY_REFRESH_INTERVAL_MS = 450
 GIMY_DIRECT_STREAM_FALLBACK_LIMIT = 1
 GIMY_EPISODE_PAGE_PARSE_FALLBACK_LIMIT = 2
 GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
@@ -2311,6 +2313,10 @@ def _should_prefer_native_hls(url, task=None):
         # MovieFFM repeatedly falls back to ffmpeg after native HLS artifact rejection.
         # Skip the native detour so downloads start on the stable path immediately.
         return False
+    if source_site == "njavtv":
+        # NJAVTV surrit playlists often produce tiny native-HLS artifacts, then recover on ffmpeg.
+        # Start on the stable ffmpeg path directly.
+        return False
     if source_site == "missav":
         return True
     if any(marker in host for marker in ("qqqrst.com", "ppqrrs.com", "surrit.com")):
@@ -2386,7 +2392,7 @@ def _ffmpeg_hls_input_options(headers, task=None):
         "-headers",
         headers,
     ]
-    if _task_source_site_name(task) == "missav":
+    if _task_source_site_name(task) in ("missav", "njavtv"):
         options += [
             "-extension_picky",
             "0",
@@ -2949,6 +2955,7 @@ class DownloadManagerApp:
         self._summary_refresh_scheduled = False
         self._queue_process_scheduled = False
         self._last_overview_text = None
+        self._shutdown_started = False
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_ui()
         if self.tree is not None:
@@ -4196,7 +4203,7 @@ class DownloadManagerApp:
             return
         self._status_style_flush_scheduled = True
         try:
-            self.root.after(120, self._flush_status_styles)
+            self.root.after(STATUS_STYLE_REFRESH_INTERVAL_MS, self._flush_status_styles)
         except Exception:
             self._status_style_flush_scheduled = False
 
@@ -4212,7 +4219,7 @@ class DownloadManagerApp:
             return
         self._summary_refresh_scheduled = True
         try:
-            self.root.after(180, self._flush_summary_refresh)
+            self.root.after(SUMMARY_REFRESH_INTERVAL_MS, self._flush_summary_refresh)
         except Exception:
             self._summary_refresh_scheduled = False
 
@@ -4821,7 +4828,7 @@ class DownloadManagerApp:
         return True
 
     def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None):
-        if self._get_task_source_site(task) not in ("gimy", "movieffm", "missav"):
+        if self._get_task_source_site(task) not in ("gimy", "movieffm", "missav", "njavtv"):
             return False
         if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
             return False
@@ -6237,9 +6244,6 @@ class DownloadManagerApp:
     def _ui_text(self, key, fallback):
         return self._eta_or_status_text(key, fallback)
 
-    def _set_task_processing_ui(self, item_id, message=None):
-        self._set_task_status_mode_ui(item_id, self._processing_status_text(), message)
-
     def _eta_direct_media_text(self):
         return self._ui_text("eta_direct_media", "直接媒體下載")
 
@@ -6293,30 +6297,8 @@ class DownloadManagerApp:
         key, fallback = mode_map.get(mode, mode_map["page"])
         self._set_task_parse_ui(item_id, key=key, fallback=fallback)
 
-    def _set_task_simple_site_status_ui(self, item_id, key, fallback):
-        self._set_task_parse_ui(item_id, key=key, fallback=fallback)
-
-    def _set_task_direct_media_ui(self, item_id):
-        self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
-
-    def _set_task_found_media_ui(self, item_id):
-        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
-
-    def _set_task_found_stream_ui(self, item_id):
-        self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._eta_found_stream_text())
-
     def _set_task_stream_downloading_ui(self, item_id):
         self._set_task_runtime_status_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
-
-    def _set_task_cached_link_reanalysis_ui(self, item_id, expired=False):
-        if expired:
-            message = "已記錄連結已過期，重新分析頁面..."
-        else:
-            message = "已記錄連結失效，重新分析頁面..."
-        self._set_task_parse_ui(item_id, message=message)
-
-    def _set_task_ytdlp_fallback_ui(self, item_id, site_label):
-        self._set_task_parse_ui(item_id, message=f"{site_label} 直連解析失敗，改用 yt-dlp...")
 
     def _set_task_mega_identity(self, item_id, task, url, safe_name):
         normalized_name = _set_task_name_fields(task, safe_name)
@@ -6352,9 +6334,6 @@ class DownloadManagerApp:
 
     def _schedule_site_parse_error(self, error, limit=80):
         self._schedule_error(self._format_site_parse_error(error, limit=limit))
-
-    def _set_task_error_ui(self, item_id, message):
-        self._set_task_status_mode_ui(item_id, self._error_status_text(), message)
 
     def _set_task_progress_unknown_ui(self, item_id):
         self._set_task_column_placeholder_ui(item_id, "progress", "--")
@@ -6426,7 +6405,7 @@ class DownloadManagerApp:
                 if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
-                self._set_task_processing_ui(item_id)
+                self._set_task_status_mode_ui(item_id, self._processing_status_text())
                 return
             if status != "downloading":
                 return
@@ -7597,6 +7576,7 @@ class DownloadManagerApp:
                                     estimated_total_bytes,
                                     current_bytes,
                                 )
+                        progress_percent = None
                         if active_total_bytes and active_total_bytes > 0:
                             percent = format_progress_percent(current_bytes, active_total_bytes, cap_at_99=True)
                             if percent is not None:
@@ -7626,15 +7606,22 @@ class DownloadManagerApp:
                                 else:
                                     near_complete_since = None
                             if percent is not None:
-                                if should_refresh_progress_ui:
-                                    self._set_task_progress_percent_ui(item_id, percent)
+                                progress_percent = percent
                             if active_total_bytes and active_total_bytes > 0:
                                 if should_refresh_progress_ui:
                                     self._set_task_transfer_size_ui(item_id, current_bytes, active_total_bytes)
                         else:
                             near_complete_since = None
-                            if should_refresh_progress_ui:
+                            if total_duration > 0 and total_done_seconds > 0:
+                                duration_done_seconds = min(total_done_seconds, total_duration)
+                                duration_percent = format_progress_percent(duration_done_seconds, total_duration, cap_at_99=True)
+                                if duration_percent is not None and progress.get("progress") != "end":
+                                    duration_percent = min(duration_percent, 99.0)
+                                progress_percent = duration_percent
+                            elif should_refresh_progress_ui:
                                 self._set_task_progress_unknown_ui(item_id)
+                        if progress_percent is not None and should_refresh_progress_ui:
+                            self._set_task_progress_percent_ui(item_id, progress_percent)
                         if not (active_total_bytes and active_total_bytes > 0) and current_bytes > 0:
                             if should_refresh_progress_ui:
                                 self._set_task_transfer_size_ui(item_id, current_bytes)
@@ -8145,7 +8132,10 @@ class DownloadManagerApp:
 
     def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False):
         self._clear_cached_resolved_link(task)
-        self._set_task_cached_link_reanalysis_ui(item_id, expired=expired)
+        if expired:
+            self._set_task_parse_ui(item_id, message="已記錄連結已過期，重新分析頁面...")
+        else:
+            self._set_task_parse_ui(item_id, message="已記錄連結失效，重新分析頁面...")
         self._download_task_internal(source_url, item_id, save_dir, use_impersonate, is_mp3)
 
     def _download_with_cached_resolved_link(self, task, item_id, source_url, cached_resolved_url, save_dir, use_impersonate, is_mp3):
@@ -8185,8 +8175,9 @@ class DownloadManagerApp:
             cached_resolved_url = _task_resolved_url(task)
             url_lower = url.lower()
             if ("//anime1.me/" in url_lower or "//anime1.pw/" in url_lower) and use_impersonate:
-                self._set_task_processing_ui(
+                self._set_task_status_mode_ui(
                     item_id,
+                    self._processing_status_text(),
                     self._processing_eta_text(),
                 )
                 anime1_dl_lock.acquire()
@@ -8228,8 +8219,9 @@ class DownloadManagerApp:
                 use_impersonate=use_impersonate,
                 is_mp3=is_mp3,
             )
-            self._set_task_error_ui(
+            self._set_task_status_mode_ui(
                 item_id,
+                self._error_status_text(),
                 t("msg_download_error", error=str(exc)[:45]) if "msg_download_error" in I18N_DICT.get(CURRENT_LANG, {}) else summarize_error_message(exc, "err_net", 120),
             )
 
@@ -8268,7 +8260,7 @@ class DownloadManagerApp:
                 if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
-                self._set_task_processing_ui(item_id)
+                self._set_task_status_mode_ui(item_id, self._processing_status_text())
                 return
             if status != "downloading":
                 return
@@ -8518,7 +8510,7 @@ class DownloadManagerApp:
         inferred_direct_media_ext = _infer_media_extension_from_url(url)
         is_direct_media = bool(inferred_direct_media_ext) or any(parsed_url.path.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mkv", ".webm", ".m4a", ".mp3"))
         if is_direct_media:
-            self._set_task_direct_media_ui(item_id)
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
             filename = os.path.basename(parsed_url.path) or "downloaded_file"
             if (not os.path.splitext(filename)[1]) and inferred_direct_media_ext:
                 filename = f"{self._get_task_output_basename(task, 'downloaded_file')}{inferred_direct_media_ext}"
@@ -8579,7 +8571,7 @@ class DownloadManagerApp:
                 self._set_task_parse_ui(item_id, message=f"Direct media download failed: {str(e)[:30]}")
 
         if "jable.tv" in parsed_url.netloc:
-            self._set_task_simple_site_status_ui(item_id, "eta_site_jable", "正在解析 Jable...")
+            self._set_task_parse_ui(item_id, key="eta_site_jable", fallback="正在解析 Jable...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=15)
             m = re.search(r'(https://[^\s"\'\\]+\.m3u8[^\s"\'\\]*)', resp.text)
@@ -8600,7 +8592,7 @@ class DownloadManagerApp:
             return
 
         if "njavtv.com" in parsed_url.netloc:
-            self._set_task_simple_site_status_ui(item_id, "eta_site_njavtv", "正在解析 NJAVTV...")
+            self._set_task_parse_ui(item_id, key="eta_site_njavtv", fallback="正在解析 NJAVTV...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=15)
             m = re.search(r"(https://surrit\.com/[^\s\"']+/playlist\.m3u8)", resp.text)
@@ -9000,7 +8992,7 @@ class DownloadManagerApp:
                     fallback_urls=direct_media_fallback_urls,
                 )
                 if is_mp3:
-                    self._set_task_found_media_ui(item_id)
+                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                     self._download_direct_media_audio_with_ffmpeg(
                         item_id,
                         media_url,
@@ -9014,7 +9006,7 @@ class DownloadManagerApp:
                 out_path = os.path.join(save_dir, out_name)
                 self._set_task_output_path(task, item_id, out_path)
                 self._set_task_name_text(item_id, out_name)
-                self._set_task_found_media_ui(item_id)
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                 self._download_http_media(
                     item_id,
                     media_url,
@@ -9036,7 +9028,7 @@ class DownloadManagerApp:
                 _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
                 _set_task_aux_fields(task, _gimy_source_refresh_history=[])
                 _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
-                self._set_task_found_media_ui(item_id)
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                 self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
             if not ordered_direct_candidates:
@@ -9147,7 +9139,7 @@ class DownloadManagerApp:
                             fallback_urls=direct_media_fallback_urls,
                         )
                         if is_mp3:
-                            self._set_task_found_media_ui(item_id)
+                            self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                             self._download_direct_media_audio_with_ffmpeg(
                                 item_id,
                                 media_url,
@@ -9161,7 +9153,7 @@ class DownloadManagerApp:
                         out_path = os.path.join(save_dir, out_name)
                         self._set_task_output_path(task, item_id, out_path)
                         self._set_task_name_text(item_id, out_name)
-                        self._set_task_found_media_ui(item_id)
+                        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                         self._download_http_media(
                             item_id,
                             media_url,
@@ -9183,7 +9175,7 @@ class DownloadManagerApp:
                         _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
                         _set_task_aux_fields(task, _gimy_source_refresh_history=[])
                         _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
-                        self._set_task_found_media_ui(item_id)
+                        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                         self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                         return
                 if last_gimy_error:
@@ -9310,7 +9302,7 @@ class DownloadManagerApp:
                     fallback_urls = [candidate for candidate in supported_external_pages[1:] if candidate and candidate != external_url]
                     _set_task_aux_fields(task, _gimy_page_refresh_candidates=[], _gimy_source_refresh_history=[])
                     _set_task_identity(name=_extract_html_title(resp.text, short_name), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
-                    self._set_task_found_media_ui(item_id)
+                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                     self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                     return
                 page_refresh_candidates = _task_gimy_page_refresh_candidates(task)
@@ -9369,7 +9361,7 @@ class DownloadManagerApp:
             return
 
         if "hanime1.me" in parsed_url.netloc and "watch" in parsed_url.path:
-            self._set_task_simple_site_status_ui(item_id, "eta_site_hanime", "正在解析 Hanime1 頁面...")
+            self._set_task_parse_ui(item_id, key="eta_site_hanime", fallback="正在解析 Hanime1 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://hanime1.me/"})
             source_match = re.search(r'<source\s+[^>]*src=["\']([^"\']+)["\']', resp.text, re.IGNORECASE)
@@ -9385,7 +9377,7 @@ class DownloadManagerApp:
             return
 
         if "missav" in parsed_url.netloc:
-            self._set_task_simple_site_status_ui(item_id, "eta_site_missav", "正在解析 MissAV 頁面...")
+            self._set_task_parse_ui(item_id, key="eta_site_missav", fallback="正在解析 MissAV 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": url})
             media_candidates = _extract_missav_media_candidates(resp.text)
@@ -9407,7 +9399,7 @@ class DownloadManagerApp:
             if direct_media_candidates and not candidates:
                 direct_media_url = direct_media_candidates[0]
                 _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=direct_media_candidates[1:])
-                self._set_task_direct_media_ui(item_id)
+                self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
                 self._download_direct_media(item_id, direct_media_url, save_dir, is_mp3=is_mp3, referer=url)
                 return
             _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=candidates[1:] or direct_media_candidates)
@@ -9416,7 +9408,7 @@ class DownloadManagerApp:
             return
 
         if "avjoy.me" in parsed_url.netloc and "/video/" in parsed_url.path:
-            self._set_task_direct_media_ui(item_id)
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
             c_req = get_curl_cffi_requests()
             safe_referer = f"{parsed_url.scheme}://{parsed_url.netloc}/"
             resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": safe_referer})
@@ -9460,10 +9452,10 @@ class DownloadManagerApp:
                 self._log_m3u8_route_selected(task, item_id, media_url, source_site=self._get_task_source_site(task) or "movieffm", fallback_urls=fallback_urls)
                 self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=watch_url, origin=mixdrop_origin)
             elif is_mp3:
-                self._set_task_found_media_ui(item_id)
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=watch_url, origin=mixdrop_origin)
             else:
-                self._set_task_found_media_ui(item_id)
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                 ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
                 out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
                 self._download_http_media(
@@ -9476,7 +9468,7 @@ class DownloadManagerApp:
             return
 
         if "threads.net" in parsed_url.netloc or parsed_url.netloc.startswith("www.threads."):
-            self._set_task_simple_site_status_ui(item_id, "eta_site_threads", "正在解析 Threads 頁面...")
+            self._set_task_parse_ui(item_id, key="eta_site_threads", fallback="正在解析 Threads 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
             versions_match = re.search(r'\\"video_versions\\"\\:\s*(\[.*?\])', resp.text)
@@ -9499,7 +9491,7 @@ class DownloadManagerApp:
             return
 
         if "instagram.com" in parsed_url.netloc and any(part in parsed_url.path for part in ("/reel/", "/p/")):
-            self._set_task_simple_site_status_ui(item_id, "eta_site_instagram", "正在解析 Instagram 頁面...")
+            self._set_task_parse_ui(item_id, key="eta_site_instagram", fallback="正在解析 Instagram 頁面...")
             shortcode_m = re.search(r"/(?:reel|p)/([^/?#]+)", url)
             if not shortcode_m:
                 raise Exception("Instagram shortcode missing")
@@ -9587,10 +9579,10 @@ class DownloadManagerApp:
             except Exception as savereels_exc:
                 write_error_log("instagram savereels fallback failed", savereels_exc, url=url, item_id=item_id)
             write_error_log("instagram extractor fallback", Exception("Instagram video URL missing; falling back to yt-dlp"), url=url, item_id=item_id)
-            self._set_task_ytdlp_fallback_ui(item_id, "Instagram")
+            self._set_task_parse_ui(item_id, message="Instagram 直連解析失敗，改用 yt-dlp...")
 
         if "facebook.com" in parsed_url.netloc and any(part in parsed_url.path for part in ("/reel/", "/watch/", "/videos/")):
-            self._set_task_simple_site_status_ui(item_id, "eta_site_facebook", "正在解析 Facebook 頁面...")
+            self._set_task_parse_ui(item_id, key="eta_site_facebook", fallback="正在解析 Facebook 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"User-Agent": ydl_opts["http_headers"]["User-Agent"], "Referer": url})
             candidates = _extract_facebook_media_candidates(resp.text)
@@ -9642,10 +9634,10 @@ class DownloadManagerApp:
                     self._download_http_media(item_id, media_url, out_path, headers={"Referer": url, "Origin": "https://www.facebook.com", "User-Agent": ydl_opts["http_headers"]["User-Agent"]})
                 return
             write_error_log("facebook extractor fallback", Exception("Facebook media URL missing; falling back to yt-dlp"), url=url, item_id=item_id)
-            self._set_task_ytdlp_fallback_ui(item_id, "Facebook")
+            self._set_task_parse_ui(item_id, message="Facebook 直連解析失敗，改用 yt-dlp...")
 
         if "/status/" in parsed_url.path and any(host in parsed_url.netloc for host in ("twitter.com", "x.com", "fxtwitter.com", "vxtwitter.com")):
-            self._set_task_simple_site_status_ui(item_id, "eta_site_twitter", "正在解析 Twitter/X 頁面...")
+            self._set_task_parse_ui(item_id, key="eta_site_twitter", fallback="正在解析 Twitter/X 頁面...")
             status_id_m = re.search(r"/status/(\d+)", url)
             if not status_id_m:
                 raise Exception("Twitter status id missing")
@@ -9722,7 +9714,7 @@ class DownloadManagerApp:
                     out_name = clean_title + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
                     self._set_task_name_text(item_id, out_name)
-                    self._set_task_found_media_ui(item_id)
+                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                     self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
                     return
                 direct_mp4 = re.search(r'<source[^>]+src=["\']([^"\']+\.mp4[^"\']*)["\']', resp.text, re.IGNORECASE)
@@ -9734,14 +9726,14 @@ class DownloadManagerApp:
                     out_name = clean_title + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
                     self._set_task_name_text(item_id, out_name)
-                    self._set_task_found_media_ui(item_id)
+                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                     self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
                     return
                 direct_m3u8 = re.search(r'(https?://[^\s"\'\\]+(?:surrit\.com|[^"\']+)\.m3u8[^\s"\']*)', resp.text)
                 if direct_m3u8:
                     url = html.unescape(direct_m3u8.group(1))
                     _set_task_identity(name=clean_title)
-                    self._set_task_found_stream_ui(item_id)
+                    self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._eta_found_stream_text())
                     self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
                     return
                 iframe_m = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', resp.text)
@@ -9750,8 +9742,9 @@ class DownloadManagerApp:
                 iframe_url = html.unescape(iframe_m.group(1))
                 if iframe_url.startswith("//"):
                     iframe_url = "https:" + iframe_url
-                self._set_task_processing_ui(
+                self._set_task_status_mode_ui(
                     item_id,
+                    self._processing_status_text(),
                     self._processing_eta_text(),
                 )
                 iframe_resp = c_req.get(iframe_url, headers=page_headers, timeout=15, impersonate="chrome110")
@@ -9760,7 +9753,7 @@ class DownloadManagerApp:
                     raise Exception("Anime1 iframe did not contain an m3u8 URL")
                 url = m3u8_m.group(1)
                 _set_task_identity(name=clean_title)
-                self._set_task_found_stream_ui(item_id)
+                self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._eta_found_stream_text())
                 self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
                 return
             except (StopDownloadException, KeyboardInterrupt):
@@ -9796,10 +9789,12 @@ class DownloadManagerApp:
                 return
             if _task_in_states(task, *PAUSED_TASK_STATES):
                 return
-            self._set_task_error_ui(item_id, summarize_error_message(e, "err_net", 120))
+            self._set_task_status_mode_ui(item_id, self._error_status_text(), summarize_error_message(e, "err_net", 120))
             _set_task_state_fields(task, "ERROR")
 
     def on_closing(self):
+        if self._shutdown_started:
+            return
         current_downloading = self._count_tasks_in_states("DOWNLOADING")
         if current_downloading > 0:
             if self._ask_warning_yesno(t("msg_close_warn", count=current_downloading)):
@@ -9811,9 +9806,7 @@ class DownloadManagerApp:
                     self.persist_unfinished_state(force=True)
                 except Exception:
                     pass
-                self._force_kill_child_processes()
-                self.root.destroy()
-                os._exit(0)
+                self._finalize_process_shutdown()
             return
         try:
             self._wait_for_shutdown_resume_artifacts(timeout_seconds=0.5, stable_polls=2)
@@ -9821,8 +9814,33 @@ class DownloadManagerApp:
             self.persist_unfinished_state(force=True)
         except Exception:
             pass
-        self._force_kill_child_processes()
-        self.root.destroy()
+        self._finalize_process_shutdown()
+
+    def _finalize_process_shutdown(self):
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        try:
+            self._force_kill_child_processes()
+        except Exception:
+            pass
+        try:
+            with self._resume_progress_lock:
+                self._resume_progress_cache.clear()
+        except Exception:
+            pass
+        try:
+            release_single_instance_lock()
+        except Exception:
+            pass
+        try:
+            self.root.quit()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
         os._exit(0)
 
 
