@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260505-2580"
+APP_BUILD = "20260505-2590"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -76,7 +76,7 @@ RESUME_PROGRESS_MIN_BYTES_DELTA = 2 * 1024 * 1024
 ERROR_LOG_DEDUPE_WINDOW_SECONDS = 2.0
 SINGLE_INSTANCE_ACQUIRE_TIMEOUT_SECONDS = 4.0
 SINGLE_INSTANCE_ACQUIRE_RETRY_INTERVAL_SECONDS = 0.2
-FORCED_SHUTDOWN_EXIT_DELAY_SECONDS = 3.0
+FORCED_SHUTDOWN_EXIT_DELAY_SECONDS = 8.0
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 FFMPEG_WINDOWS_FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 FFMPEG_WINDOWS_FFPROBE_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -1987,7 +1987,13 @@ def _extract_nnyy_episode_entries(page_html):
     default_match = re.search(r"on_ep\(['\"]([^'\"]+)['\"]\)", text, re.IGNORECASE)
     if default_match:
         default_slug = str(default_match.group(1) or "").strip()
-    for match in re.finditer(r"<button[^>]*\bep_slug=['\"]([^'\"]+)['\"][^>]*>(.*?)</button>", text, re.IGNORECASE | re.DOTALL):
+    for match in re.finditer(r"<([a-z0-9]+)\b[^>]*\bep_slug=['\"]([^'\"]+)['\"][^>]*>(.*?)</\1>", text, re.IGNORECASE | re.DOTALL):
+        ep_slug = str(match.group(2) or "").strip()
+        ep_name = re.sub(r"<[^>]+>", "", html.unescape(match.group(3) or ""))
+        ep_name = re.sub(r"\s+", " ", ep_name).strip() or ep_slug
+        if ep_slug:
+            entries.append((ep_slug, ep_name))
+    for match in re.finditer(r"\bep_slug=['\"]([^'\"]+)['\"][^>]*\btitle=['\"]([^'\"]+)['\"]", text, re.IGNORECASE | re.DOTALL):
         ep_slug = str(match.group(1) or "").strip()
         ep_name = re.sub(r"<[^>]+>", "", html.unescape(match.group(2) or ""))
         ep_name = re.sub(r"\s+", " ", ep_name).strip() or ep_slug
@@ -2021,6 +2027,19 @@ def _extract_nnyy_play_candidates(payload_text):
             if play_url and _looks_like_manifest_url(play_url):
                 candidates.append(play_url)
     return _dedupe_download_urls(candidates)
+
+
+def _extract_html_title(page_text, fallback_name):
+    title_m = re.search(r"<title>(.*?)</title>", str(page_text or ""), re.IGNORECASE | re.DOTALL)
+    if not title_m:
+        return fallback_name
+    raw_title = html.unescape(title_m.group(1)).strip()
+    raw_title = re.sub(r"\s+", " ", raw_title)
+    for splitter in (" - ", " | ", " – ", " — "):
+        if splitter in raw_title:
+            raw_title = raw_title.split(splitter)[0].strip()
+            break
+    return raw_title or fallback_name
 
 
 def _build_gimy_iframe_urls(page_url, player_data):
@@ -2289,12 +2308,15 @@ class UIThrottler:
         self._pending_updates = {}
         self._lock = threading.Lock()
         self._flush_scheduled = False
+        self._stopped = False
 
     def _flush_delay_ms(self):
         interval = max(float(self.update_interval or 0.0), 0.12)
         return max(120, int(interval * 1000))
 
     def update(self, item_id, col, value, force=False):
+        if self._stopped:
+            return
         if col == "status":
             force = True
         now = time.time()
@@ -2321,6 +2343,10 @@ class UIThrottler:
     def _flush_updates(self):
         try:
             with self._lock:
+                if self._stopped:
+                    self._pending_updates = {}
+                    self._flush_scheduled = False
+                    return
                 pending = self._pending_updates
                 self._pending_updates = {}
                 self._flush_scheduled = False
@@ -2335,6 +2361,12 @@ class UIThrottler:
                         continue
         except Exception:
             return
+
+    def stop(self):
+        with self._lock:
+            self._stopped = True
+            self._pending_updates = {}
+            self._flush_scheduled = False
 
 
 def load_config():
@@ -3050,6 +3082,7 @@ class DownloadManagerApp:
         self._last_overview_text = None
         self._shutdown_started = False
         self._forced_exit_timer = None
+        self._drop_target_widgets = []
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_ui()
         if self.tree is not None:
@@ -3315,6 +3348,8 @@ class DownloadManagerApp:
             if supported_types and hasattr(widget, "drop_target_register"):
                 widget.drop_target_register(*supported_types)
                 widget.dnd_bind("<<Drop>>", self.handle_drop)
+                if widget not in self._drop_target_widgets:
+                    self._drop_target_widgets.append(widget)
         except Exception:
             pass
         try:
@@ -3323,6 +3358,59 @@ class DownloadManagerApp:
             children = []
         for child in children:
             self._register_drop_targets(child)
+
+    def _unregister_drop_targets(self):
+        widgets = list(reversed(getattr(self, "_drop_target_widgets", [])))
+        self._drop_target_widgets = []
+        for widget in widgets:
+            try:
+                if hasattr(widget, "dnd_unbind"):
+                    widget.dnd_unbind("<<Drop>>")
+            except Exception:
+                pass
+            try:
+                if hasattr(widget, "drop_target_unregister"):
+                    widget.drop_target_unregister()
+            except TypeError:
+                try:
+                    supported_types = [token for token in (DND_ALL, DND_TEXT, DND_FILES) if token]
+                    if supported_types and hasattr(widget, "drop_target_unregister"):
+                        widget.drop_target_unregister(*supported_types)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    def _prepare_ui_for_shutdown(self):
+        try:
+            if self.ui_throttler is not None:
+                self.ui_throttler.stop()
+        except Exception:
+            pass
+        self._pending_status_styles = {}
+        self._status_style_flush_scheduled = False
+        self._summary_refresh_scheduled = False
+        self._queue_process_scheduled = False
+        try:
+            self.root.unbind_all("<Control-a>")
+            self.root.unbind_all("<Control-A>")
+            self.root.unbind_all("<Delete>")
+        except Exception:
+            pass
+        try:
+            self._unregister_drop_targets()
+        except Exception:
+            pass
+
+    def _cancel_forced_exit_timer(self):
+        exit_timer = getattr(self, "_forced_exit_timer", None)
+        self._forced_exit_timer = None
+        if exit_timer is None:
+            return
+        try:
+            exit_timer.cancel()
+        except Exception:
+            pass
 
     def _begin_tree_reorder(self, event):
         if self.tree is None:
@@ -3874,6 +3962,52 @@ class DownloadManagerApp:
                 write_error_log("xiaoyakankan series parse failure", exc, url=new_url)
                 self._schedule_site_parse_error(exc, limit=120)
 
+        def fetch_nnyy_playlist():
+            try:
+                parsed_url = urllib.parse.urlsplit(new_url)
+                if not re.search(r"/(?:dianshiju|dongman|zongyi)/\d+\.html$", parsed_url.path, re.IGNORECASE):
+                    self._final_add_download(new_url, is_mp3=is_mp3)
+                    return
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome110",
+                    timeout=20,
+                    headers={"Referer": "https://nnyy.in/", "User-Agent": DEFAULT_USER_AGENT},
+                )
+                page_id = _extract_nnyy_page_id(new_url)
+                if not page_id:
+                    raise Exception("NNYY page id missing")
+                episode_entries, default_slug = _extract_nnyy_episode_entries(resp.text)
+                if not episode_entries:
+                    raise Exception("NNYY episode list missing")
+                page_title = _extract_html_title(resp.text, "努努影院")
+                page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or "努努影院"
+                base_page_url = urllib.parse.urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, "", ""))
+                episodes = []
+                default_episode_url = f"{base_page_url}?ep={default_slug}" if default_slug else ""
+                for ep_slug, ep_name in episode_entries:
+                    ep_url = f"{base_page_url}?ep={urllib.parse.quote(ep_slug)}"
+                    display_name = f"{page_title} {ep_name}".strip()
+                    episodes.append((ep_url, display_name))
+                selected_episode = next((episode for episode in episodes if episode[0] == default_episode_url), episodes[0])
+
+                def enqueue():
+                    targets = self._choose_playlist_targets(episodes, selected_episode)
+                    for ep_url, ep_name in targets:
+                        self._final_add_download(
+                            ep_url,
+                            is_mp3=is_mp3,
+                            custom_name=ep_name,
+                            source_site="nnyy",
+                            extra_task_data=self._build_extra_task_data(source_page=base_page_url),
+                        )
+
+                self._schedule_ui_call(enqueue)
+            except Exception as exc:
+                write_error_log("nnyy series parse failure", exc, url=new_url)
+                self._schedule_site_parse_error(exc, limit=120)
+
         lowered = new_url.lower()
         if _is_anime1_category_url(new_url):
             self._start_background_parse(fetch_anime1)
@@ -3892,6 +4026,9 @@ class DownloadManagerApp:
             return
         if "xiaoyakankan.com" in lowered and "/post/" in lowered:
             self._start_background_parse(fetch_xiaoyakankan_post)
+            return
+        if "nnyy.in" in lowered and re.search(r"/(?:dianshiju|dongman|zongyi)/\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
+            self._start_background_parse(fetch_nnyy_playlist)
             return
         self._final_add_download(new_url, is_mp3=is_mp3)
         return
@@ -4682,7 +4819,7 @@ class DownloadManagerApp:
             _set_task_aux_fields(task, temp_filename=path)
             return path
         _set_task_aux_fields(task, filename=path)
-        self._set_task_output_name(item_id, path)
+        self._set_task_named_column_text(item_id, "name", _output_name_from_path(path))
         return path
 
     def _get_existing_file_size(self, path):
@@ -6243,7 +6380,7 @@ class DownloadManagerApp:
             except OSError:
                 pass
         self._move_file_with_retry(temp_out_path, out_path)
-        self._set_task_progress_text(item_id, "100%")
+        self._set_task_named_column_text(item_id, "progress", "100%")
         self._mark_task_finished(item_id)
         write_error_log("ffmpeg direct audio finished", Exception("ffmpeg direct audio finished"), url=url, item_id=item_id, output=out_path, bytes=self._get_existing_file_size(out_path))
 
@@ -6322,13 +6459,10 @@ class DownloadManagerApp:
     def _set_task_named_column_text(self, item_id, column, value):
         self.update_tree(item_id, column, value, force=True)
 
-    def _set_task_progress_text(self, item_id, value):
-        self._set_task_named_column_text(item_id, "progress", value)
-
     def _update_task_size_from_file(self, item_id, filename):
         if filename and os.path.exists(filename):
             try:
-                self._set_task_size_text(item_id, format_transfer_size(os.path.getsize(filename)))
+                self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
             except OSError:
                 pass
 
@@ -6336,18 +6470,15 @@ class DownloadManagerApp:
         _set_task_stop_fields(task, "FINISHED", resume_requested=(False if clear_resume_requested else None))
         remove_from_state(self._get_task_url(task))
 
-    def _set_task_runtime_status_ui(self, item_id, status_text, message=None):
+    def _set_task_status_mode_ui(self, item_id, status_text, message=None, complete_progress=False, clear_metrics=False):
+        if complete_progress:
+            self._set_task_named_column_text(item_id, "progress", "100%")
         task = self.tasks.get(item_id)
         if task is not None:
             _set_task_last_status_text(task, status_text)
         self._set_task_named_column_text(item_id, "status", status_text)
         if message is not None:
             self._set_task_speed_eta_text(item_id, message)
-
-    def _set_task_status_mode_ui(self, item_id, status_text, message=None, complete_progress=False, clear_metrics=False):
-        if complete_progress:
-            self._set_task_progress_text(item_id, "100%")
-        self._set_task_runtime_status_ui(item_id, status_text, message)
         if clear_metrics:
             self._set_task_metrics_unknown_ui(item_id)
 
@@ -6378,20 +6509,14 @@ class DownloadManagerApp:
     def _message_file_exists_text(self):
         return self._ui_text("msg_file_exists", "檔案已存在")
 
-    def _set_task_output_name(self, item_id, path):
-        self._set_task_named_column_text(item_id, "name", _output_name_from_path(path))
-
-    def _set_task_parse_eta_ui(self, item_id, key=None, fallback="", message=None):
+    def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
+        if error is not None:
+            self._set_task_speed_eta_text(item_id, self._format_site_parse_error(error))
+            return
         if message is not None:
             self._set_task_speed_eta_text(item_id, message)
             return
         self._set_task_speed_eta_text(item_id, self._ui_text(key, fallback))
-
-    def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
-        if error is not None:
-            self._set_task_parse_eta_ui(item_id, message=self._format_site_parse_error(error))
-            return
-        self._set_task_parse_eta_ui(item_id, key=key, fallback=fallback, message=message)
 
     def _set_task_gimy_status_ui(self, item_id, mode="parsing"):
         mode_map = {
@@ -6445,9 +6570,6 @@ class DownloadManagerApp:
     def _schedule_site_parse_error(self, error, limit=80):
         self._schedule_error(self._format_site_parse_error(error, limit=limit))
 
-    def _set_task_size_text(self, item_id, value):
-        self._set_task_named_column_text(item_id, "size", value)
-
     def _set_task_speed_eta_text(self, item_id, value):
         self._set_task_named_column_text(item_id, "speed_eta", value)
 
@@ -6459,25 +6581,22 @@ class DownloadManagerApp:
         self._set_task_column_placeholder_ui(item_id, "size", "-")
         self._set_task_column_placeholder_ui(item_id, "speed_eta", "-")
 
-    def _set_task_transfer_rate_ui(self, item_id, speed_bps=None, eta_seconds=None):
-        speed_text = format_transfer_rate(speed_bps) if speed_bps else "-"
-        if eta_seconds not in (None, ""):
-            speed_text = f"{speed_text} | {format_eta(float(eta_seconds))}"
-        self._set_task_speed_eta_text(item_id, speed_text)
-
     def _set_task_known_total_size_ui(self, task, item_id, total_size, downloaded_bytes=0):
         if not total_size or total_size <= 0:
             return
         _set_task_transfer_metrics(task, downloaded_bytes=downloaded_bytes, total_bytes=total_size)
-        self._set_task_size_text(item_id, format_transfer_size(downloaded_bytes, total_size))
+        self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded_bytes, total_size))
 
     def _set_task_active_transfer_ui(self, task, item_id, downloaded_bytes, total_bytes=None, speed_bps=None, eta_seconds=None, cap_at_99=False):
         _set_task_transfer_metrics(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
-        self._set_task_size_text(item_id, format_transfer_size(downloaded_bytes, total_bytes))
+        self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded_bytes, total_bytes))
         percent = format_progress_percent(downloaded_bytes, total_bytes, cap_at_99=cap_at_99) if total_bytes else None
         if percent is not None:
-            self._set_task_progress_text(item_id, f"{percent:.1f}%")
-        self._set_task_transfer_rate_ui(item_id, speed_bps, eta_seconds)
+            self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
+        speed_text = format_transfer_rate(speed_bps) if speed_bps else "-"
+        if eta_seconds not in (None, ""):
+            speed_text = f"{speed_text} | {format_eta(float(eta_seconds))}"
+        self._set_task_speed_eta_text(item_id, speed_text)
         status_text = self._downloading_status_text()
         if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
             self._set_task_status_mode_ui(item_id, self._downloading_status_text())
@@ -6874,14 +6993,14 @@ class DownloadManagerApp:
                         last_update_bytes = downloaded
                         percent = format_progress_percent(downloaded, total_size, cap_at_99=True)
                         if percent is not None:
-                            self._set_task_progress_text(item_id, f"{percent:.1f}%")
+                            self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
                         if total_size > 0:
                             self._set_task_known_total_size_ui(task, item_id, total_size, downloaded_bytes=downloaded)
                             eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
-                            self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
+                            self._set_task_speed_eta_text(item_id, f"{format_transfer_rate(speed_bps) if speed_bps else '-'} | {format_eta(float(eta))}")
                         else:
-                            self._set_task_size_text(item_id, format_transfer_size(downloaded))
-                            self._set_task_transfer_rate_ui(item_id, speed_bps)
+                            self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded))
+                            self._set_task_speed_eta_text(item_id, format_transfer_rate(speed_bps) if speed_bps else "-")
             if res is not None:
                 try:
                     res.close()
@@ -6936,11 +7055,11 @@ class DownloadManagerApp:
                         speed_bps = max((multi_downloaded - resume_bytes) / elapsed, 0.0)
                         percent = format_progress_percent(multi_downloaded, total_size, cap_at_99=True)
                         if percent is not None:
-                            self._set_task_progress_text(item_id, f"{percent:.1f}%")
+                            self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
                             task = self.tasks.get(item_id, {})
                             self._set_task_known_total_size_ui(task, item_id, total_size, downloaded_bytes=multi_downloaded)
                             eta = max((total_size - multi_downloaded) / max(speed_bps, 1.0), 0.0)
-                            self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
+                            self._set_task_speed_eta_text(item_id, f"{format_transfer_rate(speed_bps) if speed_bps else '-'} | {format_eta(float(eta))}")
                         time.sleep(0.5)
                 with open(out_path, "ab") as main_out:
                     for part_path in part_paths:
@@ -7698,7 +7817,7 @@ class DownloadManagerApp:
                                 progress_percent = percent
                             if active_total_bytes and active_total_bytes > 0:
                                 if should_refresh_progress_ui:
-                                    self._set_task_size_text(item_id, format_transfer_size(current_bytes, active_total_bytes))
+                                    self._set_task_named_column_text(item_id, "size", format_transfer_size(current_bytes, active_total_bytes))
                         else:
                             near_complete_since = None
                             if total_duration > 0 and total_done_seconds > 0:
@@ -7710,10 +7829,10 @@ class DownloadManagerApp:
                             elif should_refresh_progress_ui:
                                 self._set_task_column_placeholder_ui(item_id, "progress", "--")
                         if progress_percent is not None and should_refresh_progress_ui:
-                            self._set_task_progress_text(item_id, f"{progress_percent:.1f}%")
+                            self._set_task_named_column_text(item_id, "progress", f"{progress_percent:.1f}%")
                         if not (active_total_bytes and active_total_bytes > 0) and current_bytes > 0:
                             if should_refresh_progress_ui:
-                                self._set_task_size_text(item_id, format_transfer_size(current_bytes))
+                                self._set_task_named_column_text(item_id, "size", format_transfer_size(current_bytes))
                         if now - last_ui_update >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS:
                             instant_bps = 0.0
                             if active_output_bytes > 0 and out_ms > 0:
@@ -7724,9 +7843,9 @@ class DownloadManagerApp:
                             elif total_duration > 0 and instant_bps > 0:
                                 eta_seconds = max(total_duration - total_done_seconds, 0.0)
                             if instant_bps > 0 and eta_seconds is not None:
-                                self._set_task_transfer_rate_ui(item_id, instant_bps, eta_seconds)
+                                self._set_task_speed_eta_text(item_id, f"{format_transfer_rate(instant_bps) if instant_bps else '-'} | {format_eta(float(eta_seconds))}")
                             elif instant_bps > 0:
-                                self._set_task_transfer_rate_ui(item_id, instant_bps)
+                                self._set_task_speed_eta_text(item_id, format_transfer_rate(instant_bps) if instant_bps else "-")
                             last_ui_update = now
                         if should_refresh_progress_ui:
                             last_progress_ui_bytes = current_bytes
@@ -7841,7 +7960,7 @@ class DownloadManagerApp:
                     *(stale_path for stale_path in (temp_out_path, resume_out_path, merged_out_path, progress_path) if stale_path != out_path)
                 )
 
-                self._set_task_progress_text(item_id, "100%")
+                self._set_task_named_column_text(item_id, "progress", "100%")
                 self._mark_task_finished(item_id)
                 self._log_ffmpeg_event(
                     "ffmpeg download finished",
@@ -8381,13 +8500,13 @@ class DownloadManagerApp:
                 return
             _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
             _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=total)
-            self._set_task_size_text(item_id, format_transfer_size(downloaded, total))
+            self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded, total))
             percent = format_progress_percent(downloaded, total) if total else None
             if percent is not None:
-                self._set_task_progress_text(item_id, f"{percent:.1f}%")
+                self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
             speed = _event_speed(d)
             eta = _event_eta(d)
-            self._set_task_transfer_rate_ui(item_id, speed, eta)
+            self._set_task_speed_eta_text(item_id, f"{format_transfer_rate(speed) if speed else '-'} | {format_eta(float(eta))}")
             status_text = self._downloading_status_text()
             if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
                 self._set_task_status_mode_ui(item_id, self._downloading_status_text())
@@ -8468,18 +8587,6 @@ class DownloadManagerApp:
             )
             if updates:
                 self._update_task_state_entry(task, **updates)
-
-        def _extract_html_title(page_text, fallback_name):
-            title_m = re.search(r"<title>(.*?)</title>", page_text, re.IGNORECASE | re.DOTALL)
-            if not title_m:
-                return fallback_name
-            raw_title = html.unescape(title_m.group(1)).strip()
-            raw_title = re.sub(r"\s+", " ", raw_title)
-            for splitter in (" - ", " | ", " – ", " — "):
-                if splitter in raw_title:
-                    raw_title = raw_title.split(splitter)[0].strip()
-                    break
-            return raw_title or fallback_name
 
         def _parse_js_object(blob):
             text = (blob or "").strip().rstrip(";")
@@ -8708,7 +8815,7 @@ class DownloadManagerApp:
                 raw_title = html.unescape(title_m.group(1)).strip()
                 clean_title = raw_title.split(" - ")[0].strip() or short_name
             _set_task_identity(name=clean_title, source_site="jable")
-            self._set_task_runtime_status_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
+            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, url, source_site="jable", fallback_urls=[])
             self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer="https://jable.tv/", origin="https://jable.tv")
             return
@@ -8749,7 +8856,8 @@ class DownloadManagerApp:
             if not page_id:
                 raise Exception("NNYY page id missing")
             episode_entries, default_slug = _extract_nnyy_episode_entries(resp.text)
-            selected_slug = default_slug or (episode_entries[0][0] if episode_entries else "")
+            query_slug = urllib.parse.parse_qs(parsed_url.query).get("ep", [""])[0].strip()
+            selected_slug = query_slug or default_slug or (episode_entries[0][0] if episode_entries else "")
             if not selected_slug:
                 raise Exception("NNYY episode slug missing")
             api_url = f"https://nnyy.in/_gp/{page_id}/{selected_slug}"
@@ -9399,7 +9507,7 @@ class DownloadManagerApp:
             )
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
-            self._set_task_runtime_status_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
+            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
@@ -9538,7 +9646,7 @@ class DownloadManagerApp:
             _set_task_aux_fields(task, _gimy_page_refresh_candidates=[])
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
-            self._set_task_runtime_status_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
+            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
@@ -10015,6 +10123,10 @@ class DownloadManagerApp:
         except Exception:
             self._forced_exit_timer = None
         try:
+            self._prepare_ui_for_shutdown()
+        except Exception:
+            pass
+        try:
             self._force_kill_child_processes()
         except Exception:
             pass
@@ -10032,9 +10144,14 @@ class DownloadManagerApp:
         except Exception:
             pass
         try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        try:
             self.root.destroy()
         except Exception:
             pass
+        self._cancel_forced_exit_timer()
 
 
 def main():
