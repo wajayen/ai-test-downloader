@@ -48,7 +48,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260504-2570"
+APP_BUILD = "20260505-2580"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -200,6 +200,11 @@ FORCED_M3U8_SITE_RULES = {
         "origin": "https://njavtv.com",
         "referer": "https://njavtv.com/",
     },
+    "nnyy": {
+        "hosts": (),
+        "origin": "https://nnyy.in",
+        "referer": "https://nnyy.in/",
+    },
     "xiaoyakankan": {
         "hosts": (
             "bfvvs.com",
@@ -328,6 +333,7 @@ I18N_PATCH = {
         "eta_direct_media": "正在下載直接媒體",
         "eta_site_jable": "正在解析 Jable...",
         "eta_site_njavtv": "正在解析 NJAVTV...",
+        "eta_site_nnyy": "正在解析 努努影院...",
         "eta_site_movieffm": "正在解析 MovieFFM...",
         "eta_site_gimy": "正在解析 Gimy...",
         "eta_site_hanime": "正在解析 Hanime1...",
@@ -425,6 +431,7 @@ I18N_PATCH = {
         "eta_direct_media": "正在下载直接媒体",
         "eta_site_jable": "正在解析 Jable...",
         "eta_site_njavtv": "正在解析 NJAVTV...",
+        "eta_site_nnyy": "正在解析 努努影院...",
         "eta_site_movieffm": "正在解析 MovieFFM...",
         "eta_site_gimy": "正在解析 Gimy...",
         "eta_site_hanime": "正在解析 Hanime1...",
@@ -1963,6 +1970,57 @@ def _collect_movieffm_drama_episodes(page_html, page_url, fallback_title="MovieF
         if "/play/" in ep_url or "/vodplay/" in ep_url or "/episode/" in ep_url:
             add_episode(ep_url, _derive_task_name_from_url(ep_url))
     return drama_title, episodes, episode_fallbacks
+
+
+def _extract_nnyy_page_id(page_url):
+    normalized_url = _normalize_download_url(page_url)
+    if not normalized_url:
+        return ""
+    match = re.search(r"/(\d+)\.html(?:$|[?#])", urllib.parse.urlsplit(normalized_url).path, re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _extract_nnyy_episode_entries(page_html):
+    entries = []
+    default_slug = ""
+    text = str(page_html or "")
+    default_match = re.search(r"on_ep\(['\"]([^'\"]+)['\"]\)", text, re.IGNORECASE)
+    if default_match:
+        default_slug = str(default_match.group(1) or "").strip()
+    for match in re.finditer(r"<button[^>]*\bep_slug=['\"]([^'\"]+)['\"][^>]*>(.*?)</button>", text, re.IGNORECASE | re.DOTALL):
+        ep_slug = str(match.group(1) or "").strip()
+        ep_name = re.sub(r"<[^>]+>", "", html.unescape(match.group(2) or ""))
+        ep_name = re.sub(r"\s+", " ", ep_name).strip() or ep_slug
+        if ep_slug:
+            entries.append((ep_slug, ep_name))
+    deduped = []
+    seen = set()
+    for ep_slug, ep_name in entries:
+        if ep_slug in seen:
+            continue
+        seen.add(ep_slug)
+        deduped.append((ep_slug, ep_name))
+    if not default_slug and deduped:
+        default_slug = deduped[0][0]
+    return deduped, default_slug
+
+
+def _extract_nnyy_play_candidates(payload_text):
+    candidates = []
+    payload = {}
+    try:
+        payload = json.loads(str(payload_text or ""))
+    except Exception:
+        payload = {}
+    plays = payload.get("video_plays") or []
+    if isinstance(plays, list):
+        for row in plays:
+            if not isinstance(row, dict):
+                continue
+            play_url = _normalize_download_url(row.get("play_data", ""))
+            if play_url and _looks_like_manifest_url(play_url):
+                candidates.append(play_url)
+    return _dedupe_download_urls(candidates)
 
 
 def _build_gimy_iframe_urls(page_url, player_data):
@@ -6261,17 +6319,11 @@ class DownloadManagerApp:
         _set_task_state_fields(task, "PAUSED", disk_full_pause=True)
         return False
 
-    def _set_task_column_text(self, item_id, column, value):
-        self.update_tree(item_id, column, value, force=True)
-
     def _set_task_named_column_text(self, item_id, column, value):
-        self._set_task_column_text(item_id, column, value)
+        self.update_tree(item_id, column, value, force=True)
 
     def _set_task_progress_text(self, item_id, value):
         self._set_task_named_column_text(item_id, "progress", value)
-
-    def _set_task_progress_percent_ui(self, item_id, percent):
-        self._set_task_progress_text(item_id, f"{percent:.1f}%")
 
     def _update_task_size_from_file(self, item_id, filename):
         if filename and os.path.exists(filename):
@@ -6288,7 +6340,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         if task is not None:
             _set_task_last_status_text(task, status_text)
-        self._set_task_status_text(item_id, status_text)
+        self._set_task_named_column_text(item_id, "status", status_text)
         if message is not None:
             self._set_task_speed_eta_text(item_id, message)
 
@@ -6326,20 +6378,14 @@ class DownloadManagerApp:
     def _message_file_exists_text(self):
         return self._ui_text("msg_file_exists", "檔案已存在")
 
-    def _set_task_name_text(self, item_id, value):
-        self._set_task_named_column_text(item_id, "name", value)
-
     def _set_task_output_name(self, item_id, path):
-        self._set_task_name_text(item_id, _output_name_from_path(path))
-
-    def _set_task_parse_eta_text(self, item_id, value):
-        self._set_task_speed_eta_text(item_id, value)
+        self._set_task_named_column_text(item_id, "name", _output_name_from_path(path))
 
     def _set_task_parse_eta_ui(self, item_id, key=None, fallback="", message=None):
         if message is not None:
-            self._set_task_parse_eta_text(item_id, message)
+            self._set_task_speed_eta_text(item_id, message)
             return
-        self._set_task_parse_eta_text(item_id, self._ui_text(key, fallback))
+        self._set_task_speed_eta_text(item_id, self._ui_text(key, fallback))
 
     def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
         if error is not None:
@@ -6366,7 +6412,7 @@ class DownloadManagerApp:
 
     def _set_task_mega_identity(self, item_id, task, url, safe_name):
         normalized_name = _set_task_name_fields(task, safe_name)
-        self._set_task_name_text(item_id, normalized_name)
+        self._set_task_named_column_text(item_id, "name", normalized_name)
         self._update_task_state_entry(
             task,
             name=normalized_name,
@@ -6399,34 +6445,19 @@ class DownloadManagerApp:
     def _schedule_site_parse_error(self, error, limit=80):
         self._schedule_error(self._format_site_parse_error(error, limit=limit))
 
-    def _set_task_progress_unknown_ui(self, item_id):
-        self._set_task_column_placeholder_ui(item_id, "progress", "--")
-
     def _set_task_size_text(self, item_id, value):
         self._set_task_named_column_text(item_id, "size", value)
-
-    def _set_task_transfer_size_ui(self, item_id, downloaded_bytes=None, total_bytes=None):
-        self._set_task_size_text(item_id, format_transfer_size(downloaded_bytes, total_bytes))
-
-    def _set_task_size_unknown_ui(self, item_id):
-        self._set_task_column_placeholder_ui(item_id, "size", "-")
 
     def _set_task_speed_eta_text(self, item_id, value):
         self._set_task_named_column_text(item_id, "speed_eta", value)
 
-    def _set_task_speed_eta_unknown_ui(self, item_id):
-        self._set_task_column_placeholder_ui(item_id, "speed_eta", "-")
-
     def _set_task_column_placeholder_ui(self, item_id, column, placeholder="-"):
         self._set_task_named_column_text(item_id, column, placeholder)
 
-    def _set_task_transfer_unknown_ui(self, item_id):
-        self._set_task_size_unknown_ui(item_id)
-        self._set_task_speed_eta_unknown_ui(item_id)
-
     def _set_task_metrics_unknown_ui(self, item_id):
-        self._set_task_progress_unknown_ui(item_id)
-        self._set_task_transfer_unknown_ui(item_id)
+        self._set_task_column_placeholder_ui(item_id, "progress", "--")
+        self._set_task_column_placeholder_ui(item_id, "size", "-")
+        self._set_task_column_placeholder_ui(item_id, "speed_eta", "-")
 
     def _set_task_transfer_rate_ui(self, item_id, speed_bps=None, eta_seconds=None):
         speed_text = format_transfer_rate(speed_bps) if speed_bps else "-"
@@ -6438,14 +6469,14 @@ class DownloadManagerApp:
         if not total_size or total_size <= 0:
             return
         _set_task_transfer_metrics(task, downloaded_bytes=downloaded_bytes, total_bytes=total_size)
-        self._set_task_transfer_size_ui(item_id, downloaded_bytes, total_size)
+        self._set_task_size_text(item_id, format_transfer_size(downloaded_bytes, total_size))
 
     def _set_task_active_transfer_ui(self, task, item_id, downloaded_bytes, total_bytes=None, speed_bps=None, eta_seconds=None, cap_at_99=False):
         _set_task_transfer_metrics(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
-        self._set_task_transfer_size_ui(item_id, downloaded_bytes, total_bytes)
+        self._set_task_size_text(item_id, format_transfer_size(downloaded_bytes, total_bytes))
         percent = format_progress_percent(downloaded_bytes, total_bytes, cap_at_99=cap_at_99) if total_bytes else None
         if percent is not None:
-            self._set_task_progress_percent_ui(item_id, percent)
+            self._set_task_progress_text(item_id, f"{percent:.1f}%")
         self._set_task_transfer_rate_ui(item_id, speed_bps, eta_seconds)
         status_text = self._downloading_status_text()
         if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
@@ -6497,9 +6528,6 @@ class DownloadManagerApp:
                 last_ui_bytes = downloaded
 
         return progress_hook
-
-    def _set_task_status_text(self, item_id, value):
-        self._set_task_named_column_text(item_id, "status", value)
 
     def _download_mega_with_megacmd(self, item_id, url, save_dir, output_path=None, total_size=None):
         task = self.tasks.get(item_id, {})
@@ -6846,13 +6874,13 @@ class DownloadManagerApp:
                         last_update_bytes = downloaded
                         percent = format_progress_percent(downloaded, total_size, cap_at_99=True)
                         if percent is not None:
-                            self._set_task_progress_percent_ui(item_id, percent)
+                            self._set_task_progress_text(item_id, f"{percent:.1f}%")
                         if total_size > 0:
                             self._set_task_known_total_size_ui(task, item_id, total_size, downloaded_bytes=downloaded)
                             eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
                             self._set_task_transfer_rate_ui(item_id, speed_bps, eta)
                         else:
-                            self._set_task_transfer_size_ui(item_id, downloaded)
+                            self._set_task_size_text(item_id, format_transfer_size(downloaded))
                             self._set_task_transfer_rate_ui(item_id, speed_bps)
             if res is not None:
                 try:
@@ -6892,7 +6920,7 @@ class DownloadManagerApp:
                                 future.cancel()
                             if current_task_state == "PAUSE_REQUESTED":
                                 _set_task_state_fields(self.tasks[item_id], "PAUSED")
-                                self._set_task_status_text(item_id, self._paused_status_text())
+                                self._set_task_named_column_text(item_id, "status", self._paused_status_text())
                             return
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         required_bytes = max(total_size - multi_downloaded, 0) if total_size > 0 else None
@@ -6908,7 +6936,7 @@ class DownloadManagerApp:
                         speed_bps = max((multi_downloaded - resume_bytes) / elapsed, 0.0)
                         percent = format_progress_percent(multi_downloaded, total_size, cap_at_99=True)
                         if percent is not None:
-                            self._set_task_progress_percent_ui(item_id, percent)
+                            self._set_task_progress_text(item_id, f"{percent:.1f}%")
                             task = self.tasks.get(item_id, {})
                             self._set_task_known_total_size_ui(task, item_id, total_size, downloaded_bytes=multi_downloaded)
                             eta = max((total_size - multi_downloaded) / max(speed_bps, 1.0), 0.0)
@@ -7670,7 +7698,7 @@ class DownloadManagerApp:
                                 progress_percent = percent
                             if active_total_bytes and active_total_bytes > 0:
                                 if should_refresh_progress_ui:
-                                    self._set_task_transfer_size_ui(item_id, current_bytes, active_total_bytes)
+                                    self._set_task_size_text(item_id, format_transfer_size(current_bytes, active_total_bytes))
                         else:
                             near_complete_since = None
                             if total_duration > 0 and total_done_seconds > 0:
@@ -7680,12 +7708,12 @@ class DownloadManagerApp:
                                     duration_percent = min(duration_percent, 99.0)
                                 progress_percent = duration_percent
                             elif should_refresh_progress_ui:
-                                self._set_task_progress_unknown_ui(item_id)
+                                self._set_task_column_placeholder_ui(item_id, "progress", "--")
                         if progress_percent is not None and should_refresh_progress_ui:
-                            self._set_task_progress_percent_ui(item_id, progress_percent)
+                            self._set_task_progress_text(item_id, f"{progress_percent:.1f}%")
                         if not (active_total_bytes and active_total_bytes > 0) and current_bytes > 0:
                             if should_refresh_progress_ui:
-                                self._set_task_transfer_size_ui(item_id, current_bytes)
+                                self._set_task_size_text(item_id, format_transfer_size(current_bytes))
                         if now - last_ui_update >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS:
                             instant_bps = 0.0
                             if active_output_bytes > 0 and out_ms > 0:
@@ -8356,7 +8384,7 @@ class DownloadManagerApp:
             self._set_task_size_text(item_id, format_transfer_size(downloaded, total))
             percent = format_progress_percent(downloaded, total) if total else None
             if percent is not None:
-                self._set_task_progress_percent_ui(item_id, percent)
+                self._set_task_progress_text(item_id, f"{percent:.1f}%")
             speed = _event_speed(d)
             eta = _event_eta(d)
             self._set_task_transfer_rate_ui(item_id, speed, eta)
@@ -8427,7 +8455,7 @@ class DownloadManagerApp:
             updates = {}
             if name:
                 normalized_name = _set_task_name_fields(task, name)
-                self._set_task_name_text(item_id, normalized_name)
+                self._set_task_named_column_text(item_id, "name", normalized_name)
                 updates["name"] = normalized_name
             updates.update(
                 _set_task_source_fields(
@@ -8609,7 +8637,7 @@ class DownloadManagerApp:
             if (not os.path.splitext(filename)[1]) and inferred_direct_media_ext:
                 filename = f"{self._get_task_output_basename(task, 'downloaded_file')}{inferred_direct_media_ext}"
             self._set_task_output_path(task, item_id, os.path.join(save_dir, filename))
-            self._set_task_name_text(item_id, filename)
+            self._set_task_named_column_text(item_id, "name", filename)
             direct_headers = {"User-Agent": DEFAULT_USER_AGENT}
             direct_referer = self._get_task_source_page(task)
             derived_mixdrop_watch_url = ""
@@ -8706,6 +8734,50 @@ class DownloadManagerApp:
                 title = f"{code_m.group(1).upper()}-{code_m.group(2)}"
             _set_task_identity(name=title, source_site="njavtv")
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer="https://njavtv.com/", origin="https://njavtv.com")
+            return
+
+        if "nnyy.in" in parsed_url.netloc and re.search(r"/(?:dianying|dianshiju|zongyi|dongman)/\d+\.html$", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, key="eta_site_nnyy", fallback="正在解析 努努影院...")
+            c_req = get_curl_cffi_requests()
+            resp = c_req.get(
+                url,
+                impersonate="chrome110",
+                timeout=20,
+                headers={"Referer": "https://nnyy.in/", "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_id = _extract_nnyy_page_id(url)
+            if not page_id:
+                raise Exception("NNYY page id missing")
+            episode_entries, default_slug = _extract_nnyy_episode_entries(resp.text)
+            selected_slug = default_slug or (episode_entries[0][0] if episode_entries else "")
+            if not selected_slug:
+                raise Exception("NNYY episode slug missing")
+            api_url = f"https://nnyy.in/_gp/{page_id}/{selected_slug}"
+            api_resp = c_req.get(
+                api_url,
+                impersonate="chrome110",
+                timeout=20,
+                headers={
+                    "Referer": url,
+                    "X-Requested-With": "XMLHttpRequest",
+                    "User-Agent": DEFAULT_USER_AGENT,
+                },
+            )
+            candidates = _extract_nnyy_play_candidates(api_resp.text)
+            if not candidates:
+                raise Exception("NNYY stream URL missing")
+            page_title = _extract_html_title(resp.text, short_name or "努努影院")
+            fallback_urls = candidates[1:]
+            _set_task_identity(name=page_title, source_site="nnyy", source_page=url, fallback_urls=fallback_urls)
+            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="nnyy", fallback_urls=fallback_urls)
+            self._download_m3u8_with_ffmpeg(
+                item_id,
+                candidates[0],
+                save_dir,
+                is_mp3=is_mp3,
+                referer=url,
+                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+            )
             return
 
         if "xiaoyakankan.com" in parsed_url.netloc:
@@ -9116,7 +9188,7 @@ class DownloadManagerApp:
                 out_name = f"{self._get_task_output_basename(task, page_title or 'Video')}{media_ext}"
                 out_path = os.path.join(save_dir, out_name)
                 self._set_task_output_path(task, item_id, out_path)
-                self._set_task_name_text(item_id, out_name)
+                self._set_task_named_column_text(item_id, "name", out_name)
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                 self._download_http_media(
                     item_id,
@@ -9263,7 +9335,7 @@ class DownloadManagerApp:
                         out_name = f"{self._get_task_output_basename(task, page_title or 'Video')}{media_ext}"
                         out_path = os.path.join(save_dir, out_name)
                         self._set_task_output_path(task, item_id, out_path)
-                        self._set_task_name_text(item_id, out_name)
+                        self._set_task_named_column_text(item_id, "name", out_name)
                         self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                         self._download_http_media(
                             item_id,
@@ -9824,7 +9896,7 @@ class DownloadManagerApp:
                     url = v_src
                     out_name = clean_title + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
-                    self._set_task_name_text(item_id, out_name)
+                    self._set_task_named_column_text(item_id, "name", out_name)
                     self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                     self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
                     return
@@ -9836,7 +9908,7 @@ class DownloadManagerApp:
                     url = v_src
                     out_name = clean_title + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
-                    self._set_task_name_text(item_id, out_name)
+                    self._set_task_named_column_text(item_id, "name", out_name)
                     self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
                     self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
                     return
