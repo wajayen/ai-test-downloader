@@ -9,6 +9,7 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 import ctypes
+import base64
 import glob
 import hashlib
 import html
@@ -29,6 +30,11 @@ import urllib.parse
 import zipfile
 from pathlib import Path
 
+try:
+    from Crypto.Cipher import AES as CryptoAES
+except Exception:
+    CryptoAES = None
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -48,7 +54,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260506-2600"
+APP_BUILD = "20260506-2610"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1806,8 +1812,20 @@ def _extract_player_js_object(page_text, *var_names):
                 elif ch == "}":
                     depth -= 1
                     if depth == 0:
-                        return _parse_js_object(page_text[start : idx + 1])
+                            return _parse_js_object(page_text[start : idx + 1])
     return None
+
+
+def _parse_js_object(blob):
+    text = (blob or "").strip().rstrip(";")
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    text = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', text)
+    text = text.replace("'", '"')
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    return json.loads(text)
 
 
 def _extract_movieffm_playback_candidates(page_html, fallback_title="MovieFFM"):
@@ -2116,6 +2134,144 @@ def _extract_nnyy_play_candidates(payload_text):
             if play_url and _looks_like_manifest_url(play_url):
                 candidates.append(play_url)
     return _dedupe_download_urls(candidates)
+
+
+def _extract_777tv_episode_entries(page_html, base_url="https://play.777tv.ai/"):
+    entries = []
+    text = str(page_html or "")
+    for match in re.finditer(
+        r'href=["\']((?:(?:https?:)?//play\.777tv\.ai)?/vod/play/id/\d+/sid/\d+/nid/\d+\.html)["\'][^>]*>(.*?)</a>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        play_url = html.unescape(match.group(1) or "").strip()
+        if play_url.startswith("//"):
+            play_url = "https:" + play_url
+        elif play_url.startswith("/"):
+            play_url = urllib.parse.urljoin(base_url, play_url)
+        play_url = _normalize_download_url(play_url)
+        ep_name = re.sub(r"<[^>]+>", "", html.unescape(match.group(2) or ""))
+        ep_name = re.sub(r"\s+", " ", ep_name).strip()
+        if play_url and (not ep_name or ep_name in {"立即播放", "在线播放", "線上播放", "在线观看"}):
+            nid_match = re.search(r"/nid/(\d+)\.html$", urllib.parse.urlsplit(play_url).path, re.IGNORECASE)
+            if nid_match:
+                try:
+                    ep_name = f"第{int(nid_match.group(1)):02d}集"
+                except ValueError:
+                    ep_name = ""
+        if play_url:
+            entries.append((play_url, ep_name or default_short_name_for_url(play_url)))
+    deduped = []
+    seen = set()
+    for play_url, ep_name in entries:
+        if play_url in seen:
+            continue
+        seen.add(play_url)
+        deduped.append((play_url, ep_name))
+    return deduped
+
+
+def _extract_777tv_playback_candidates(page_html, fallback_title="777TV"):
+    text = str(page_html or "")
+    player_data = _extract_player_js_object(text, "player_data", "player_aaaa", "player")
+    candidates = []
+    if player_data:
+        for key in ("url", "src", "play_url", "playUrl", "urls", "backup", "backup_urls", "m3u8_urls", "playlist", "sources"):
+            value = player_data.get(key)
+            if isinstance(value, (list, tuple, set)):
+                values = value
+            else:
+                values = [value]
+            for item in values:
+                candidate = _normalize_download_url(item)
+                if candidate and _looks_like_manifest_url(candidate):
+                    candidates.append(candidate)
+    if not candidates:
+        for match in re.finditer(r'(?:(?:https?:)?//[^"\'\s<]+?\.m3u8(?:\?[^"\'\s<]*)?)', text, re.IGNORECASE):
+            candidate = _normalize_download_url(html.unescape(match.group(0)).strip())
+            if candidate and _looks_like_manifest_url(candidate):
+                candidates.append(candidate)
+    page_title = _extract_html_title(text, fallback_title)
+    return page_title, _dedupe_download_urls(candidates), player_data
+
+
+def _extract_3kor_detail_entries(page_html, base_url="https://3kor.com/"):
+    entries = []
+    text = str(page_html or "")
+    for match in re.finditer(r"<li\b[^>]*>(.*?)</li>", text, re.IGNORECASE | re.DOTALL):
+        block = match.group(1) or ""
+        link_match = re.search(r'href=["\']((?:https?:)?//3kor\.com/detail/\d+\.html|/detail/\d+\.html)["\']', block, re.IGNORECASE)
+        if not link_match:
+            continue
+        detail_url = html.unescape(link_match.group(1) or "").strip()
+        if detail_url.startswith("//"):
+            detail_url = "https:" + detail_url
+        elif detail_url.startswith("/"):
+            detail_url = urllib.parse.urljoin(base_url, detail_url)
+        detail_url = _normalize_download_url(detail_url)
+        title = ""
+        title_match = re.search(r'title=["\']([^"\']+)["\']', block, re.IGNORECASE)
+        if title_match:
+            title = re.sub(r"\s+", " ", html.unescape(title_match.group(1) or "")).strip()
+        if not title:
+            name_match = re.search(r'<p>\s*<a[^>]+href=["\'][^"\']+/detail/\d+\.html["\'][^>]*>(.*?)</a>\s*</p>', block, re.IGNORECASE | re.DOTALL)
+            if name_match:
+                title = re.sub(r"<[^>]+>", "", html.unescape(name_match.group(1) or ""))
+                title = re.sub(r"\s+", " ", title).strip()
+        if detail_url:
+            entries.append((detail_url, title or default_short_name_for_url(detail_url)))
+    deduped = []
+    seen = set()
+    for detail_url, title in entries:
+        if detail_url in seen:
+            continue
+        seen.add(detail_url)
+        deduped.append((detail_url, title))
+    return deduped
+
+
+def _extract_3kor_play_entries(page_html):
+    entries = []
+    text = str(page_html or "")
+    for match in re.finditer(
+        r"bb_a\(['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]*)['\"]\s*,\s*event\)",
+        text,
+        re.IGNORECASE,
+    ):
+        play_id = str(match.group(1) or "").strip()
+        play_name = re.sub(r"\s+", " ", html.unescape(match.group(2) or "")).strip()
+        if play_id:
+            entries.append((play_id, play_name or play_id))
+    deduped = []
+    seen = set()
+    for play_id, play_name in entries:
+        if play_id in seen:
+            continue
+        seen.add(play_id)
+        deduped.append((play_id, play_name))
+    return deduped
+
+
+def _decrypt_3kor_stream_url(encrypted_text, key="my-to-newhan-2025"):
+    if CryptoAES is None:
+        raise Exception("3KOR decrypt dependency missing")
+    encrypted_text = str(encrypted_text or "").strip()
+    if not encrypted_text:
+        raise Exception("3KOR encrypted stream missing")
+    encrypted_bytes = base64.b64decode(encrypted_text)
+    if len(encrypted_bytes) <= 16:
+        raise Exception("3KOR encrypted stream invalid")
+    raw_key = str(key or "")[:32].ljust(32, "\0").encode("utf-8")
+    iv = encrypted_bytes[:16]
+    ciphertext = encrypted_bytes[16:]
+    cipher = CryptoAES.new(raw_key, CryptoAES.MODE_CBC, iv)
+    decrypted = cipher.decrypt(ciphertext)
+    if decrypted:
+        padding = decrypted[-1]
+        if 1 <= int(padding) <= 16:
+            decrypted = decrypted[:-int(padding)]
+    stream_url = decrypted.decode("utf-8", "ignore").strip()
+    return _normalize_download_url(stream_url)
 
 
 def _extract_html_title(page_text, fallback_name):
@@ -3388,7 +3544,10 @@ class DownloadManagerApp:
         self.tree.tag_configure("row_done", background="#f3f4f6")
         self.tree.tag_configure("row_finalizing", background="#f5f3ff")
         self.tree.tag_configure("row_error", background="#fef2f2")
-        self._register_primary_drop_targets()
+        try:
+            self.root.after(350, self._register_primary_drop_targets)
+        except Exception:
+            self._register_primary_drop_targets()
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview, style="App.Vertical.TScrollbar")
         scrollbar.grid(row=0, column=1, sticky="ns")
         xscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.tree.xview, style="App.Horizontal.TScrollbar")
@@ -3433,7 +3592,7 @@ class DownloadManagerApp:
         if widget is None:
             return
         try:
-            supported_types = [token for token in (DND_ALL, DND_TEXT, DND_FILES) if token]
+            supported_types = [token for token in (DND_TEXT, DND_FILES) if token]
             if supported_types and hasattr(widget, "drop_target_register"):
                 widget.drop_target_register(*supported_types)
                 widget.dnd_bind("<<Drop>>", self.handle_drop)
@@ -3444,7 +3603,7 @@ class DownloadManagerApp:
 
     def _register_primary_drop_targets(self):
         seen = set()
-        for widget in (self.root, self.url_entry, self.tree):
+        for widget in (self.root, self.url_entry):
             if widget is None:
                 continue
             widget_id = id(widget)
@@ -3467,7 +3626,7 @@ class DownloadManagerApp:
                     widget.drop_target_unregister()
             except TypeError:
                 try:
-                    supported_types = [token for token in (DND_ALL, DND_TEXT, DND_FILES) if token]
+                    supported_types = [token for token in (DND_TEXT, DND_FILES) if token]
                     if supported_types and hasattr(widget, "drop_target_unregister"):
                         widget.drop_target_unregister(*supported_types)
                 except Exception:
@@ -4131,6 +4290,125 @@ class DownloadManagerApp:
                 write_error_log("nnyy series parse failure", exc, url=new_url)
                 self._schedule_site_parse_error(exc, limit=120)
 
+        def fetch_777tv_playlist():
+            try:
+                parsed_url = urllib.parse.urlsplit(new_url)
+                if not re.search(r"/vod/detail/id/\d+\.html$", parsed_url.path, re.IGNORECASE):
+                    self._final_add_download(new_url, is_mp3=is_mp3)
+                    return
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome110",
+                    timeout=20,
+                    headers={"Referer": "https://777tv.ai/", "User-Agent": DEFAULT_USER_AGENT},
+                )
+                episode_entries = _extract_777tv_episode_entries(resp.text)
+                if not episode_entries:
+                    self._final_add_download(new_url, is_mp3=is_mp3)
+                    return
+                page_title = _extract_html_title(resp.text, "777TV")
+                page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or "777TV"
+                episodes = []
+                for play_url, ep_name in episode_entries:
+                    display_name = f"{page_title} {ep_name}".strip() if ep_name else page_title
+                    episodes.append((play_url, display_name))
+                episodes = _sort_download_targets_naturally(episodes)
+
+                def enqueue():
+                    targets = self._choose_playlist_targets(episodes, episodes[0])
+                    for ep_url, ep_name in targets:
+                        self._final_add_download(
+                            ep_url,
+                            is_mp3=is_mp3,
+                            custom_name=ep_name,
+                            source_site="777tv",
+                            extra_task_data=self._build_extra_task_data(source_page=new_url),
+                        )
+
+                self._schedule_ui_call(enqueue)
+            except Exception as exc:
+                write_error_log("777tv series parse failure", exc, url=new_url)
+                self._schedule_site_parse_error(exc, limit=120)
+
+        def fetch_3kor_list():
+            try:
+                parsed_url = urllib.parse.urlsplit(new_url)
+                if not re.search(r"/list/\d+[^/]*\.html$", parsed_url.path, re.IGNORECASE):
+                    self._final_add_download(new_url, is_mp3=is_mp3)
+                    return
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome110",
+                    timeout=20,
+                    headers={"Referer": "https://3kor.com/", "User-Agent": DEFAULT_USER_AGENT},
+                )
+                detail_entries = _extract_3kor_detail_entries(resp.text)
+                if not detail_entries:
+                    raise Exception("3KOR list page did not expose detail links")
+
+                def enqueue():
+                    targets = self._choose_playlist_targets(detail_entries, detail_entries[0])
+                    for detail_url, detail_name in targets:
+                        self._final_add_download(
+                            detail_url,
+                            is_mp3=is_mp3,
+                            custom_name=detail_name,
+                            source_site="3kor",
+                            extra_task_data=self._build_extra_task_data(source_page=new_url),
+                        )
+
+                self._schedule_ui_call(enqueue)
+            except Exception as exc:
+                write_error_log("3kor list parse failure", exc, url=new_url)
+                self._schedule_site_parse_error(exc, limit=120)
+
+        def fetch_3kor_detail():
+            try:
+                parsed_url = urllib.parse.urlsplit(new_url)
+                if not re.search(r"/detail/\d+\.html$", parsed_url.path, re.IGNORECASE):
+                    self._final_add_download(new_url, is_mp3=is_mp3)
+                    return
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome110",
+                    timeout=20,
+                    headers={"Referer": "https://3kor.com/", "User-Agent": DEFAULT_USER_AGENT},
+                )
+                page_title = _extract_html_title(resp.text, "3KOR")
+                page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or "3KOR"
+                play_entries = _extract_3kor_play_entries(resp.text)
+                if not play_entries:
+                    self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="3kor")
+                    return
+                base_page_url = urllib.parse.urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, "", ""))
+                episodes = []
+                default_episode_url = f"{base_page_url}?play={urllib.parse.quote(play_entries[0][0])}"
+                for play_id, play_name in play_entries:
+                    episode_url = f"{base_page_url}?play={urllib.parse.quote(play_id)}"
+                    display_name = page_title if len(play_entries) == 1 else f"{page_title} {play_name}".strip()
+                    episodes.append((episode_url, display_name))
+                episodes = _sort_download_targets_naturally(episodes)
+                selected_episode = next((episode for episode in episodes if episode[0] == default_episode_url), episodes[0])
+
+                def enqueue():
+                    targets = self._choose_playlist_targets(episodes, selected_episode)
+                    for episode_url, episode_name in targets:
+                        self._final_add_download(
+                            episode_url,
+                            is_mp3=is_mp3,
+                            custom_name=episode_name,
+                            source_site="3kor",
+                            extra_task_data=self._build_extra_task_data(source_page=base_page_url),
+                        )
+
+                self._schedule_ui_call(enqueue)
+            except Exception as exc:
+                write_error_log("3kor detail parse failure", exc, url=new_url)
+                self._schedule_site_parse_error(exc, limit=120)
+
         lowered = new_url.lower()
         if _is_anime1_category_url(new_url):
             self._start_background_parse(fetch_anime1)
@@ -4152,6 +4430,15 @@ class DownloadManagerApp:
             return
         if "nnyy.in" in lowered and re.search(r"/(?:dianshiju|dongman|zongyi)/\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
             self._start_background_parse(fetch_nnyy_playlist)
+            return
+        if "777tv.ai" in lowered and re.search(r"/vod/detail/id/\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
+            self._start_background_parse(fetch_777tv_playlist)
+            return
+        if "3kor.com" in lowered and re.search(r"/list/\d+[^/]*\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
+            self._start_background_parse(fetch_3kor_list)
+            return
+        if "3kor.com" in lowered and re.search(r"/detail/\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
+            self._start_background_parse(fetch_3kor_detail)
             return
         self._final_add_download(new_url, is_mp3=is_mp3)
         return
@@ -8448,16 +8735,79 @@ class DownloadManagerApp:
             except Exception:
                 continue
 
+    def _iter_active_process_handles(self):
+        seen = set()
+        for task in self.tasks.values():
+            proc = _task_process_handle(task)
+            if proc is None:
+                continue
+            proc_id = id(proc)
+            if proc_id in seen:
+                continue
+            seen.add(proc_id)
+            yield task, proc
+
+    def _terminate_process_handle(self, proc, timeout_seconds=3.0):
+        if proc is None:
+            return
+        try:
+            if proc.poll() is not None:
+                return
+        except Exception:
+            return
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=max(float(timeout_seconds or 0.0), 0.1))
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=1.5)
+            except Exception:
+                pass
+        for stream_name in ("stdout", "stderr", "stdin"):
+            try:
+                stream = getattr(proc, stream_name, None)
+                if stream is not None:
+                    stream.close()
+            except Exception:
+                pass
+
     def _force_kill_child_processes(self):
+        for task, proc in list(self._iter_active_process_handles()):
+            try:
+                self._terminate_process_handle(proc, timeout_seconds=2.5)
+            finally:
+                try:
+                    if _task_process_handle(task) is proc:
+                        _set_task_process_handle(task, None)
+                except Exception:
+                    pass
         try:
             import psutil
 
             parent = psutil.Process(os.getpid())
-            for child in parent.children(recursive=True):
+            child_processes = list(parent.children(recursive=True))
+            for child in child_processes:
+                try:
+                    child.terminate()
+                except Exception:
+                    continue
+            _gone, alive = psutil.wait_procs(child_processes, timeout=2.0)
+            for child in alive:
                 try:
                     child.kill()
                 except Exception:
                     continue
+            try:
+                psutil.wait_procs(alive, timeout=1.0)
+            except Exception:
+                pass
         except Exception:
             return
 
@@ -8702,7 +9052,10 @@ class DownloadManagerApp:
                 self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
             speed = _event_speed(d)
             eta = _event_eta(d)
-            self._set_task_named_column_text(item_id, "speed_eta", f"{format_transfer_rate(speed) if speed else '-'} | {format_eta(float(eta))}")
+            speed_text = format_transfer_rate(speed) if speed else "-"
+            if eta not in (None, ""):
+                speed_text = f"{speed_text} | {format_eta(float(eta))}"
+            self._set_task_named_column_text(item_id, "speed_eta", speed_text)
             status_text = self._downloading_status_text()
             if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
                 self._set_task_status_mode_ui(item_id, self._downloading_status_text())
@@ -8783,54 +9136,6 @@ class DownloadManagerApp:
             )
             if updates:
                 self._update_task_state_entry(task, **updates)
-
-        def _parse_js_object(blob):
-            text = (blob or "").strip().rstrip(";")
-            try:
-                return json.loads(text)
-            except Exception:
-                pass
-            text = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', text)
-            text = text.replace("'", '"')
-            text = re.sub(r",\s*([}\]])", r"\1", text)
-            return json.loads(text)
-
-        def _extract_player_js_object(page_text, *var_names):
-            page_text = str(page_text or "")
-            for var_name in var_names:
-                if not var_name:
-                    continue
-                pattern = rf"var\s+{re.escape(var_name)}\s*="
-                match = re.search(pattern, page_text, re.DOTALL)
-                if not match:
-                    continue
-                start = page_text.find("{", match.end())
-                if start < 0:
-                    continue
-                depth = 0
-                in_string = False
-                quote_char = ""
-                escape = False
-                for idx in range(start, len(page_text)):
-                    ch = page_text[idx]
-                    if in_string:
-                        if escape:
-                            escape = False
-                        elif ch == "\\":
-                            escape = True
-                        elif ch == quote_char:
-                            in_string = False
-                    else:
-                        if ch in ("'", '"'):
-                            in_string = True
-                            quote_char = ch
-                        elif ch == "{":
-                            depth += 1
-                        elif ch == "}":
-                            depth -= 1
-                            if depth == 0:
-                                return _parse_js_object(page_text[start : idx + 1])
-            return None
 
         def _add_m3u8_candidate(candidates, value, base_url=""):
             if isinstance(value, (list, tuple, set)):
@@ -9087,6 +9392,142 @@ class DownloadManagerApp:
                 is_mp3=is_mp3,
                 referer=url,
                 origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+            )
+            return
+
+        if "777tv.ai" in parsed_url.netloc and re.search(r"/vod/detail/id/\d+\.html$", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, message="正在解析 777TV...")
+            c_req = get_curl_cffi_requests()
+            resp = c_req.get(
+                url,
+                impersonate="chrome110",
+                timeout=20,
+                headers={"Referer": "https://777tv.ai/", "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _extract_html_title(resp.text, short_name or "777TV")
+            page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or (short_name or "777TV")
+            episode_entries = _extract_777tv_episode_entries(resp.text)
+            if episode_entries:
+                episodes = []
+                for play_url, ep_name in episode_entries:
+                    display_name = f"{page_title} {ep_name}".strip() if ep_name else page_title
+                    episodes.append((play_url, display_name))
+                episodes = _sort_download_targets_naturally(episodes)
+                primary_url, primary_name = episodes[0]
+                fallback_urls = [episode_url for episode_url, _episode_name in episodes if episode_url != primary_url]
+                _set_task_identity(
+                    name=self._get_task_name_text(task, "").strip() or primary_name,
+                    source_site="777tv",
+                    source_page=url,
+                    fallback_urls=fallback_urls,
+                )
+                self._download_task_internal(primary_url, item_id, save_dir, use_impersonate, is_mp3)
+                return
+            page_title, candidates, _player_data = _extract_777tv_playback_candidates(resp.text, page_title)
+            if not candidates:
+                raise Exception("777TV detail page did not expose episode links")
+            _set_task_identity(name=page_title, source_site="777tv", source_page=url, fallback_urls=candidates[1:])
+            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="777tv", fallback_urls=candidates[1:])
+            self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer="https://777tv.ai/", origin="https://777tv.ai")
+            return
+
+        if "play.777tv.ai" in parsed_url.netloc and re.search(r"/vod/play/id/\d+/sid/\d+/nid/\d+\.html$", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, message="正在解析 777TV...")
+            c_req = get_curl_cffi_requests()
+            resp = c_req.get(
+                url,
+                impersonate="chrome110",
+                timeout=20,
+                headers={"Referer": self._get_task_source_page(task, fallback_url="https://777tv.ai/") or "https://777tv.ai/", "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title, candidates, _player_data = _extract_777tv_playback_candidates(resp.text, short_name or "777TV")
+            if not candidates:
+                raise Exception("777TV stream URL missing")
+            display_name = self._get_task_name_text(task, "").strip() or page_title or short_name or "777TV"
+            fallback_urls = candidates[1:]
+            _set_task_identity(name=display_name, source_site="777tv", source_page=url, fallback_urls=fallback_urls)
+            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="777tv", fallback_urls=fallback_urls)
+            self._download_m3u8_with_ffmpeg(
+                item_id,
+                candidates[0],
+                save_dir,
+                is_mp3=is_mp3,
+                referer=url,
+                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+            )
+            return
+
+        if "3kor.com" in parsed_url.netloc and re.search(r"/list/\d+[^/]*\.html$", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, message="正在解析 3KOR...")
+            c_req = get_curl_cffi_requests()
+            resp = c_req.get(
+                url,
+                impersonate="chrome110",
+                timeout=20,
+                headers={"Referer": "https://3kor.com/", "User-Agent": DEFAULT_USER_AGENT},
+            )
+            detail_entries = _extract_3kor_detail_entries(resp.text)
+            if not detail_entries:
+                raise Exception("3KOR list page did not expose detail links")
+            primary_url, primary_name = detail_entries[0]
+            fallback_urls = [detail_url for detail_url, _detail_name in detail_entries if detail_url != primary_url]
+            _set_task_identity(
+                name=self._get_task_name_text(task, "").strip() or primary_name,
+                source_site="3kor",
+                source_page=url,
+                fallback_urls=fallback_urls,
+            )
+            self._download_task_internal(primary_url, item_id, save_dir, use_impersonate, is_mp3)
+            return
+
+        if "3kor.com" in parsed_url.netloc and re.search(r"/detail/\d+\.html$", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, message="正在解析 3KOR...")
+            c_req = get_curl_cffi_requests()
+            detail_url = urllib.parse.urlunsplit((parsed_url.scheme, parsed_url.netloc, parsed_url.path, "", ""))
+            resp = c_req.get(
+                detail_url,
+                impersonate="chrome110",
+                timeout=20,
+                headers={"Referer": "https://3kor.com/", "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _extract_html_title(resp.text, short_name or "3KOR")
+            page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or (short_name or "3KOR")
+            play_entries = _extract_3kor_play_entries(resp.text)
+            if not play_entries:
+                raise Exception("3KOR play entry missing")
+            requested_play_id = urllib.parse.parse_qs(parsed_url.query).get("play", [""])[0].strip()
+            selected_play_id, selected_play_name = next((entry for entry in play_entries if entry[0] == requested_play_id), play_entries[0])
+            api_url = f"https://3kor.com/u/u1.php?ud={urllib.parse.quote(selected_play_id, safe='')}"
+            encrypted_stream = c_req.get(
+                api_url,
+                impersonate="chrome110",
+                timeout=20,
+                headers={"Referer": detail_url, "User-Agent": DEFAULT_USER_AGENT},
+            ).text
+            direct_stream_url = _decrypt_3kor_stream_url(encrypted_stream, "my-to-newhan-2025")
+            if not direct_stream_url:
+                raise Exception("3KOR stream URL missing")
+            stream_url = urllib.parse.urljoin(
+                "https://3kor.com/",
+                "/m3/edit-down.php?url=" + urllib.parse.quote(direct_stream_url, safe=':/?&=%'),
+            )
+            display_name = self._get_task_name_text(task, "").strip()
+            if not display_name:
+                display_name = page_title if len(play_entries) == 1 else f"{page_title} {selected_play_name}".strip()
+            fallback_urls = [
+                f"{detail_url}?play={urllib.parse.quote(play_id)}"
+                for play_id, _play_name in play_entries
+                if play_id != selected_play_id
+            ]
+            _set_task_identity(name=display_name, source_site="3kor", source_page=detail_url, fallback_urls=fallback_urls)
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="3kor", fallback_urls=fallback_urls)
+            self._download_m3u8_with_ffmpeg(
+                item_id,
+                stream_url,
+                save_dir,
+                is_mp3=is_mp3,
+                referer=detail_url,
+                origin="https://3kor.com",
             )
             return
 
@@ -10308,10 +10749,6 @@ class DownloadManagerApp:
             return
         self._shutdown_started = True
         try:
-            self.root.withdraw()
-        except Exception:
-            pass
-        try:
             exit_timer = threading.Timer(FORCED_SHUTDOWN_EXIT_DELAY_SECONDS, os._exit, args=(0,))
             exit_timer.daemon = True
             exit_timer.start()
@@ -10320,6 +10757,10 @@ class DownloadManagerApp:
             self._forced_exit_timer = None
         try:
             self._prepare_ui_for_shutdown()
+        except Exception:
+            pass
+        try:
+            self.root.withdraw()
         except Exception:
             pass
         try:
