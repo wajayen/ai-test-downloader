@@ -54,7 +54,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260506-2610"
+APP_BUILD = "20260507-2620"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -142,6 +142,14 @@ HLS_RESUME_REWIND_SEGMENT_MULTIPLIER = 2.5
 UI_THROTTLE_INTERVAL_SECONDS = 1.25
 STATUS_STYLE_REFRESH_INTERVAL_MS = 240
 SUMMARY_REFRESH_INTERVAL_MS = 450
+STARTUP_RESUME_DELAY_MS = 250
+STARTUP_RESUME_BATCH_SIZE = 2
+STARTUP_RESUME_BATCH_DELAY_MS = 80
+STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS = 1200
+SHUTDOWN_ACTIVE_DOWNLOAD_WAIT_SECONDS = 1.2
+SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS = 0.8
+SHUTDOWN_PROCESS_TERMINATE_TIMEOUT_SECONDS = 0.8
+SHUTDOWN_PROCESS_KILL_TIMEOUT_SECONDS = 0.8
 GIMY_DIRECT_STREAM_FALLBACK_LIMIT = 1
 GIMY_EPISODE_PAGE_PARSE_FALLBACK_LIMIT = 2
 GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
@@ -213,6 +221,11 @@ FORCED_M3U8_SITE_RULES = {
         "hosts": (),
         "origin": "https://nnyy.in",
         "referer": "https://nnyy.in/",
+    },
+    "3kor": {
+        "hosts": ("3kor.com",),
+        "origin": "https://3kor.com",
+        "referer": "https://3kor.com/",
     },
     "xiaoyakankan": {
         "hosts": (
@@ -2274,16 +2287,44 @@ def _decrypt_3kor_stream_url(encrypted_text, key="my-to-newhan-2025"):
     return _normalize_download_url(stream_url)
 
 
-def _extract_html_title(page_text, fallback_name):
-    title_m = re.search(r"<title>(.*?)</title>", str(page_text or ""), re.IGNORECASE | re.DOTALL)
-    if not title_m:
-        return fallback_name
-    raw_title = html.unescape(title_m.group(1)).strip()
-    raw_title = re.sub(r"\s+", " ", raw_title)
+def _trim_site_suffix_from_title(raw_title):
+    raw_title = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     for splitter in (" - ", " | ", " – ", " — "):
         if splitter in raw_title:
             raw_title = raw_title.split(splitter)[0].strip()
             break
+    return raw_title
+
+
+def _looks_like_placeholder_page_title(title_text, page_text=""):
+    normalized_title = re.sub(r"\s+", " ", str(title_text or "")).strip().lower()
+    normalized_page = str(page_text or "").lower()
+    title_markers = (
+        "just a moment",
+        "attention required",
+        "checking your browser",
+        "please wait",
+    )
+    if any(marker in normalized_title for marker in title_markers):
+        return True
+    page_markers = (
+        "cf-browser-verification",
+        "cf-challenge",
+        "__cf_chl_",
+        "checking your browser before accessing",
+    )
+    if any(marker in normalized_page for marker in page_markers):
+        return True
+    return False
+
+
+def _extract_html_title(page_text, fallback_name):
+    title_m = re.search(r"<title>(.*?)</title>", str(page_text or ""), re.IGNORECASE | re.DOTALL)
+    if not title_m:
+        return fallback_name
+    raw_title = _trim_site_suffix_from_title(html.unescape(title_m.group(1)))
+    if _looks_like_placeholder_page_title(raw_title, page_text):
+        return fallback_name
     return raw_title or fallback_name
 
 
@@ -2645,9 +2686,15 @@ def load_state():
 
 def _match_forced_m3u8_site(url, task=None):
     normalized_url = _normalize_download_url(url)
+    source_site = _task_source_site_name(task)
+    if source_site == "3kor" and normalized_url:
+        parsed = urllib.parse.urlsplit(normalized_url)
+        if "3kor.com" in parsed.netloc.lower() and "edit-down.php" in parsed.path.lower():
+            embedded_url = urllib.parse.parse_qs(parsed.query).get("url", [""])[0]
+            if _looks_like_manifest_url(embedded_url):
+                return "3kor"
     if not _looks_like_manifest_url(normalized_url):
         return None
-    source_site = _task_source_site_name(task)
     if source_site in FORCED_M3U8_SITE_RULES:
         return source_site
     if _task_fallback_urls_list(task, primary_url=normalized_url):
@@ -2672,6 +2719,10 @@ def _should_prefer_native_hls(url, task=None):
     if source_site == "njavtv":
         # NJAVTV surrit playlists often produce tiny native-HLS artifacts, then recover on ffmpeg.
         # Start on the stable ffmpeg path directly.
+        return False
+    if source_site == "3kor":
+        # 3KOR ffzy playlists are stable on ffmpeg, but native HLS resume can hit HTTP 416 fragment ranges.
+        # Start directly on the ffmpeg path to avoid the native detour and range mismatch failures.
         return False
     if source_site == "missav":
         return True
@@ -3328,13 +3379,15 @@ class DownloadManagerApp:
         self._shutdown_started = False
         self._forced_exit_timer = None
         self._drop_target_widgets = []
+        self._startup_resume_pending = False
+        self._startup_resume_scheduled = False
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_ui()
         if self.tree is not None:
             self.ui_throttler = UIThrottler(self.root, self.tree, update_interval=UI_THROTTLE_INTERVAL_SECONDS)
             self.throttler = self.ui_throttler
-        self.resume_unfinished_tasks()
-        self.root.after(400, self._auto_install_ffmpeg_if_missing)
+        self.root.after(STARTUP_RESUME_DELAY_MS, self._resume_unfinished_tasks_deferred)
+        self.root.after(STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS, self._auto_install_ffmpeg_if_missing)
 
     def _auto_install_ffmpeg_if_missing(self):
         if platform.system() != "Windows":
@@ -3635,6 +3688,7 @@ class DownloadManagerApp:
                 pass
 
     def _prepare_ui_for_shutdown(self):
+        self._shutdown_started = True
         try:
             if self.ui_throttler is not None:
                 self.ui_throttler.stop()
@@ -3905,31 +3959,69 @@ class DownloadManagerApp:
 
     def resume_unfinished_tasks(self):
         saved_tasks = load_state()
+        pending_tasks = []
         for task in saved_tasks:
             url = self._get_task_url(task)
-            name = self._get_task_display_name(
-                task,
-                fallback_url=url,
-                fallback_name=t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目",
-            )
-            is_mp3 = self._get_task_is_mp3(task)
-            source_site = self._get_task_source_site(task)
-            extra_task_data = {
-                "fallback_urls": self._get_task_fallback_urls(task),
-                "source_page": self._get_task_source_page(task),
-                "resolved_url": _task_resolved_url(task),
-                "page_refresh_candidates": _task_gimy_page_refresh_candidates(task),
-            }
             if not url:
                 continue
-            self._start_download_thread(
-                url,
-                name,
-                is_mp3=is_mp3,
-                source_site=source_site,
-                extra_task_data=extra_task_data,
-                resume_requested=True,
+            pending_tasks.append(
+                (
+                    url,
+                    self._get_task_display_name(
+                        task,
+                        fallback_url=url,
+                        fallback_name=t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目",
+                    ),
+                    self._get_task_is_mp3(task),
+                    self._get_task_source_site(task),
+                    {
+                        "fallback_urls": self._get_task_fallback_urls(task),
+                        "source_page": self._get_task_source_page(task),
+                        "resolved_url": _task_resolved_url(task),
+                        "page_refresh_candidates": _task_gimy_page_refresh_candidates(task),
+                    },
+                )
             )
+        if not pending_tasks:
+            self._startup_resume_pending = False
+            return
+        self._startup_resume_pending = True
+
+        def enqueue_batch(start_index=0):
+            if self._shutdown_started:
+                self._startup_resume_pending = False
+                return
+            end_index = min(start_index + STARTUP_RESUME_BATCH_SIZE, len(pending_tasks))
+            for url, name, is_mp3, source_site, extra_task_data in pending_tasks[start_index:end_index]:
+                self._start_download_thread(
+                    url,
+                    name,
+                    is_mp3=is_mp3,
+                    source_site=source_site,
+                    extra_task_data=extra_task_data,
+                    resume_requested=True,
+                )
+            if end_index < len(pending_tasks):
+                self.root.after(STARTUP_RESUME_BATCH_DELAY_MS, lambda: enqueue_batch(end_index))
+                return
+            self._startup_resume_pending = False
+            try:
+                self.persist_unfinished_state(force=True)
+            except Exception:
+                pass
+            self._schedule_summary_refresh()
+            self._schedule_process_queue(delay=0)
+
+        enqueue_batch(0)
+
+    def _resume_unfinished_tasks_deferred(self):
+        if self._shutdown_started or self._startup_resume_scheduled:
+            return
+        self._startup_resume_scheduled = True
+        try:
+            self.resume_unfinished_tasks()
+        finally:
+            self._startup_resume_scheduled = False
 
     def add_new_download(self):
         if not self.url_entry:
@@ -4836,7 +4928,9 @@ class DownloadManagerApp:
                 m = re.search(r"<title>(.*?)</title>", txt, re.IGNORECASE)
                 if not m:
                     return
-                title = html.unescape(m.group(1)).split("-")[0].strip()
+                title = _extract_html_title(txt, short_name)
+                if _looks_like_placeholder_page_title(title, txt):
+                    return
                 title = "".join(c for c in title if c not in '\\/:*?"<>|')
                 if title and _task_state_value(self.tasks.get(item_id, {})) == "QUEUED":
                     _set_task_name_fields(self.tasks[item_id], title)
@@ -4866,6 +4960,8 @@ class DownloadManagerApp:
         task_data["resume_requested"] = bool(existing_item_id is not None or resume_requested)
         _set_task_aux_fields(task_data, _stop_reason=None)
         self.tasks[item_id] = task_data
+        if self._startup_resume_pending:
+            return
         try:
             self.persist_unfinished_state()
         except Exception:
@@ -5115,6 +5211,8 @@ class DownloadManagerApp:
         self._clear_url_entry()
 
     def _schedule_ui_call(self, callback):
+        if self._shutdown_started:
+            return
         self.root.after(0, callback)
 
     def _schedule_tree_update(self, item_id, col, value, force=False):
@@ -7076,7 +7174,6 @@ class DownloadManagerApp:
                 if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
-                self._set_task_status_mode_ui(item_id, self._processing_status_text())
                 return
             if status != "downloading":
                 return
@@ -8656,19 +8753,8 @@ class DownloadManagerApp:
             self._save_resume_progress(progress_path, best_seconds, source_url=source_url, bytes_done=best_bytes)
 
     def _prepare_shutdown_resume_state(self):
-        active_processes = []
-        for item_id, task in self.tasks.items():
-            state = _task_state_value(task)
-            if state == "DOWNLOADING":
-                _set_task_stop_fields(task, "PAUSE_REQUESTED", stop_reason=STOP_REASON_PAUSE, resume_requested=True)
-                self._set_task_status_mode_ui(item_id, self._paused_status_text())
-                proc = _task_process_handle(task)
-                if proc is not None:
-                    active_processes.append((item_id, task, proc))
-            elif state == "QUEUED":
-                _set_task_stop_fields(task, "PAUSED", stop_reason=None, resume_requested=True)
-                self._set_task_status_mode_ui(item_id, self._paused_status_text())
-        for item_id, task, proc in active_processes:
+        self._request_shutdown_stop_for_active_tasks()
+        for item_id, task, proc in list(self._iter_active_process_handles()):
             media_url = self._get_task_url(task)
             try:
                 self._terminate_ffmpeg_process(task, item_id, proc, media_url, "app_closing")
@@ -8678,7 +8764,7 @@ class DownloadManagerApp:
                 except Exception:
                     pass
 
-    def _wait_for_shutdown_downloads(self, timeout_seconds=5.0):
+    def _wait_for_shutdown_downloads(self, timeout_seconds=SHUTDOWN_ACTIVE_DOWNLOAD_WAIT_SECONDS):
         deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
         while time.time() < deadline:
             active_found = False
@@ -8695,9 +8781,9 @@ class DownloadManagerApp:
                     break
             if not active_found:
                 break
-            time.sleep(0.1)
+            time.sleep(0.05)
 
-    def _wait_for_shutdown_resume_artifacts(self, timeout_seconds=2.0, stable_polls=3):
+    def _wait_for_shutdown_resume_artifacts(self, timeout_seconds=SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS, stable_polls=2):
         deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
         last_snapshot = None
         stable_count = 0
@@ -8726,7 +8812,7 @@ class DownloadManagerApp:
             else:
                 last_snapshot = snapshot
                 stable_count = 0
-            time.sleep(0.15)
+            time.sleep(0.08)
 
     def _flush_live_resume_state(self):
         for task in self._iter_live_tasks():
@@ -8778,10 +8864,66 @@ class DownloadManagerApp:
             except Exception:
                 pass
 
+    def _request_shutdown_stop_for_active_tasks(self):
+        for item_id, task in self.tasks.items():
+            state = _task_state_value(task)
+            if state == "DOWNLOADING":
+                _set_task_stop_fields(task, "PAUSE_REQUESTED", stop_reason=STOP_REASON_PAUSE, resume_requested=True)
+                self._set_task_status_mode_ui(item_id, self._paused_status_text())
+            elif state == "QUEUED":
+                _set_task_stop_fields(task, "PAUSED", stop_reason=None, resume_requested=True)
+                self._set_task_status_mode_ui(item_id, self._paused_status_text())
+
     def _force_kill_child_processes(self):
-        for task, proc in list(self._iter_active_process_handles()):
+        tracked_processes = list(self._iter_active_process_handles())
+        tracked_pairs = []
+        for task, proc in tracked_processes:
             try:
-                self._terminate_process_handle(proc, timeout_seconds=2.5)
+                if proc is not None and proc.poll() is None:
+                    tracked_pairs.append((task, proc))
+            except Exception:
+                continue
+        for _task, proc in tracked_pairs:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        deadline = time.time() + SHUTDOWN_PROCESS_TERMINATE_TIMEOUT_SECONDS
+        while tracked_pairs and time.time() < deadline:
+            remaining = []
+            for task, proc in tracked_pairs:
+                try:
+                    if proc.poll() is None:
+                        remaining.append((task, proc))
+                except Exception:
+                    continue
+            if not remaining:
+                tracked_pairs = []
+                break
+            tracked_pairs = remaining
+            time.sleep(0.05)
+        for task, proc in tracked_pairs:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        kill_deadline = time.time() + SHUTDOWN_PROCESS_KILL_TIMEOUT_SECONDS
+        while tracked_pairs and time.time() < kill_deadline:
+            remaining = []
+            for task, proc in tracked_pairs:
+                try:
+                    if proc.poll() is None:
+                        remaining.append((task, proc))
+                except Exception:
+                    continue
+            if not remaining:
+                tracked_pairs = []
+                break
+            tracked_pairs = remaining
+            time.sleep(0.05)
+        for task, proc in tracked_processes:
+            try:
+                self._terminate_process_handle(proc, timeout_seconds=0.1)
             finally:
                 try:
                     if _task_process_handle(task) is proc:
@@ -8798,14 +8940,14 @@ class DownloadManagerApp:
                     child.terminate()
                 except Exception:
                     continue
-            _gone, alive = psutil.wait_procs(child_processes, timeout=2.0)
+            _gone, alive = psutil.wait_procs(child_processes, timeout=SHUTDOWN_PROCESS_TERMINATE_TIMEOUT_SECONDS)
             for child in alive:
                 try:
                     child.kill()
                 except Exception:
                     continue
             try:
-                psutil.wait_procs(alive, timeout=1.0)
+                psutil.wait_procs(alive, timeout=SHUTDOWN_PROCESS_KILL_TIMEOUT_SECONDS)
             except Exception:
                 pass
         except Exception:
@@ -9040,7 +9182,6 @@ class DownloadManagerApp:
                 if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
-                self._set_task_status_mode_ui(item_id, self._processing_status_text())
                 return
             if status != "downloading":
                 return
@@ -10747,7 +10888,6 @@ class DownloadManagerApp:
     def _finalize_process_shutdown(self):
         if self._shutdown_started:
             return
-        self._shutdown_started = True
         try:
             exit_timer = threading.Timer(FORCED_SHUTDOWN_EXIT_DELAY_SECONDS, os._exit, args=(0,))
             exit_timer.daemon = True
@@ -10778,10 +10918,6 @@ class DownloadManagerApp:
             pass
         try:
             self.root.quit()
-        except Exception:
-            pass
-        try:
-            self.root.update_idletasks()
         except Exception:
             pass
         try:
