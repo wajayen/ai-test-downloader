@@ -27,6 +27,7 @@ import time
 import traceback
 import urllib.request
 import urllib.parse
+import weakref
 import zipfile
 from pathlib import Path
 
@@ -54,7 +55,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260507-2620"
+APP_BUILD = "20260508-2641"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -65,15 +66,11 @@ STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
 ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
 MAX_DOWNLOADS_PER_DOMAIN = 3
-MAX_DOWNLOADS_PER_SOURCE_PAGE = 1
-MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
-    "missav": 1,
-    "movieffm": 1,
-}
-MAX_DOWNLOADS_PER_SOURCE_SITE = {
-    "gimy": 1,
-    "missav": 1,
-}
+MAX_DOWNLOADS_PER_SOURCE_PAGE = MAX_DOWNLOADS_PER_DOMAIN
+MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {}
+MAX_DOWNLOADS_PER_SOURCE_SITE = {}
+LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
+LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 10
 MAX_QUEUE_TASKS = 300
 DISK_SPACE_RESERVE_BYTES = 256 * 1024 * 1024
 STATE_PERSIST_INTERVAL_SECONDS = 2.5
@@ -981,22 +978,12 @@ def _set_task_process_handle(task, proc=None):
     return _set_task_aux_fields(task, _proc=proc)
 
 
-def _set_task_last_status_text(task, status_text):
-    if status_text is None:
-        return _task_last_status_text(task, default="")
-    _set_task_aux_fields(task, _last_status_text=str(status_text))
-    return _task_last_status_text(task, default="")
-
-
-def _set_task_transfer_metrics(task, downloaded_bytes=None, total_bytes=None):
-    fields = {}
-    if downloaded_bytes is not None:
-        fields["downloaded_bytes"] = downloaded_bytes
-    if total_bytes is not None:
-        fields["total_bytes"] = total_bytes
-    if fields:
-        return _set_task_aux_fields(task, **fields)
-    return task if task is not None else {}
+def _set_task_last_speed_bps(task, speed_bps):
+    try:
+        value = max(float(speed_bps or 0.0), 0.0)
+    except Exception:
+        value = 0.0
+    return _set_task_aux_fields(task, _last_speed_bps=value)
 
 
 def _set_task_stop_fields(task, state=None, stop_reason=Ellipsis, resume_requested=None, **fields):
@@ -1018,6 +1005,13 @@ def _task_in_states(task, *states):
 
 def _task_last_status_text(task, default=""):
     return str(_task_field_value(task, "_last_status_text", default) or default)
+
+
+def _task_last_speed_bps(task, default=0.0):
+    try:
+        return max(float(_task_field_value(task, "_last_speed_bps", default) or 0.0), 0.0)
+    except Exception:
+        return max(float(default or 0.0), 0.0)
 
 
 def _task_stop_reason_value(task, default=None):
@@ -1342,87 +1336,93 @@ def _extract_instagram_media_candidates(page_html):
 def _extract_instagram_media_via_savereels(url):
     c_req = get_curl_cffi_requests()
     session = c_req.Session(impersonate="chrome110")
-    base_headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Origin": "https://savereels.app",
-        "Referer": "https://savereels.app/",
-        "User-Agent": DEFAULT_USER_AGENT,
-    }
-    resolve_resp = session.post(
-        "https://savereels.app/api/resolve",
-        headers=base_headers,
-        data=json.dumps({"url": url, "media_type": "video"}),
-        timeout=30,
-    )
-    if resolve_resp.status_code >= 400:
-        raise Exception(f"SaveReels resolve HTTP {resolve_resp.status_code}")
-    resolve_data = resolve_resp.json()
-    preview = resolve_data.get("data") or {}
-
-    token = str(resolve_data.get("download_token") or "").strip()
-    if not token:
-        raise Exception("SaveReels download token missing")
-    download_resp = session.post(
-        "https://savereels.app/api/download",
-        headers=base_headers,
-        data=json.dumps({"download_token": token}),
-        timeout=30,
-    )
-    if download_resp.status_code >= 400:
-        raise Exception(f"SaveReels download HTTP {download_resp.status_code}")
-    task_id = str((download_resp.json() or {}).get("task_id") or "").strip()
-    if not task_id:
-        raise Exception("SaveReels task id missing")
-
-    status_headers = {
-        "Accept": "application/json",
-        "Referer": "https://savereels.app/",
-        "User-Agent": base_headers["User-Agent"],
-    }
-    last_message = ""
-    for _ in range(15):
-        status_resp = session.get(
-            f"https://savereels.app/api/status/{task_id}",
-            headers=status_headers,
+    try:
+        base_headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": "https://savereels.app",
+            "Referer": "https://savereels.app/",
+            "User-Agent": DEFAULT_USER_AGENT,
+        }
+        resolve_resp = session.post(
+            "https://savereels.app/api/resolve",
+            headers=base_headers,
+            data=json.dumps({"url": url, "media_type": "video"}),
             timeout=30,
         )
-        if status_resp.status_code >= 400:
-            raise Exception(f"SaveReels status HTTP {status_resp.status_code}")
-        status_data = status_resp.json()
-        status = str(status_data.get("status") or "").strip().lower()
-        last_message = str(status_data.get("message") or "").strip()
-        if status == "completed":
-            video = status_data.get("video") or {}
-            proxy_url = _normalize_download_url(status_data.get("download_url", ""))
-            candidates = []
-            for item in video.get("download_candidates") or []:
-                if not isinstance(item, dict):
-                    continue
-                candidate = _normalize_download_url(item.get("url", ""))
-                if candidate:
-                    candidates.append(candidate)
-            media_url = ""
-            for candidate in candidates:
-                if candidate.lower().endswith(".mp4"):
-                    media_url = candidate
-                    break
-            if not media_url and candidates:
-                media_url = candidates[0]
-            if proxy_url:
-                media_url = proxy_url
-            if not media_url:
-                raise Exception("SaveReels completed without media URL")
-            page_title = str(video.get("author") or preview.get("author") or "").strip()
-            return {
-                "media_url": media_url,
-                "fallback_urls": [u for u in candidates if u != media_url],
-                "page_title": page_title,
-            }
-        if status == "failed":
-            raise Exception(last_message or "SaveReels failed")
-        time.sleep(1.5)
-    raise Exception(last_message or "SaveReels timed out")
+        if resolve_resp.status_code >= 400:
+            raise Exception(f"SaveReels resolve HTTP {resolve_resp.status_code}")
+        resolve_data = resolve_resp.json()
+        preview = resolve_data.get("data") or {}
+
+        token = str(resolve_data.get("download_token") or "").strip()
+        if not token:
+            raise Exception("SaveReels download token missing")
+        download_resp = session.post(
+            "https://savereels.app/api/download",
+            headers=base_headers,
+            data=json.dumps({"download_token": token}),
+            timeout=30,
+        )
+        if download_resp.status_code >= 400:
+            raise Exception(f"SaveReels download HTTP {download_resp.status_code}")
+        task_id = str((download_resp.json() or {}).get("task_id") or "").strip()
+        if not task_id:
+            raise Exception("SaveReels task id missing")
+
+        status_headers = {
+            "Accept": "application/json",
+            "Referer": "https://savereels.app/",
+            "User-Agent": base_headers["User-Agent"],
+        }
+        last_message = ""
+        for _ in range(15):
+            status_resp = session.get(
+                f"https://savereels.app/api/status/{task_id}",
+                headers=status_headers,
+                timeout=30,
+            )
+            if status_resp.status_code >= 400:
+                raise Exception(f"SaveReels status HTTP {status_resp.status_code}")
+            status_data = status_resp.json()
+            status = str(status_data.get("status") or "").strip().lower()
+            last_message = str(status_data.get("message") or "").strip()
+            if status == "completed":
+                video = status_data.get("video") or {}
+                proxy_url = _normalize_download_url(status_data.get("download_url", ""))
+                candidates = []
+                for item in video.get("download_candidates") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    candidate = _normalize_download_url(item.get("url", ""))
+                    if candidate:
+                        candidates.append(candidate)
+                media_url = ""
+                for candidate in candidates:
+                    if candidate.lower().endswith(".mp4"):
+                        media_url = candidate
+                        break
+                if not media_url and candidates:
+                    media_url = candidates[0]
+                if proxy_url:
+                    media_url = proxy_url
+                if not media_url:
+                    raise Exception("SaveReels completed without media URL")
+                page_title = str(video.get("author") or preview.get("author") or "").strip()
+                return {
+                    "media_url": media_url,
+                    "fallback_urls": [u for u in candidates if u != media_url],
+                    "page_title": page_title,
+                }
+            if status == "failed":
+                raise Exception(last_message or "SaveReels failed")
+            time.sleep(1.5)
+        raise Exception(last_message or "SaveReels timed out")
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
 
 
 def _safe_header_url(url):
@@ -2655,6 +2655,30 @@ class UIThrottler:
             self._flush_scheduled = False
 
 
+class DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    def _adjust_thread_count(self):
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads >= self._max_workers:
+            return
+        thread_name = "%s_%d" % (self._thread_name_prefix or self, num_threads)
+        worker = concurrent.futures.thread._worker
+        thread = threading.Thread(
+            name=thread_name,
+            target=worker,
+            args=(weakref.ref(self, weakref_cb), self._work_queue, self._initializer, self._initargs),
+        )
+        thread.daemon = True
+        thread.start()
+        self._threads.add(thread)
+        concurrent.futures.thread._threads_queues[thread] = self._work_queue
+
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         return {}
@@ -3379,6 +3403,8 @@ class DownloadManagerApp:
         self._shutdown_started = False
         self._forced_exit_timer = None
         self._drop_target_widgets = []
+        self._active_network_sessions = {}
+        self._active_network_sessions_lock = threading.Lock()
         self._startup_resume_pending = False
         self._startup_resume_scheduled = False
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -3390,6 +3416,8 @@ class DownloadManagerApp:
         self.root.after(STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS, self._auto_install_ffmpeg_if_missing)
 
     def _auto_install_ffmpeg_if_missing(self):
+        if self._shutdown_started:
+            return
         if platform.system() != "Windows":
             return
         if self._ffmpeg_install_started:
@@ -3698,6 +3726,8 @@ class DownloadManagerApp:
         self._status_style_flush_scheduled = False
         self._summary_refresh_scheduled = False
         self._queue_process_scheduled = False
+        self._startup_resume_pending = False
+        self._startup_resume_scheduled = False
         try:
             self.root.unbind_all("<Control-a>")
             self.root.unbind_all("<Control-A>")
@@ -3708,6 +3738,58 @@ class DownloadManagerApp:
             self._unregister_drop_targets()
         except Exception:
             pass
+
+    def _track_network_session(self, session):
+        if session is None:
+            return None
+        try:
+            close_method = getattr(session, "close", None)
+            if not callable(close_method):
+                return session
+        except Exception:
+            return session
+        try:
+            with self._active_network_sessions_lock:
+                self._active_network_sessions[id(session)] = session
+        except Exception:
+            pass
+        return session
+
+    def _untrack_network_session(self, session):
+        if session is None:
+            return None
+        try:
+            with self._active_network_sessions_lock:
+                self._active_network_sessions.pop(id(session), None)
+        except Exception:
+            pass
+        return session
+
+    def _close_network_session(self, session):
+        if session is None:
+            return
+        self._untrack_network_session(session)
+        try:
+            close_method = getattr(session, "close", None)
+            if callable(close_method):
+                close_method()
+        except Exception:
+            pass
+
+    def _close_active_network_sessions(self):
+        try:
+            with self._active_network_sessions_lock:
+                sessions = list(self._active_network_sessions.values())
+                self._active_network_sessions.clear()
+        except Exception:
+            sessions = []
+        for session in sessions:
+            try:
+                close_method = getattr(session, "close", None)
+                if callable(close_method):
+                    close_method()
+            except Exception:
+                pass
 
     def _cancel_forced_exit_timer(self):
         exit_timer = getattr(self, "_forced_exit_timer", None)
@@ -4260,6 +4342,41 @@ class DownloadManagerApp:
                 write_error_log("movieffm tvshows parse failure", exc, url=new_url)
                 self._schedule_error(t("msg_fetch_movieffm_failed", error=exc))
 
+        def fetch_movieffm_single():
+            try:
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(new_url, impersonate="chrome110", timeout=15, headers={"Referer": new_url})
+                page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(resp.text, "MovieFFM")
+                if not candidates and not player_data and not external_source_urls:
+                    self._schedule_warning(t("msg_fetch_movieffm_empty"))
+                    return
+
+                def enqueue_single():
+                    if not candidates and external_source_urls:
+                        self._final_add_download(
+                            external_source_urls[0],
+                            is_mp3=is_mp3,
+                            custom_name=page_title,
+                            source_site="movieffm",
+                            extra_task_data=self._build_extra_task_data(source_page=new_url, fallback_urls=external_source_urls[1:]),
+                        )
+                        return
+                    if not candidates:
+                        self._schedule_warning(t("msg_fetch_movieffm_empty"))
+                        return
+                    self._final_add_download(
+                        candidates[0],
+                        is_mp3=is_mp3,
+                        custom_name=page_title,
+                        source_site="movieffm",
+                        extra_task_data=self._build_extra_task_data(source_page=new_url, fallback_urls=candidates[1:]),
+                    )
+
+                self._schedule_ui_call(enqueue_single)
+            except Exception as exc:
+                write_error_log("movieffm single parse failure", exc, url=new_url)
+                self._schedule_error(t("msg_fetch_movieffm_failed", error=exc))
+
         def fetch_xiaoyakankan_post():
             try:
                 c_req = get_curl_cffi_requests()
@@ -4517,6 +4634,9 @@ class DownloadManagerApp:
         if "movieffm.net" in lowered and "/drama/" in lowered:
             self._start_background_parse(fetch_movieffm_drama)
             return
+        if "movieffm.net" in lowered and "/chinese-subtitles/" in lowered:
+            self._start_background_parse(fetch_movieffm_single)
+            return
         if "xiaoyakankan.com" in lowered and "/post/" in lowered:
             self._start_background_parse(fetch_xiaoyakankan_post)
             return
@@ -4652,7 +4772,7 @@ class DownloadManagerApp:
         max_episode_no = max((entry.get("episode_no") or 0) for entry in entries)
         episode_title_re = re.compile(r"(第\s*\d+\s*集|EP\s*\d+|E\d+)", re.IGNORECASE)
         has_episode_titles = any(episode_title_re.search(entry.get("title", "")) for entry in entries if entry.get("title"))
-        return len(unique_lines) >= 2 and max_episode_no <= 2 and not has_episode_titles
+        return len(unique_lines) >= 2 and max_episode_no <= 3 and not has_episode_titles
 
     def _gimy_movie_source_priority(self, title):
         title = (title or "").strip()
@@ -4978,6 +5098,8 @@ class DownloadManagerApp:
                 self._schedule_summary_refresh()
 
     def _schedule_status_style(self, item_id, status_text):
+        if self._shutdown_started:
+            return
         self._pending_status_styles[item_id] = status_text
         if self._status_style_flush_scheduled:
             return
@@ -4995,6 +5117,8 @@ class DownloadManagerApp:
             self._apply_row_status_style(item_id, status_text)
 
     def _schedule_summary_refresh(self):
+        if self._shutdown_started:
+            return
         if self._summary_refresh_scheduled:
             return
         self._summary_refresh_scheduled = True
@@ -5008,6 +5132,8 @@ class DownloadManagerApp:
         self._refresh_ui_summary()
 
     def _schedule_process_queue(self, delay=0):
+        if self._shutdown_started:
+            return
         if self._queue_process_scheduled:
             return
         self._queue_process_scheduled = True
@@ -5018,6 +5144,8 @@ class DownloadManagerApp:
 
     def _flush_process_queue(self):
         self._queue_process_scheduled = False
+        if self._shutdown_started:
+            return
         self._process_queue()
 
     def _apply_row_status_style(self, item_id, status_text):
@@ -5145,22 +5273,19 @@ class DownloadManagerApp:
         return counts
 
     def _downloading_status_text(self):
-        return self._status_text("status_downloading", "下載中")
+        return t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中"
 
     def _queued_status_text(self):
-        return self._status_text("status_queued", "排隊中")
+        return t("status_queued") if "status_queued" in I18N_DICT.get(CURRENT_LANG, {}) else "排隊中"
 
     def _paused_status_text(self):
-        return self._status_text("status_paused", "已暫停")
+        return t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停"
 
     def _finished_status_text(self):
-        return self._status_text("status_done", "完成")
+        return t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成"
 
     def _error_status_text(self):
-        return self._status_text("status_error", "錯誤")
-
-    def _status_text(self, key, fallback):
-        return self._eta_or_status_text(key, fallback)
+        return t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤"
 
     def _dialog_title_text(self, key, fallback):
         return _dialog_title_text_fallback(key, fallback)
@@ -5304,9 +5429,6 @@ class DownloadManagerApp:
             resolved_url_saved_at=_task_resolved_url_saved_at(task),
             page_refresh_candidates=_task_gimy_page_refresh_candidates(task),
         )
-
-    def _get_task_name_text(self, task, fallback_name=""):
-        return _task_name_text(task, fallback_name=fallback_name)
 
     def _get_task_display_name(self, task, fallback_url="", fallback_name="", default_is_mp3=False):
         return _task_display_name(
@@ -5659,14 +5781,14 @@ class DownloadManagerApp:
         explicit_output = self._get_task_output_path(task)
         if self._can_accept_existing_output(task, item_id, explicit_output):
             self._set_task_output_path(task, item_id, explicit_output)
-            self._mark_existing_file_complete(item_id, self._message_file_exists_text())
+            self._mark_existing_file_complete(item_id, self._ui_text("msg_file_exists", "檔案已存在"))
             return True
-        short_name = self._get_task_name_text(task)
+        short_name = _task_name_text(task)
         if not short_name or short_name == "Queued":
             return False
         save_dir = self.save_dir_var.get()
         possible_exts = [".mp4", ".mkv", ".webm", ".mp3", ".m4a"]
-        message = self._message_file_exists_text()
+        message = self._ui_text("msg_file_exists", "檔案已存在")
         safe_name = re.sub(r'[\\\\/:*?"<>|]+', "_", short_name).strip()
         for ext in possible_exts:
             candidate_output = os.path.join(save_dir, f"{safe_name}{ext}")
@@ -5679,7 +5801,7 @@ class DownloadManagerApp:
     def _set_output_path_and_complete_if_exists(self, task, item_id, output_path, message=None, temp=False):
         self._set_task_output_path(task, item_id, output_path, temp=temp)
         if self._can_accept_existing_output(task, item_id, output_path, temp=temp):
-            self._mark_existing_file_complete(item_id, message or self._eta_file_exists_text())
+            self._mark_existing_file_complete(item_id, message or self._ui_text("eta_file_exists", "檔案已存在"))
             return True
         return False
 
@@ -5924,6 +6046,8 @@ class DownloadManagerApp:
             return attrs
 
         def _probe_segment_bytes(segment_url):
+            if self._shutdown_started:
+                return None
             try:
                 head_resp = c_req.head(segment_url, impersonate="chrome110", timeout=15, headers=headers)
                 if head_resp.status_code < 400:
@@ -5951,6 +6075,8 @@ class DownloadManagerApp:
                 return None
 
         def _sum_media_playlist_bytes(playlist_url, text):
+            if self._shutdown_started:
+                return None
             total_bytes = 0
             probe_urls = []
             seen_map_urls = set()
@@ -5986,16 +6112,27 @@ class DownloadManagerApp:
                 return None
             if not probe_urls and total_bytes <= 0:
                 return None
+            executor = None
             try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=_m3u8_total_bytes_probe_workers(task)) as executor:
-                    futures = [executor.submit(_probe_segment_bytes, segment_url) for segment_url in probe_urls]
-                    for future in concurrent.futures.as_completed(futures, timeout=120):
-                        segment_bytes = future.result()
-                        if segment_bytes is None:
-                            return None
-                        total_bytes += segment_bytes
+                executor = DaemonThreadPoolExecutor(max_workers=_m3u8_total_bytes_probe_workers(task))
+                futures = [executor.submit(_probe_segment_bytes, segment_url) for segment_url in probe_urls]
+                for future in concurrent.futures.as_completed(futures, timeout=120):
+                    if self._shutdown_started:
+                        for pending_future in futures:
+                            pending_future.cancel()
+                        return None
+                    segment_bytes = future.result()
+                    if segment_bytes is None:
+                        return None
+                    total_bytes += segment_bytes
             except Exception:
                 return None
+            finally:
+                if executor is not None:
+                    try:
+                        executor.shutdown(wait=not self._shutdown_started, cancel_futures=True)
+                    except Exception:
+                        pass
             return total_bytes if total_bytes > 0 else None
 
         try:
@@ -6517,6 +6654,25 @@ class DownloadManagerApp:
     def _load_resume_progress(self, progress_path):
         return self._load_resume_progress_info(progress_path).get("seconds", 0)
 
+    def _should_prefer_lower_resume_progress(self, new_seconds, new_bytes, old_seconds, old_bytes):
+        try:
+            new_seconds_value = max(float(new_seconds or 0.0), 0.0)
+            new_bytes_value = max(int(new_bytes or 0), 0)
+            old_seconds_value = max(float(old_seconds or 0.0), 0.0)
+            old_bytes_value = max(int(old_bytes or 0), 0)
+        except (TypeError, ValueError):
+            return False
+        if new_seconds_value <= 0.0 or old_seconds_value <= 0.0:
+            return False
+        if new_seconds_value >= old_seconds_value:
+            return False
+        if old_seconds_value - new_seconds_value < 15.0:
+            return False
+        byte_tolerance = max(16 * 1024 * 1024, int(old_bytes_value * 0.05))
+        if new_bytes_value > old_bytes_value + byte_tolerance:
+            return False
+        return True
+
     def _save_resume_progress(
         self,
         progress_path,
@@ -6549,8 +6705,11 @@ class DownloadManagerApp:
                     or (resume_id_value and resume_id_value == last_resume_id)
                 )
                 if same_resume_target:
-                    seconds_value = max(seconds_value, last_seconds)
-                    bytes_value = max(bytes_value, last_bytes)
+                    if self._should_prefer_lower_resume_progress(seconds_value, bytes_value, last_seconds, last_bytes):
+                        pass
+                    else:
+                        seconds_value = max(seconds_value, last_seconds)
+                        bytes_value = max(bytes_value, last_bytes)
                 if (
                     same_resume_target
                     and now - last_saved_at < min_interval_seconds
@@ -6582,8 +6741,13 @@ class DownloadManagerApp:
                 (source_value and persisted_source == source_value)
                 or (resume_id_value and persisted_resume_id == resume_id_value)
             ):
-                seconds_value = max(seconds_value, float(persisted.get("seconds", 0.0) or 0.0))
-                bytes_value = max(bytes_value, int(persisted.get("bytes", 0) or 0))
+                persisted_seconds = float(persisted.get("seconds", 0.0) or 0.0)
+                persisted_bytes = int(persisted.get("bytes", 0) or 0)
+                if self._should_prefer_lower_resume_progress(seconds_value, bytes_value, persisted_seconds, persisted_bytes):
+                    pass
+                else:
+                    seconds_value = max(seconds_value, persisted_seconds)
+                    bytes_value = max(bytes_value, persisted_bytes)
         payload = {
             "seconds": seconds_value,
             "bytes": bytes_value,
@@ -6682,13 +6846,21 @@ class DownloadManagerApp:
         except Exception:
             return HLS_RESUME_REWIND_MIN_SECONDS
 
-    def _get_resume_checkpoint_seconds(self, output_path, estimated_seconds, total_duration=0.0, base_offset_seconds=0.0):
+    def _get_resume_checkpoint_seconds(
+        self,
+        output_path,
+        estimated_seconds,
+        total_duration=0.0,
+        base_offset_seconds=0.0,
+        trim_initial_seconds=0.0,
+    ):
         estimated_value = max(float(estimated_seconds or 0.0), 0.0)
         total_duration_value = max(float(total_duration or 0.0), 0.0)
         base_offset_value = max(float(base_offset_seconds or 0.0), 0.0)
+        trim_initial_value = max(float(trim_initial_seconds or 0.0), 0.0)
         probed_seconds = self._probe_media_duration_seconds(output_path)
         if probed_seconds > 0.0:
-            probed_seconds += base_offset_value
+            probed_seconds = base_offset_value + max(probed_seconds - trim_initial_value, 0.0)
             if total_duration_value > 0.0:
                 probed_seconds = self._sanitize_resume_seconds(probed_seconds, total_duration_value)
             return min(estimated_value, probed_seconds) if estimated_value > 0.0 else probed_seconds
@@ -6714,6 +6886,27 @@ class DownloadManagerApp:
             return False
         return True
 
+    def _should_keep_stored_resume_seconds(self, stored_seconds, probed_seconds, stored_bytes, partial_size):
+        try:
+            stored_seconds_value = max(float(stored_seconds or 0.0), 0.0)
+            probed_seconds_value = max(float(probed_seconds or 0.0), 0.0)
+            stored_bytes_value = max(int(stored_bytes or 0), 0)
+            partial_size_value = max(int(partial_size or 0), 0)
+        except (TypeError, ValueError):
+            return False
+        if stored_seconds_value <= 0.0 or probed_seconds_value <= 0.0:
+            return False
+        if stored_seconds_value <= probed_seconds_value:
+            return False
+        seconds_drift = stored_seconds_value - probed_seconds_value
+        allowed_drift = max(8.0, probed_seconds_value * 0.005)
+        if seconds_drift > allowed_drift:
+            return False
+        byte_tolerance = max(8 * 1024 * 1024, int(max(stored_bytes_value, partial_size_value) * 0.03))
+        if abs(stored_bytes_value - partial_size_value) > byte_tolerance:
+            return False
+        return True
+
     def _probe_http_download_info(self, url, headers=None, session=None):
         headers = dict(headers or {})
         if "User-Agent" not in headers:
@@ -6723,6 +6916,7 @@ class DownloadManagerApp:
         content_type = ""
         prefer_curl = _is_anime1_media_url(url) or _is_anime1_media_url(headers.get("Referer", "")) or _is_anime1_media_url(headers.get("Origin", ""))
         if prefer_curl:
+            transient_sessions = []
             try:
                 c_req = get_curl_cffi_requests()
                 last_exc = None
@@ -6731,7 +6925,9 @@ class DownloadManagerApp:
                     candidate_sessions.append(session)
                 for browser in ("chrome110", "chrome120"):
                     try:
-                        candidate_sessions.append(c_req.Session(impersonate=browser))
+                        candidate_session = c_req.Session(impersonate=browser)
+                        candidate_sessions.append(candidate_session)
+                        transient_sessions.append(candidate_session)
                     except Exception:
                         continue
                 for candidate_session in candidate_sessions:
@@ -6766,6 +6962,12 @@ class DownloadManagerApp:
                     raise last_exc
             except Exception:
                 pass
+            finally:
+                for transient_session in transient_sessions:
+                    try:
+                        transient_session.close()
+                    except Exception:
+                        pass
         try:
             req = urllib.request.Request(url, headers={**headers, "Range": "bytes=0-0"})
             with urllib.request.urlopen(req, timeout=20) as resp:
@@ -6782,6 +6984,7 @@ class DownloadManagerApp:
                     total_size = max(int(resp_headers.get("Content-Length", 0) or 0), 0)
             return {"total_size": total_size, "range_supported": range_supported, "content_type": content_type}
         except Exception:
+            transient_sessions = []
             try:
                 req = urllib.request.Request(url, headers=headers, method="HEAD")
                 with urllib.request.urlopen(req, timeout=20) as resp:
@@ -6799,7 +7002,9 @@ class DownloadManagerApp:
                         candidate_sessions.append(session)
                     for browser in ("chrome110", "chrome120"):
                         try:
-                            candidate_sessions.append(c_req.Session(impersonate=browser))
+                            candidate_session = c_req.Session(impersonate=browser)
+                            candidate_sessions.append(candidate_session)
+                            transient_sessions.append(candidate_session)
                         except Exception:
                             continue
                     for candidate_session in candidate_sessions:
@@ -6824,6 +7029,12 @@ class DownloadManagerApp:
                         raise last_exc
                 except Exception:
                     pass
+                finally:
+                    for transient_session in transient_sessions:
+                        try:
+                            transient_session.close()
+                        except Exception:
+                            pass
             return {"total_size": total_size, "range_supported": range_supported, "content_type": content_type}
 
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
@@ -6832,7 +7043,7 @@ class DownloadManagerApp:
         req = urllib.request.Request(url, headers=req_headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             with open(part_path, "wb") as f:
-                while not stop_event.is_set():
+                while not stop_event.is_set() and not self._shutdown_started:
                     chunk = resp.read(1048576)
                     if not chunk:
                         break
@@ -7039,39 +7250,15 @@ class DownloadManagerApp:
             self._set_task_named_column_text(item_id, "progress", "100%")
         task = self.tasks.get(item_id)
         if task is not None:
-            _set_task_last_status_text(task, status_text)
+            _set_task_aux_fields(task, _last_status_text=str(status_text))
         self._set_task_named_column_text(item_id, "status", status_text)
         if message is not None:
             self._set_task_named_column_text(item_id, "speed_eta", message)
         if clear_metrics:
             self._set_task_metrics_unknown_ui(item_id)
 
-    def _processing_status_text(self):
-        return self._status_text("status_processing", "整理中")
-
-    def _processing_eta_text(self):
-        return self._eta_or_status_text("eta_processing", "整理中")
-
-    def _eta_or_status_text(self, key, fallback):
-        return t(key) if key in I18N_DICT.get(CURRENT_LANG, {}) else fallback
-
     def _ui_text(self, key, fallback):
-        return self._eta_or_status_text(key, fallback)
-
-    def _eta_direct_media_text(self):
-        return self._ui_text("eta_direct_media", "直接媒體下載")
-
-    def _eta_found_media_text(self):
-        return self._ui_text("eta_found_media", "已取得媒體網址")
-
-    def _eta_found_stream_text(self):
-        return self._ui_text("eta_found_stream", "已取得串流網址")
-
-    def _eta_file_exists_text(self):
-        return self._ui_text("eta_file_exists", "檔案已存在")
-
-    def _message_file_exists_text(self):
-        return self._ui_text("msg_file_exists", "檔案已存在")
+        return t(key) if key in I18N_DICT.get(CURRENT_LANG, {}) else fallback
 
     def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
         if error is not None:
@@ -7134,16 +7321,14 @@ class DownloadManagerApp:
     def _schedule_site_parse_error(self, error, limit=80):
         self._schedule_error(self._format_site_parse_error(error, limit=limit))
 
-    def _set_task_column_placeholder_ui(self, item_id, column, placeholder="-"):
-        self._set_task_named_column_text(item_id, column, placeholder)
-
     def _set_task_metrics_unknown_ui(self, item_id):
-        self._set_task_column_placeholder_ui(item_id, "progress", "--")
-        self._set_task_column_placeholder_ui(item_id, "size", "-")
-        self._set_task_column_placeholder_ui(item_id, "speed_eta", "-")
+        self._set_task_named_column_text(item_id, "progress", "--")
+        self._set_task_named_column_text(item_id, "size", "-")
+        self._set_task_named_column_text(item_id, "speed_eta", "-")
 
     def _set_task_active_transfer_ui(self, task, item_id, downloaded_bytes, total_bytes=None, speed_bps=None, eta_seconds=None, cap_at_99=False):
-        _set_task_transfer_metrics(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
+        _set_task_aux_fields(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
+        _set_task_last_speed_bps(task, speed_bps)
         self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded_bytes, total_bytes))
         percent = format_progress_percent(downloaded_bytes, total_bytes, cap_at_99=cap_at_99) if total_bytes else None
         if percent is not None:
@@ -7155,6 +7340,21 @@ class DownloadManagerApp:
         status_text = self._downloading_status_text()
         if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
             self._set_task_status_mode_ui(item_id, self._downloading_status_text())
+
+    def _effective_domain_download_limit(self):
+        active_tasks = []
+        for task in self.tasks.values():
+            if self._is_downloading_state(_task_state_value(task)):
+                active_tasks.append(task)
+        if not active_tasks:
+            return MAX_DOWNLOADS_PER_DOMAIN
+        if len(active_tasks) >= LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS:
+            return LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS
+        for task in active_tasks:
+            speed_bps = _task_last_speed_bps(task, 0.0)
+            if speed_bps <= 0 or speed_bps >= LOW_SPEED_CONCURRENCY_THRESHOLD_BPS:
+                return MAX_DOWNLOADS_PER_DOMAIN
+        return LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS
 
     def _make_yt_dlp_progress_hook(self, task, item_id, save_dir):
         last_ui_update = 0.0
@@ -7347,10 +7547,10 @@ class DownloadManagerApp:
 
         if total_size and total_size > 0:
             if total_size and total_size > 0:
-                _set_task_transfer_metrics(task, downloaded_bytes=0, total_bytes=total_size)
+                _set_task_aux_fields(task, downloaded_bytes=0, total_bytes=total_size)
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(0, total_size))
             if (not is_mp3) and out_path and self._get_existing_file_size(out_path) >= total_size:
-                self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
+                self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
                 return
 
         self._set_task_status_mode_ui(item_id, self._downloading_status_text(), "MEGA 下載中")
@@ -7436,7 +7636,7 @@ class DownloadManagerApp:
             resume_bytes = 0
             range_supported = False
         if total_size > 0 and resume_bytes >= total_size:
-            self._mark_existing_file_complete(item_id, self._eta_file_exists_text())
+            self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
             return
         dl_headers = dict(headers)
         mode = "ab" if resume_bytes > 0 else "wb"
@@ -7445,6 +7645,7 @@ class DownloadManagerApp:
         res = None
         stream_iter = None
         stream_response = None
+        owned_sessions = []
         try:
             if prefer_curl_stream or session is not None:
                 raise RuntimeError("prefer curl stream")
@@ -7458,7 +7659,9 @@ class DownloadManagerApp:
                 candidate_sessions.append(session)
             for browser in ("chrome110", "chrome120"):
                 try:
-                    candidate_sessions.append(c_req.Session(impersonate=browser))
+                    candidate_session = c_req.Session(impersonate=browser)
+                    candidate_sessions.append(candidate_session)
+                    owned_sessions.append(candidate_session)
                 except Exception:
                     continue
             for candidate_session in candidate_sessions:
@@ -7541,18 +7744,19 @@ class DownloadManagerApp:
                     f.write(chunk)
                     downloaded += len(chunk)
                     task = self.tasks.get(item_id, {})
-                    _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=(total_size if total_size > 0 else None))
+                    _set_task_aux_fields(task, downloaded_bytes=downloaded, total_bytes=(total_size if total_size > 0 else None))
                     now = time.time()
                     if now - last_update_time >= 1.0:
                         speed_bps = max((downloaded - last_update_bytes) / max(now - last_update_time, 0.001), 0.0)
                         last_update_time = now
                         last_update_bytes = downloaded
+                        _set_task_last_speed_bps(task, speed_bps)
                         percent = format_progress_percent(downloaded, total_size, cap_at_99=True)
                         if percent is not None:
                             self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
                         if total_size > 0:
                             if total_size and total_size > 0:
-                                _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=total_size)
+                                _set_task_aux_fields(task, downloaded_bytes=downloaded, total_bytes=total_size)
                                 self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded, total_size))
                             eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
                             self._set_task_named_column_text(item_id, "speed_eta", f"{format_transfer_rate(speed_bps) if speed_bps else '-'} | {format_eta(float(eta))}")
@@ -7578,7 +7782,9 @@ class DownloadManagerApp:
                 part_count = _http_multipart_part_count(task, total_size=max(total_size - downloaded, 0))
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
                 futures = []
-                with concurrent.futures.ThreadPoolExecutor(max_workers=part_count) as executor:
+                executor = None
+                try:
+                    executor = DaemonThreadPoolExecutor(max_workers=part_count)
                     for index in range(part_count):
                         part_start = remaining_start + index * part_size
                         if part_start > remaining_end:
@@ -7590,6 +7796,11 @@ class DownloadManagerApp:
                         progress_boxes.append(box)
                         futures.append(executor.submit(self._download_http_range_part, url, headers, part_start, part_end, part_path, box, stop_event))
                     while futures:
+                        if self._shutdown_started:
+                            stop_event.set()
+                            for future in futures:
+                                future.cancel()
+                            return
                         current_task_state = _task_state_value(self.tasks.get(item_id, {}))
                         if current_task_state in {"PAUSE_REQUESTED", "DELETE_REQUESTED"}:
                             stop_event.set()
@@ -7611,16 +7822,23 @@ class DownloadManagerApp:
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         elapsed = max(now - start_time, 0.001)
                         speed_bps = max((multi_downloaded - resume_bytes) / elapsed, 0.0)
+                        _set_task_last_speed_bps(task, speed_bps)
                         percent = format_progress_percent(multi_downloaded, total_size, cap_at_99=True)
                         if percent is not None:
                             self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
                             task = self.tasks.get(item_id, {})
                             if total_size and total_size > 0:
-                                _set_task_transfer_metrics(task, downloaded_bytes=multi_downloaded, total_bytes=total_size)
+                                _set_task_aux_fields(task, downloaded_bytes=multi_downloaded, total_bytes=total_size)
                                 self._set_task_named_column_text(item_id, "size", format_transfer_size(multi_downloaded, total_size))
                             eta = max((total_size - multi_downloaded) / max(speed_bps, 1.0), 0.0)
                             self._set_task_named_column_text(item_id, "speed_eta", f"{format_transfer_rate(speed_bps) if speed_bps else '-'} | {format_eta(float(eta))}")
                         time.sleep(0.5)
+                finally:
+                    if executor is not None:
+                        try:
+                            executor.shutdown(wait=not self._shutdown_started, cancel_futures=True)
+                        except Exception:
+                            pass
                 with open(out_path, "ab") as main_out:
                     for part_path in part_paths:
                         if not os.path.exists(part_path):
@@ -7640,6 +7858,11 @@ class DownloadManagerApp:
             return
         except Exception:
             return
+        finally:
+            for owned_session in owned_sessions:
+                self._close_network_session(owned_session)
+            if session is not None:
+                self._close_network_session(session)
         self._mark_task_finished(item_id)
 
     def _download_m3u8_with_ytdlp_native(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net"):
@@ -8126,9 +8349,16 @@ class DownloadManagerApp:
                 base_bytes = partial_size
                 resume_seconds = partial_duration
                 resume_mode = "media_probe"
-                if same_resume_target and stored_seconds > resume_seconds and size_consistent:
+                if same_resume_target and self._should_keep_stored_resume_seconds(stored_seconds, resume_seconds, stored_bytes, partial_size):
                     resume_seconds = stored_seconds
                     resume_mode = "media_probe_persisted"
+                elif same_resume_target and stored_seconds > resume_seconds:
+                    self._save_resume_progress(
+                        progress_path,
+                        partial_duration,
+                        source_url=resume_key,
+                        bytes_done=partial_size,
+                    )
             elif usable_sidecar_only_partial:
                 base_bytes = partial_size
                 resume_seconds = stored_seconds
@@ -8328,7 +8558,9 @@ class DownloadManagerApp:
                         progress[key] = value
                     if "out_time_ms" in progress and progress["out_time_ms"].isdigit():
                         out_ms = int(progress["out_time_ms"])
-                        total_done_seconds = max(resume_anchor_seconds, resume_seek_seconds + (out_ms / 1_000_000.0))
+                        resumed_output_seconds = max(out_ms / 1_000_000.0, 0.0)
+                        effective_resumed_seconds = max(resumed_output_seconds - resume_overlap_seconds, 0.0)
+                        total_done_seconds = max(resume_anchor_seconds, resume_anchor_seconds + effective_resumed_seconds)
                         now = time.time()
                         active_total_bytes = None if invalidated_total_bytes else (total_bytes_box.get("value") or total_bytes)
                         try:
@@ -8364,6 +8596,12 @@ class DownloadManagerApp:
                                     current_bytes,
                                 )
                         progress_percent = None
+                        duration_percent = None
+                        if total_duration > 0 and total_done_seconds > 0:
+                            duration_done_seconds = min(total_done_seconds, total_duration)
+                            duration_percent = format_progress_percent(duration_done_seconds, total_duration, cap_at_99=True)
+                            if duration_percent is not None and progress.get("progress") != "end":
+                                duration_percent = min(duration_percent, 99.0)
                         if active_total_bytes and active_total_bytes > 0:
                             percent = format_progress_percent(current_bytes, active_total_bytes, cap_at_99=True)
                             if percent is not None:
@@ -8392,21 +8630,16 @@ class DownloadManagerApp:
                                         )
                                 else:
                                     near_complete_since = None
-                            if percent is not None:
+                            if active_total_bytes and active_total_bytes > 0 and should_refresh_progress_ui:
+                                self._set_task_named_column_text(item_id, "size", format_transfer_size(current_bytes, active_total_bytes))
+                            if duration_percent is None:
                                 progress_percent = percent
-                            if active_total_bytes and active_total_bytes > 0:
-                                if should_refresh_progress_ui:
-                                    self._set_task_named_column_text(item_id, "size", format_transfer_size(current_bytes, active_total_bytes))
                         else:
                             near_complete_since = None
-                            if total_duration > 0 and total_done_seconds > 0:
-                                duration_done_seconds = min(total_done_seconds, total_duration)
-                                duration_percent = format_progress_percent(duration_done_seconds, total_duration, cap_at_99=True)
-                                if duration_percent is not None and progress.get("progress") != "end":
-                                    duration_percent = min(duration_percent, 99.0)
-                                progress_percent = duration_percent
-                            elif should_refresh_progress_ui:
-                                self._set_task_column_placeholder_ui(item_id, "progress", "--")
+                            if duration_percent is None and should_refresh_progress_ui:
+                                self._set_task_named_column_text(item_id, "progress", "--")
+                        if duration_percent is not None:
+                            progress_percent = duration_percent
                         if progress_percent is not None and should_refresh_progress_ui:
                             self._set_task_named_column_text(item_id, "progress", f"{progress_percent:.1f}%")
                         if not (active_total_bytes and active_total_bytes > 0) and current_bytes > 0:
@@ -8416,6 +8649,7 @@ class DownloadManagerApp:
                             instant_bps = 0.0
                             if active_output_bytes > 0 and out_ms > 0:
                                 instant_bps = active_output_bytes / max(out_ms / 1_000_000.0, 0.001)
+                            _set_task_last_speed_bps(task, instant_bps)
                             eta_seconds = None
                             if active_total_bytes and active_total_bytes > 0 and instant_bps > 0:
                                 eta_seconds = max((active_total_bytes - current_bytes) / instant_bps, 0.0)
@@ -8433,6 +8667,7 @@ class DownloadManagerApp:
                             total_done_seconds,
                             total_duration=total_duration,
                             base_offset_seconds=(resume_seek_seconds if resume_anchor_seconds > 0 else 0.0),
+                            trim_initial_seconds=(resume_overlap_seconds if resume_anchor_seconds > 0 else 0.0),
                         )
                         self._save_resume_progress(
                             progress_path,
@@ -8954,6 +9189,9 @@ class DownloadManagerApp:
             return
 
     def _process_queue(self):
+        if self._shutdown_started:
+            return
+        domain_limit = self._effective_domain_download_limit()
         domain_counts = {}
         source_page_counts = {}
         source_site_counts = {}
@@ -8975,7 +9213,11 @@ class DownloadManagerApp:
             source_site = self._get_task_source_site(task)
             source_page_limit = _max_downloads_per_source_page(task)
             source_site_limit = _max_downloads_per_source_site(task)
-            if domain_counts.get(domain, 0) >= MAX_DOWNLOADS_PER_DOMAIN:
+            if source_page_limit == MAX_DOWNLOADS_PER_SOURCE_PAGE:
+                source_page_limit = domain_limit
+            if source_site_limit == MAX_DOWNLOADS_PER_DOMAIN:
+                source_site_limit = domain_limit
+            if domain_counts.get(domain, 0) >= domain_limit:
                 continue
             if source_page and source_page_counts.get(source_page, 0) >= source_page_limit:
                 continue
@@ -9103,8 +9345,8 @@ class DownloadManagerApp:
             if ("//anime1.me/" in url_lower or "//anime1.pw/" in url_lower) and use_impersonate:
                 self._set_task_status_mode_ui(
                     item_id,
-                    self._processing_status_text(),
-                    self._processing_eta_text(),
+                    t("status_processing") if "status_processing" in I18N_DICT.get(CURRENT_LANG, {}) else "整理中",
+                    t("eta_processing") if "eta_processing" in I18N_DICT.get(CURRENT_LANG, {}) else "整理中",
                 )
                 anime1_dl_lock.acquire()
                 has_anime1_lock = True
@@ -9161,7 +9403,7 @@ class DownloadManagerApp:
 
     def _download_task_internal(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         task = self.tasks.get(item_id, {})
-        short_name = self._get_task_name_text(task, t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目")
+        short_name = _task_name_text(task, t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目")
         safe_name = self._get_task_output_basename(task, short_name)
         possible_exts = (".mp4", ".mkv", ".webm", ".m4a")
         if is_mp3:
@@ -9186,7 +9428,7 @@ class DownloadManagerApp:
             if status != "downloading":
                 return
             _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
-            _set_task_transfer_metrics(task, downloaded_bytes=downloaded, total_bytes=total)
+            _set_task_aux_fields(task, downloaded_bytes=downloaded, total_bytes=total)
             self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded, total))
             percent = format_progress_percent(downloaded, total) if total else None
             if percent is not None:
@@ -9381,7 +9623,7 @@ class DownloadManagerApp:
         inferred_direct_media_ext = _infer_media_extension_from_url(url)
         is_direct_media = bool(inferred_direct_media_ext) or any(parsed_url.path.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mkv", ".webm", ".m4a", ".mp3"))
         if is_direct_media:
-            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
             filename = os.path.basename(parsed_url.path) or "downloaded_file"
             if (not os.path.splitext(filename)[1]) and inferred_direct_media_ext:
                 filename = f"{self._get_task_output_basename(task, 'downloaded_file')}{inferred_direct_media_ext}"
@@ -9416,7 +9658,7 @@ class DownloadManagerApp:
                     direct_headers["Origin"] = f"{parsed_referer.scheme}://{parsed_referer.netloc}"
             if _is_mixdrop_direct_media(url, direct_referer):
                 c_req = get_curl_cffi_requests()
-                direct_session = c_req.Session(impersonate="chrome120")
+                direct_session = self._track_network_session(c_req.Session(impersonate="chrome120"))
                 warmup_referer = self._get_task_url(task, fallback_url="https://www.movieffm.net/") or "https://www.movieffm.net/"
                 try:
                     direct_session.get(
@@ -9457,7 +9699,7 @@ class DownloadManagerApp:
                 raw_title = html.unescape(title_m.group(1)).strip()
                 clean_title = raw_title.split(" - ")[0].strip() or short_name
             _set_task_identity(name=clean_title, source_site="jable")
-            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
+            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, url, source_site="jable", fallback_urls=[])
             self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer="https://jable.tv/", origin="https://jable.tv")
             return
@@ -9481,6 +9723,7 @@ class DownloadManagerApp:
             code_m = re.search(r"([A-Za-z]+)-(\d+)", slug, re.IGNORECASE)
             if code_m:
                 title = f"{code_m.group(1).upper()}-{code_m.group(2)}"
+            title = _extract_html_title(resp.text, title)
             _set_task_identity(name=title, source_site="njavtv")
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer="https://njavtv.com/", origin="https://njavtv.com")
             return
@@ -9520,7 +9763,7 @@ class DownloadManagerApp:
             episode_pad_width = max(2, len(str(len(episode_entries) or 0)))
             selected_episode_name = next((name for slug, name in episode_entries if slug == selected_slug), "")
             selected_episode_name = _normalize_nnyy_episode_name(selected_episode_name, ep_slug=selected_slug, pad_width=episode_pad_width)
-            display_name = self._get_task_name_text(task, "").strip()
+            display_name = _task_name_text(task, "").strip()
             if not display_name:
                 display_name = f"{page_title} {selected_episode_name}".strip() if selected_episode_name else page_title
             fallback_urls = candidates[1:]
@@ -9557,7 +9800,7 @@ class DownloadManagerApp:
                 primary_url, primary_name = episodes[0]
                 fallback_urls = [episode_url for episode_url, _episode_name in episodes if episode_url != primary_url]
                 _set_task_identity(
-                    name=self._get_task_name_text(task, "").strip() or primary_name,
+                    name=_task_name_text(task, "").strip() or primary_name,
                     source_site="777tv",
                     source_page=url,
                     fallback_urls=fallback_urls,
@@ -9584,7 +9827,7 @@ class DownloadManagerApp:
             page_title, candidates, _player_data = _extract_777tv_playback_candidates(resp.text, short_name or "777TV")
             if not candidates:
                 raise Exception("777TV stream URL missing")
-            display_name = self._get_task_name_text(task, "").strip() or page_title or short_name or "777TV"
+            display_name = _task_name_text(task, "").strip() or page_title or short_name or "777TV"
             fallback_urls = candidates[1:]
             _set_task_identity(name=display_name, source_site="777tv", source_page=url, fallback_urls=fallback_urls)
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="777tv", fallback_urls=fallback_urls)
@@ -9613,7 +9856,7 @@ class DownloadManagerApp:
             primary_url, primary_name = detail_entries[0]
             fallback_urls = [detail_url for detail_url, _detail_name in detail_entries if detail_url != primary_url]
             _set_task_identity(
-                name=self._get_task_name_text(task, "").strip() or primary_name,
+                name=_task_name_text(task, "").strip() or primary_name,
                 source_site="3kor",
                 source_page=url,
                 fallback_urls=fallback_urls,
@@ -9652,7 +9895,7 @@ class DownloadManagerApp:
                 "https://3kor.com/",
                 "/m3/edit-down.php?url=" + urllib.parse.quote(direct_stream_url, safe=':/?&=%'),
             )
-            display_name = self._get_task_name_text(task, "").strip()
+            display_name = _task_name_text(task, "").strip()
             if not display_name:
                 display_name = page_title if len(play_entries) == 1 else f"{page_title} {selected_play_name}".strip()
             fallback_urls = [
@@ -10061,7 +10304,7 @@ class DownloadManagerApp:
                     fallback_urls=direct_media_fallback_urls,
                 )
                 if is_mp3:
-                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                     self._download_direct_media_audio_with_ffmpeg(
                         item_id,
                         media_url,
@@ -10075,7 +10318,7 @@ class DownloadManagerApp:
                 out_path = os.path.join(save_dir, out_name)
                 self._set_task_output_path(task, item_id, out_path)
                 self._set_task_named_column_text(item_id, "name", out_name)
-                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_http_media(
                     item_id,
                     media_url,
@@ -10097,7 +10340,7 @@ class DownloadManagerApp:
                 _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
                 _set_task_aux_fields(task, _gimy_source_refresh_history=[])
                 _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
-                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
             if not ordered_direct_candidates:
@@ -10208,7 +10451,7 @@ class DownloadManagerApp:
                             fallback_urls=direct_media_fallback_urls,
                         )
                         if is_mp3:
-                            self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                            self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                             self._download_direct_media_audio_with_ffmpeg(
                                 item_id,
                                 media_url,
@@ -10222,7 +10465,7 @@ class DownloadManagerApp:
                         out_path = os.path.join(save_dir, out_name)
                         self._set_task_output_path(task, item_id, out_path)
                         self._set_task_named_column_text(item_id, "name", out_name)
-                        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                         self._download_http_media(
                             item_id,
                             media_url,
@@ -10244,7 +10487,7 @@ class DownloadManagerApp:
                         _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
                         _set_task_aux_fields(task, _gimy_source_refresh_history=[])
                         _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
-                        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                        self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                         self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                         return
                 if last_gimy_error:
@@ -10285,7 +10528,7 @@ class DownloadManagerApp:
             )
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
-            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
+            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
@@ -10371,7 +10614,7 @@ class DownloadManagerApp:
                     fallback_urls = [candidate for candidate in supported_external_pages[1:] if candidate and candidate != external_url]
                     _set_task_aux_fields(task, _gimy_page_refresh_candidates=[], _gimy_source_refresh_history=[])
                     _set_task_identity(name=_extract_html_title(resp.text, short_name), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
-                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                     self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                     return
                 page_refresh_candidates = _task_gimy_page_refresh_candidates(task)
@@ -10424,7 +10667,7 @@ class DownloadManagerApp:
             _set_task_aux_fields(task, _gimy_page_refresh_candidates=[])
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
-            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._eta_found_stream_text())
+            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
@@ -10468,7 +10711,7 @@ class DownloadManagerApp:
             if direct_media_candidates and not candidates:
                 direct_media_url = direct_media_candidates[0]
                 _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=direct_media_candidates[1:])
-                self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
+                self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
                 self._download_direct_media(item_id, direct_media_url, save_dir, is_mp3=is_mp3, referer=url)
                 return
             _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=candidates[1:] or direct_media_candidates)
@@ -10477,7 +10720,7 @@ class DownloadManagerApp:
             return
 
         if "avjoy.me" in parsed_url.netloc and "/video/" in parsed_url.path:
-            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._eta_direct_media_text())
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
             c_req = get_curl_cffi_requests()
             safe_referer = f"{parsed_url.scheme}://{parsed_url.netloc}/"
             resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": safe_referer})
@@ -10506,7 +10749,7 @@ class DownloadManagerApp:
             source_page_referer = self._get_task_source_page(task) or "https://www.movieffm.net/"
             watch_url = _normalize_mixdrop_watch_url(url) or url
             mixdrop_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            mixdrop_session = c_req.Session(impersonate="chrome120")
+            mixdrop_session = self._track_network_session(c_req.Session(impersonate="chrome120"))
             resp = mixdrop_session.get(watch_url, timeout=20, headers={"Referer": source_page_referer, "User-Agent": DEFAULT_USER_AGENT})
             candidates = _extract_mixdrop_media_candidates(resp.text)
             media_url = next((candidate for candidate in candidates if _looks_like_http_media_url(candidate)), None)
@@ -10514,17 +10757,17 @@ class DownloadManagerApp:
                 media_url = next((candidate for candidate in candidates if _looks_like_manifest_url(candidate)), None)
             if not media_url:
                 raise Exception("MixDrop media URL missing")
-            page_title = self._get_task_name_text(task, short_name) or short_name or _extract_html_title(resp.text, short_name)
+            page_title = _task_name_text(task, short_name) or short_name or _extract_html_title(resp.text, short_name)
             fallback_urls = [candidate for candidate in candidates if candidate != media_url]
             _set_task_identity(name=page_title, source_site=self._get_task_source_site(task) or "movieffm", source_page=watch_url, fallback_urls=fallback_urls)
             if _looks_like_manifest_url(media_url):
                 self._log_m3u8_route_selected(task, item_id, media_url, source_site=self._get_task_source_site(task) or "movieffm", fallback_urls=fallback_urls)
                 self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=watch_url, origin=mixdrop_origin)
             elif is_mp3:
-                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=watch_url, origin=mixdrop_origin)
             else:
-                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
                 out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
                 self._download_http_media(
@@ -10566,7 +10809,7 @@ class DownloadManagerApp:
                 raise Exception("Instagram shortcode missing")
             shortcode = shortcode_m.group(1)
             c_req = get_curl_cffi_requests()
-            session = c_req.Session(impersonate="chrome110")
+            session = self._track_network_session(c_req.Session(impersonate="chrome110"))
             base_headers = {
                 "User-Agent": ydl_opts["http_headers"]["User-Agent"],
                 "Accept": "*/*",
@@ -10750,7 +10993,7 @@ class DownloadManagerApp:
                 if not _is_anime1_episode_url(page_url):
                     raise Exception(f"Anime1 task URL is not a valid episode page: {page_url}")
                 c_req = get_curl_cffi_requests()
-                anime1_session = c_req.Session(impersonate="chrome110")
+                anime1_session = self._track_network_session(c_req.Session(impersonate="chrome110"))
                 page_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
                 page_headers = {"Referer": page_url, "Origin": page_origin, "User-Agent": DEFAULT_USER_AGENT}
                 resp = anime1_session.get(page_url, timeout=15, headers=page_headers)
@@ -10783,7 +11026,7 @@ class DownloadManagerApp:
                     out_name = clean_title + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
                     self._set_task_named_column_text(item_id, "name", out_name)
-                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                     self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
                     return
                 direct_mp4 = re.search(r'<source[^>]+src=["\']([^"\']+\.mp4[^"\']*)["\']', resp.text, re.IGNORECASE)
@@ -10795,14 +11038,14 @@ class DownloadManagerApp:
                     out_name = clean_title + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
                     self._set_task_named_column_text(item_id, "name", out_name)
-                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._eta_found_media_text())
+                    self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                     self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
                     return
                 direct_m3u8 = re.search(r'(https?://[^\s"\'\\]+(?:surrit\.com|[^"\']+)\.m3u8[^\s"\']*)', resp.text)
                 if direct_m3u8:
                     url = html.unescape(direct_m3u8.group(1))
                     _set_task_identity(name=clean_title)
-                    self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._eta_found_stream_text())
+                    self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
                     self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
                     return
                 iframe_m = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', resp.text)
@@ -10813,8 +11056,8 @@ class DownloadManagerApp:
                     iframe_url = "https:" + iframe_url
                 self._set_task_status_mode_ui(
                     item_id,
-                    self._processing_status_text(),
-                    self._processing_eta_text(),
+                    t("status_processing") if "status_processing" in I18N_DICT.get(CURRENT_LANG, {}) else "整理中",
+                    t("eta_processing") if "eta_processing" in I18N_DICT.get(CURRENT_LANG, {}) else "整理中",
                 )
                 iframe_resp = c_req.get(iframe_url, headers=page_headers, timeout=15, impersonate="chrome110")
                 m3u8_m = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', iframe_resp.text)
@@ -10822,7 +11065,7 @@ class DownloadManagerApp:
                     raise Exception("Anime1 iframe did not contain an m3u8 URL")
                 url = m3u8_m.group(1)
                 _set_task_identity(name=clean_title)
-                self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._eta_found_stream_text())
+                self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
                 self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
                 return
             except (StopDownloadException, KeyboardInterrupt):
@@ -10900,6 +11143,10 @@ class DownloadManagerApp:
         except Exception:
             pass
         try:
+            self._close_active_network_sessions()
+        except Exception:
+            pass
+        try:
             self.root.withdraw()
         except Exception:
             pass
@@ -10924,50 +11171,72 @@ class DownloadManagerApp:
             self.root.destroy()
         except Exception:
             pass
-        self._cancel_forced_exit_timer()
 
 
 def main():
-    lock_acquired, recovered_after_retry = wait_for_single_instance_lock()
-    if not lock_acquired:
-        try:
-            with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock denied build={APP_BUILD} app_dir={_APP_DIR}\n")
-        except Exception:
-            pass
-        warning_root = tk.Tk()
-        warning_root.withdraw()
-        warning_root.attributes("-topmost", True)
-        try:
-            messagebox.showwarning(_warning_title_text_fallback(), t("msg_already_running"), parent=warning_root)
-        finally:
-            warning_root.destroy()
-        return
-    if recovered_after_retry:
-        try:
-            with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock recovered after retry build={APP_BUILD} app_dir={_APP_DIR}\n")
-        except Exception:
-            pass
-
     try:
-        with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app start build={APP_BUILD} frozen={getattr(sys, 'frozen', False)} app_dir={_APP_DIR}\n")
-    except Exception:
-        pass
+        lock_acquired, recovered_after_retry = wait_for_single_instance_lock()
+        if not lock_acquired:
+            try:
+                with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock denied build={APP_BUILD} app_dir={_APP_DIR}\n")
+            except Exception:
+                pass
+            warning_root = tk.Tk()
+            warning_root.withdraw()
+            warning_root.attributes("-topmost", True)
+            try:
+                messagebox.showwarning(_warning_title_text_fallback(), t("msg_already_running"), parent=warning_root)
+            finally:
+                warning_root.destroy()
+            return
+        if recovered_after_retry:
+            try:
+                with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock recovered after retry build={APP_BUILD} app_dir={_APP_DIR}\n")
+            except Exception:
+                pass
 
-    if TkinterDnD is not None:
         try:
-            root = TkinterDnD.Tk()
+            with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app start build={APP_BUILD} frozen={getattr(sys, 'frozen', False)} app_dir={_APP_DIR}\n")
         except Exception:
+            pass
+
+        if TkinterDnD is not None:
+            try:
+                root = TkinterDnD.Tk()
+            except Exception:
+                root = tk.Tk()
+        else:
             root = tk.Tk()
-    else:
-        root = tk.Tk()
-    app = DownloadManagerApp(root)
-    try:
-        root.mainloop()
-    finally:
-        release_single_instance_lock()
+        app = DownloadManagerApp(root)
+        try:
+            root.mainloop()
+        finally:
+            release_single_instance_lock()
+    except Exception as exc:
+        write_error_log(
+            "startup failure",
+            exc,
+            frozen=getattr(sys, "frozen", False),
+            app_dir=_APP_DIR,
+            python=sys.executable,
+        )
+        try:
+            fallback_root = tk.Tk()
+            fallback_root.withdraw()
+            fallback_root.attributes("-topmost", True)
+            try:
+                messagebox.showerror(_warning_title_text_fallback(), f"啟動失敗：{exc}", parent=fallback_root)
+            finally:
+                fallback_root.destroy()
+        except Exception:
+            pass
+        try:
+            release_single_instance_lock()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
