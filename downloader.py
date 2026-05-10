@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260510-2650"
+APP_BUILD = "20260510-2660"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -100,47 +100,49 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "gimy": 15.0,
     "movieffm": 15.0,
 }
-YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 3
+YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 5
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
-    "gimy": 2,
-    "movieffm": 8,
-}
-YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 4
-YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "gimy": 3,
-    "missav": 4,
-    "movieffm": 8,
-}
-HTTP_MULTIPART_TRIGGER_SECONDS = 1.0
-HTTP_MULTIPART_TRIGGER_SPEED_BPS = 2 * 1024 * 1024
-HTTP_MULTIPART_MIN_REMAINING_BYTES = 4 * 1024 * 1024
-HTTP_MULTIPART_PART_COUNT_DEFAULT = 8
-HTTP_MULTIPART_PART_COUNT_BY_SITE = {
-    "anime1": 4,
-    "mixdrop": 10,
+    "missav": 8,
     "movieffm": 10,
 }
-HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 16 * 1024 * 1024
+YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 6
+YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
+    "gimy": 4,
+    "missav": 8,
+    "movieffm": 10,
+    "mixdrop": 10,
+}
+HTTP_MULTIPART_TRIGGER_SECONDS = 0.5
+HTTP_MULTIPART_TRIGGER_SPEED_BPS = 3 * 1024 * 1024
+HTTP_MULTIPART_MIN_REMAINING_BYTES = 4 * 1024 * 1024
+HTTP_MULTIPART_PART_COUNT_DEFAULT = 10
+HTTP_MULTIPART_PART_COUNT_BY_SITE = {
+    "anime1": 4,
+    "mixdrop": 12,
+    "movieffm": 12,
+}
+HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 8 * 1024 * 1024
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset(("movieffm", "mixdrop"))
-M3U8_TOTAL_BYTES_PROBE_WORKERS = 8
+M3U8_TOTAL_BYTES_PROBE_WORKERS = 4
 M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
-    "gimy": 6,
-    "movieffm": 8,
+    "gimy": 4,
+    "movieffm": 4,
 }
 M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES = frozenset(("gimy", "movieffm"))
-FFMPEG_PROGRESS_IO_POLL_INTERVAL_SECONDS = 0.75
-FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 1.5
+FFMPEG_PROGRESS_IO_POLL_INTERVAL_SECONDS = 2.5
+FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 2.0
 FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA = 2 * 1024 * 1024
-YTDLP_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 1.25
+YTDLP_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 2.25
 YTDLP_PROGRESS_UI_MIN_BYTES_DELTA = 1 * 1024 * 1024
 FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS = 5.0
 FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA = 8 * 1024 * 1024
 HLS_RESUME_REWIND_MIN_SECONDS = 6.0
 HLS_RESUME_REWIND_MAX_SECONDS = 20.0
 HLS_RESUME_REWIND_SEGMENT_MULTIPLIER = 2.5
-UI_THROTTLE_INTERVAL_SECONDS = 1.25
-STATUS_STYLE_REFRESH_INTERVAL_MS = 240
-SUMMARY_REFRESH_INTERVAL_MS = 450
+UI_THROTTLE_INTERVAL_SECONDS = 2.0
+STATUS_STYLE_REFRESH_INTERVAL_MS = 600
+SUMMARY_REFRESH_INTERVAL_MS = 1200
 STARTUP_RESUME_DELAY_MS = 250
 STARTUP_RESUME_BATCH_SIZE = 2
 STARTUP_RESUME_BATCH_DELAY_MS = 80
@@ -741,6 +743,7 @@ def _normalize_state_entry(entry):
     normalized["url"] = url
     normalized["name"] = name
     normalized["is_mp3"] = bool(normalized.get("is_mp3", False))
+    normalized["resume_requested"] = bool(normalized.get("resume_requested", False))
     source_site = str(normalized.get("source_site", "") or "").strip().lower() or None
     normalized["source_site"] = source_site
     fallback_urls = normalized.get("fallback_urls", [])
@@ -2642,27 +2645,38 @@ class UIThrottler:
         self._lock = threading.Lock()
         self._flush_scheduled = False
         self._stopped = False
+        self._column_index_cache = None
 
     def _flush_delay_ms(self):
         interval = max(float(self.update_interval or 0.0), 0.12)
         return max(120, int(interval * 1000))
 
     def update(self, item_id, col, value, force=False):
+        self.update_many(item_id, {col: value}, force=force)
+
+    def update_many(self, item_id, updates, force=False):
         if self._stopped:
             return
-        if col == "status":
+        if not updates:
+            return
+        if "status" in updates:
             force = True
         now = time.time()
         with self._lock:
             last_map = self._last_updates.setdefault(item_id, {})
-            last_val, last_time = last_map.get(col, (None, 0))
-            if not force and value == last_val:
-                return
-            last_map[col] = (value, now)
             pending_map = self._pending_updates.setdefault(item_id, {})
-            if not force and pending_map.get(col) == value:
+            changed = False
+            for col, value in updates.items():
+                last_val, _last_time = last_map.get(col, (None, 0))
+                if not force and value == last_val and pending_map.get(col) == value:
+                    continue
+                last_map[col] = (value, now)
+                pending_map[col] = value
+                changed = True
+            if not changed:
+                if not pending_map:
+                    self._pending_updates.pop(item_id, None)
                 return
-            pending_map[col] = value
             if self._flush_scheduled:
                 return
             self._flush_scheduled = True
@@ -2672,6 +2686,15 @@ class UIThrottler:
             with self._lock:
                 self._flush_scheduled = False
             return
+
+    def _column_indexes(self):
+        if self._column_index_cache is None:
+            try:
+                columns = tuple(self.tree["columns"])
+            except Exception:
+                columns = ()
+            self._column_index_cache = {column: index for index, column in enumerate(columns)}
+        return self._column_index_cache
 
     def _flush_updates(self):
         try:
@@ -2683,15 +2706,37 @@ class UIThrottler:
                 pending = self._pending_updates
                 self._pending_updates = {}
                 self._flush_scheduled = False
+            column_indexes = self._column_indexes()
             for item_id, updates in pending.items():
+                try:
+                    current_values = list(self.tree.item(item_id, "values"))
+                except tk.TclError:
+                    continue
+                if len(current_values) < len(column_indexes):
+                    current_values.extend([""] * (len(column_indexes) - len(current_values)))
+                row_changed = False
+                fallback_updates = []
                 for col, value in updates.items():
-                    try:
-                        current = self.tree.set(item_id, column=col)
-                        if current == value:
-                            continue
-                        self.tree.set(item_id, column=col, value=value)
-                    except tk.TclError:
+                    index = column_indexes.get(col)
+                    if index is None:
+                        fallback_updates.append((col, value))
                         continue
+                    value_text = "" if value is None else str(value)
+                    if current_values[index] == value_text:
+                        continue
+                    current_values[index] = value_text
+                    row_changed = True
+                try:
+                    if row_changed:
+                        self.tree.item(item_id, values=tuple(current_values))
+                    for col, value in fallback_updates:
+                        current = self.tree.set(item_id, column=col)
+                        value_text = "" if value is None else str(value)
+                        if current == value_text:
+                            continue
+                        self.tree.set(item_id, column=col, value=value_text)
+                except tk.TclError:
+                    continue
         except Exception:
             return
 
@@ -2795,6 +2840,10 @@ def _should_prefer_native_hls(url, task=None):
         # 3KOR ffzy playlists are stable on ffmpeg, but native HLS resume can hit HTTP 416 fragment ranges.
         # Start directly on the ffmpeg path to avoid the native detour and range mismatch failures.
         return False
+    if source_site == "xiaoyakankan":
+        # XiaoyaKankan frequently leaves partial-looking final mp4 artifacts when native HLS is interrupted.
+        # Start directly on the ffmpeg path so resume uses stable sidecars instead of misclassified final files.
+        return False
     if source_site == "missav":
         return True
     if any(marker in host for marker in ("qqqrst.com", "ppqrrs.com", "surrit.com")):
@@ -2843,9 +2892,9 @@ def _http_multipart_part_count(task=None, total_size=0):
     if total_size and total_size < 16 * 1024 * 1024:
         configured = min(configured, 4)
     elif total_size and total_size < 64 * 1024 * 1024:
-        configured = min(configured, 6)
+        configured = min(configured, 8)
     configured = max(2, configured)
-    return min(configured, 10)
+    return min(configured, 12)
 
 
 def _should_start_http_multipart_immediately(task=None, total_size=0):
@@ -3590,6 +3639,7 @@ class DownloadManagerApp:
         self.browse_button.grid(row=0, column=2, padx=(10, 0))
 
         input_frame = tk.Frame(settings_frame, bg="#f8fbff")
+        self.input_frame = input_frame
         input_frame.grid(row=1, column=0, columnspan=3, pady=(20, 8), sticky="ew")
         input_frame.columnconfigure(0, weight=1)
         self.new_url_label = tk.Label(input_frame, text=t("new_url"), font=("Microsoft JhengHei UI", 9), bg="#f8fbff", fg="#d96c00")
@@ -4104,7 +4154,7 @@ class DownloadManagerApp:
                     _task_is_mp3_enabled(task),
                     self._get_task_source_site(task),
                     {
-                        "fallback_urls": self._get_task_fallback_urls(task),
+                        "fallback_urls": _task_fallback_urls_list(task),
                         "source_page": self._get_task_source_page(task),
                         "resolved_url": _task_resolved_url(task),
                         "page_refresh_candidates": _task_gimy_page_refresh_candidates(task),
@@ -5157,7 +5207,13 @@ class DownloadManagerApp:
             task_data.update(extra_task_data)
         task_data["is_mp3"] = _task_is_mp3_enabled(task_data)
         task_data["source_site"] = self._get_task_source_site(task_data)
-        normalized_extra = self._build_extra_task_data_from_task(task_data, primary_url=url)
+        normalized_extra = self._build_extra_task_data(
+            source_page=self._get_task_source_page(task_data),
+            fallback_urls=_task_fallback_urls_list(task_data, primary_url=url),
+            resolved_url=_task_resolved_url(task_data),
+            resolved_url_saved_at=_task_resolved_url_saved_at(task_data),
+            page_refresh_candidates=_task_gimy_page_refresh_candidates(task_data),
+        )
         task_data["fallback_urls"] = normalized_extra.get("fallback_urls", [])
         task_data["source_page"] = normalized_extra.get("source_page", "")
         task_data["resume_requested"] = bool(existing_item_id is not None or resume_requested)
@@ -5173,11 +5229,15 @@ class DownloadManagerApp:
         self._schedule_process_queue()
 
     def update_tree(self, item_id, col, value, force=False):
+        self.update_tree_many(item_id, {col: value}, force=force)
+
+    def update_tree_many(self, item_id, updates, force=False):
         throttler = self.ui_throttler or self.throttler
-        if throttler and self.tree is not None:
-            throttler.update(item_id, col, value, force=force)
-            if col == "status":
-                self._schedule_status_style(item_id, value)
+        if throttler and self.tree is not None and updates:
+            throttler.update_many(item_id, updates, force=force)
+            if "status" in updates:
+                status_text = updates.get("status")
+                self._schedule_status_style(item_id, status_text)
                 self._schedule_summary_refresh()
 
     def _schedule_status_style(self, item_id, status_text):
@@ -5469,7 +5529,7 @@ class DownloadManagerApp:
         if source_page:
             data["source_page"] = source_page
         if fallback_urls:
-            data["fallback_urls"] = self._normalize_fallback_urls(fallback_urls)
+            data["fallback_urls"] = _dedupe_download_urls(fallback_urls)
         if resolved_url:
             data["resolved_url"] = _normalize_download_url(resolved_url)
         if resolved_url_saved_at is not None:
@@ -5478,31 +5538,14 @@ class DownloadManagerApp:
             except (TypeError, ValueError):
                 data["resolved_url_saved_at"] = 0.0
         if page_refresh_candidates:
-            data["page_refresh_candidates"] = self._normalize_fallback_urls(page_refresh_candidates)
+            data["page_refresh_candidates"] = _dedupe_download_urls(page_refresh_candidates)
         return data
-
-    def _normalize_fallback_urls(self, fallback_urls, primary_url=None):
-        return _dedupe_download_urls(fallback_urls, primary_url=primary_url)
-
-    def _get_task_fallback_urls(self, task, primary_url=None):
-        if primary_url is None:
-            primary_url = _task_url_value(task)
-        return _task_fallback_urls_list(task, primary_url=primary_url)
 
     def _get_task_source_page(self, task, fallback_url=""):
         return _task_source_page_url(task, fallback_url=fallback_url)
 
     def _get_task_source_site(self, task, fallback_site=""):
         return _task_source_site_name(task, fallback_site=fallback_site)
-
-    def _build_extra_task_data_from_task(self, task, primary_url=None, fallback_url=""):
-        return self._build_extra_task_data(
-            source_page=self._get_task_source_page(task, fallback_url=fallback_url),
-            fallback_urls=self._get_task_fallback_urls(task, primary_url=primary_url),
-            resolved_url=_task_resolved_url(task),
-            resolved_url_saved_at=_task_resolved_url_saved_at(task),
-            page_refresh_candidates=_task_gimy_page_refresh_candidates(task),
-        )
 
     def _set_task_output_path(self, task, item_id, path, temp=False):
         if temp:
@@ -5535,7 +5578,7 @@ class DownloadManagerApp:
         if "source_page" in fields and fields["source_page"] is not None:
             updates["source_page"] = _normalize_download_url(fields["source_page"])
         if "fallback_urls" in fields and fields["fallback_urls"] is not None:
-            updates["fallback_urls"] = self._normalize_fallback_urls(fields["fallback_urls"], primary_url=url)
+            updates["fallback_urls"] = _dedupe_download_urls(fields["fallback_urls"], primary_url=url)
         if "resolved_url" in fields and fields["resolved_url"] is not None:
             updates["resolved_url"] = _normalize_download_url(fields["resolved_url"])
         if "resolved_url_saved_at" in fields and fields["resolved_url_saved_at"] is not None:
@@ -5544,7 +5587,7 @@ class DownloadManagerApp:
             except (TypeError, ValueError):
                 updates["resolved_url_saved_at"] = 0.0
         if "page_refresh_candidates" in fields and fields["page_refresh_candidates"] is not None:
-            updates["page_refresh_candidates"] = self._normalize_fallback_urls(fields["page_refresh_candidates"])
+            updates["page_refresh_candidates"] = _dedupe_download_urls(fields["page_refresh_candidates"])
         if updates:
             update_state_entry(url, **updates)
 
@@ -5566,7 +5609,7 @@ class DownloadManagerApp:
             aux_updates["resolved_url_saved_at"] = normalized_saved_at
             state_updates["resolved_url_saved_at"] = normalized_saved_at
         if page_refresh_candidates is not None:
-            normalized_page_refresh_candidates = self._normalize_fallback_urls(page_refresh_candidates)
+            normalized_page_refresh_candidates = _dedupe_download_urls(page_refresh_candidates)
             aux_updates["page_refresh_candidates"] = normalized_page_refresh_candidates
             aux_updates["_gimy_page_refresh_candidates"] = normalized_page_refresh_candidates
             state_updates["page_refresh_candidates"] = normalized_page_refresh_candidates
@@ -5597,15 +5640,15 @@ class DownloadManagerApp:
                 task,
                 page_refresh_candidates=page_refresh_candidates,
             )
-            updates["page_refresh_candidates"] = self._normalize_fallback_urls(page_refresh_candidates)
+            updates["page_refresh_candidates"] = _dedupe_download_urls(page_refresh_candidates)
         if fallback_urls is not None:
-            updates["fallback_urls"] = self._normalize_fallback_urls(fallback_urls, primary_url=_task_url_value(task))
+            updates["fallback_urls"] = _dedupe_download_urls(fallback_urls, primary_url=_task_url_value(task))
         if updates:
             self._update_task_state_entry(task, **updates)
 
     def _log_m3u8_route_selected(self, task, item_id, media_url, source_site=None, fallback_urls=None):
         site = self._get_task_source_site(task, fallback_site=source_site or "")
-        effective_fallback_urls = fallback_urls if fallback_urls is not None else self._get_task_fallback_urls(task)
+        effective_fallback_urls = fallback_urls if fallback_urls is not None else _task_fallback_urls_list(task)
         self._cache_task_resolved_link(
             task,
             media_url,
@@ -5613,7 +5656,7 @@ class DownloadManagerApp:
             page_refresh_candidates=_task_gimy_page_refresh_candidates(task) if site == "gimy" else None,
         )
         fallback_count = len(
-            self._normalize_fallback_urls(
+                    _dedupe_download_urls(
                 effective_fallback_urls,
                 primary_url=media_url,
             )
@@ -5632,7 +5675,7 @@ class DownloadManagerApp:
             "url": media_url,
             "item_id": item_id,
             "source_site": self._get_task_source_site(task) or None,
-            "fallback_count": len(self._get_task_fallback_urls(task)),
+            "fallback_count": len(_task_fallback_urls_list(task)),
         }
         fields.update(extra)
         return fields
@@ -5749,13 +5792,14 @@ class DownloadManagerApp:
             is_mp3 = _task_is_mp3_enabled(task)
             name = _task_display_name(task, fallback_url=url, default_is_mp3=is_mp3)
             source_site = self._get_task_source_site(task)
-            fallback_urls = tuple(self._get_task_fallback_urls(task, primary_url=url))
+            fallback_urls = tuple(_task_fallback_urls_list(task, primary_url=url))
             source_page = self._get_task_source_page(task)
             entries_append(
                 {
                     "url": url,
                     "name": name,
                     "is_mp3": is_mp3,
+                    "resume_requested": _task_resume_requested(task),
                     "source_site": source_site or None,
                     "fallback_urls": list(fallback_urls),
                     "source_page": source_page,
@@ -5764,7 +5808,7 @@ class DownloadManagerApp:
                     "page_refresh_candidates": list(_task_gimy_page_refresh_candidates(task)),
                 }
             )
-            signature_append((url, name, is_mp3, source_site, fallback_urls, source_page, _task_resolved_url(task), _task_resolved_url_saved_at(task), tuple(_task_gimy_page_refresh_candidates(task))))
+            signature_append((url, name, is_mp3, _task_resume_requested(task), source_site, fallback_urls, source_page, _task_resolved_url(task), _task_resolved_url_saved_at(task), tuple(_task_gimy_page_refresh_candidates(task))))
         return entries, tuple(signature_parts)
 
     def _mark_existing_file_complete(self, item_id, message):
@@ -5774,6 +5818,66 @@ class DownloadManagerApp:
         self._set_task_status_mode_ui(item_id, self._finished_status_text(), message, complete_progress=True)
         if task:
             self._finalize_completed_task(task, clear_resume_requested=True)
+
+    def _has_resume_artifact_state(self, task, save_dir=None, is_mp3=None):
+        if not task:
+            return False
+        if _task_resume_requested(task):
+            return True
+        if _task_state_value(task) in PAUSED_TASK_STATES:
+            return True
+        explicit_output_path = str(_task_field_value(task, "filename", "") or "").strip()
+        explicit_temp_path = str(_task_field_value(task, "temp_filename", "") or "").strip()
+        if explicit_temp_path:
+            temp_root, temp_ext = os.path.splitext(explicit_temp_path)
+            candidate_paths = [explicit_temp_path, f"{explicit_temp_path}.resume", f"{explicit_temp_path}.merged", f"{explicit_temp_path}.progress.json"]
+            if temp_ext:
+                candidate_paths.extend([f"{temp_root}.resume{temp_ext}", f"{temp_root}.merged{temp_ext}", f"{temp_root}.part.progress.json"])
+            if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths):
+                return True
+            progress_info = self._load_resume_progress_info(f"{explicit_temp_path}.progress.json")
+            if max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0 or max(int(progress_info.get("bytes", 0) or 0), 0) > 0:
+                return True
+        if explicit_output_path:
+            path = explicit_output_path
+            root, ext = os.path.splitext(path)
+            candidate_paths = [f"{path}.resume", f"{path}.merged", f"{path}.progress.json"]
+            if ext:
+                candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}", f"{root}.part.progress.json", f"{root}.progress.json"])
+            if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths):
+                return True
+            progress_info = self._load_resume_progress_info(f"{path}.progress.json")
+            if max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0 or max(int(progress_info.get("bytes", 0) or 0), 0) > 0:
+                return True
+        effective_is_mp3 = _task_is_mp3_enabled(task) if is_mp3 is None else bool(is_mp3)
+        effective_save_dir = save_dir or self.save_dir_var.get()
+        source_url = _task_resolved_url(task) or _task_url_value(task) or self._get_task_source_page(task)
+        if not source_url or not effective_save_dir:
+            return False
+        ext = "mp3" if effective_is_mp3 else "mp4"
+        try:
+            temp_out_path, _, _ = self._resolve_resume_artifact_base(
+                task,
+                source_url,
+                ext=ext,
+                save_dir=effective_save_dir,
+                fallback_name="Audio" if effective_is_mp3 else "Video",
+            )
+        except Exception:
+            return False
+        temp_root, temp_ext = os.path.splitext(temp_out_path)
+        candidate_paths = (
+            temp_out_path,
+            f"{temp_root}.resume{temp_ext}",
+            f"{temp_root}.merged{temp_ext}",
+        )
+        if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths):
+            return True
+        progress_info = self._load_resume_progress_info(temp_out_path + ".progress.json")
+        return (
+            max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0
+            or max(int(progress_info.get("bytes", 0) or 0), 0) > 0
+        )
 
     def _can_accept_existing_output(self, task, item_id, output_path, temp=False):
         if not self._has_nonempty_file(output_path):
@@ -5792,7 +5896,7 @@ class DownloadManagerApp:
         return True
 
     def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None):
-        if self._get_task_source_site(task) not in ("gimy", "movieffm", "missav", "njavtv"):
+        if self._get_task_source_site(task) not in ("gimy", "movieffm", "missav", "njavtv", "xiaoyakankan"):
             return False
         if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
             return False
@@ -5836,7 +5940,7 @@ class DownloadManagerApp:
 
     def _complete_if_output_exists(self, item_id):
         task = self.tasks.get(item_id, {})
-        if _task_resume_requested(task):
+        if self._has_resume_artifact_state(task):
             return False
         explicit_output = _task_output_path_value(task)
         if self._can_accept_existing_output(task, item_id, explicit_output):
@@ -7288,6 +7392,10 @@ class DownloadManagerApp:
     def _set_task_named_column_text(self, item_id, column, value):
         self.update_tree(item_id, column, value, force=True)
 
+    def _set_task_row_columns(self, item_id, updates):
+        if updates:
+            self.update_tree_many(item_id, updates, force=True)
+
     def _update_task_size_from_file(self, item_id, filename):
         if filename and os.path.exists(filename):
             try:
@@ -7300,14 +7408,17 @@ class DownloadManagerApp:
         remove_from_state(_task_url_value(task))
 
     def _set_task_status_mode_ui(self, item_id, status_text, message=None, complete_progress=False, clear_metrics=False):
+        updates = {}
         if complete_progress:
-            self._set_task_named_column_text(item_id, "progress", "100%")
+            updates["progress"] = "100%"
         task = self.tasks.get(item_id)
         if task is not None:
             _set_task_aux_fields(task, _last_status_text=str(status_text))
-        self._set_task_named_column_text(item_id, "status", status_text)
+        updates["status"] = status_text
         if message is not None:
-            self._set_task_named_column_text(item_id, "speed_eta", message)
+            updates["speed_eta"] = message
+        if updates:
+            self._set_task_row_columns(item_id, updates)
         if clear_metrics:
             self._set_task_metrics_unknown_ui(item_id)
 
@@ -7376,24 +7487,27 @@ class DownloadManagerApp:
         self._schedule_error(self._format_site_parse_error(error, limit=limit))
 
     def _set_task_metrics_unknown_ui(self, item_id):
-        self._set_task_named_column_text(item_id, "progress", "--")
-        self._set_task_named_column_text(item_id, "size", "-")
-        self._set_task_named_column_text(item_id, "speed_eta", "-")
+        self._set_task_row_columns(item_id, {"progress": "--", "size": "-", "speed_eta": "-"})
 
     def _set_task_active_transfer_ui(self, task, item_id, downloaded_bytes, total_bytes=None, speed_bps=None, eta_seconds=None, cap_at_99=False):
         _set_task_aux_fields(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
         _set_task_last_speed_bps(task, speed_bps)
-        self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded_bytes, total_bytes))
+        updates = {
+            "size": format_transfer_size(downloaded_bytes, total_bytes),
+        }
         percent = format_progress_percent(downloaded_bytes, total_bytes, cap_at_99=cap_at_99) if total_bytes else None
         if percent is not None:
-            self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
+            updates["progress"] = f"{percent:.1f}%"
         speed_text = format_transfer_rate(speed_bps) if speed_bps else "-"
         if eta_seconds not in (None, ""):
             speed_text = f"{speed_text} | {format_eta(float(eta_seconds))}"
-        self._set_task_named_column_text(item_id, "speed_eta", speed_text)
+        updates["speed_eta"] = speed_text
         status_text = self._downloading_status_text()
         if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
-            self._set_task_status_mode_ui(item_id, self._downloading_status_text())
+            if task is not None:
+                _set_task_aux_fields(task, _last_status_text=str(status_text))
+            updates["status"] = status_text
+        self._set_task_row_columns(item_id, updates)
 
     def _effective_domain_download_limit(self):
         active_tasks = []
@@ -7668,7 +7782,7 @@ class DownloadManagerApp:
     def _download_http_media(self, item_id, url, out_path, headers=None, session=None):
         headers = dict(headers or {})
         task = self.tasks.get(item_id, {})
-        self._cache_task_resolved_link(task, url, fallback_urls=self._get_task_fallback_urls(task, primary_url=url))
+        self._cache_task_resolved_link(task, url, fallback_urls=_task_fallback_urls_list(task, primary_url=url))
         pause_note = self._disk_full_pause_text()
         if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=pause_note):
             return
@@ -7805,18 +7919,16 @@ class DownloadManagerApp:
                         last_update_time = now
                         last_update_bytes = downloaded
                         _set_task_last_speed_bps(task, speed_bps)
-                        percent = format_progress_percent(downloaded, total_size, cap_at_99=True)
-                        if percent is not None:
-                            self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
-                        if total_size > 0:
-                            if total_size and total_size > 0:
-                                _set_task_aux_fields(task, downloaded_bytes=downloaded, total_bytes=total_size)
-                                self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded, total_size))
-                            eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0)
-                            self._set_task_named_column_text(item_id, "speed_eta", f"{format_transfer_rate(speed_bps) if speed_bps else '-'} | {format_eta(float(eta))}")
-                        else:
-                            self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded))
-                            self._set_task_named_column_text(item_id, "speed_eta", format_transfer_rate(speed_bps) if speed_bps else "-")
+                        eta = max((total_size - downloaded) / max(speed_bps, 1.0), 0.0) if total_size > 0 else None
+                        self._set_task_active_transfer_ui(
+                            task,
+                            item_id,
+                            downloaded,
+                            total_bytes=(total_size if total_size > 0 else None),
+                            speed_bps=speed_bps,
+                            eta_seconds=eta,
+                            cap_at_99=True,
+                        )
             if res is not None:
                 try:
                     res.close()
@@ -7877,15 +7989,16 @@ class DownloadManagerApp:
                         elapsed = max(now - start_time, 0.001)
                         speed_bps = max((multi_downloaded - resume_bytes) / elapsed, 0.0)
                         _set_task_last_speed_bps(task, speed_bps)
-                        percent = format_progress_percent(multi_downloaded, total_size, cap_at_99=True)
-                        if percent is not None:
-                            self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
-                            task = self.tasks.get(item_id, {})
-                            if total_size and total_size > 0:
-                                _set_task_aux_fields(task, downloaded_bytes=multi_downloaded, total_bytes=total_size)
-                                self._set_task_named_column_text(item_id, "size", format_transfer_size(multi_downloaded, total_size))
-                            eta = max((total_size - multi_downloaded) / max(speed_bps, 1.0), 0.0)
-                            self._set_task_named_column_text(item_id, "speed_eta", f"{format_transfer_rate(speed_bps) if speed_bps else '-'} | {format_eta(float(eta))}")
+                        eta = max((total_size - multi_downloaded) / max(speed_bps, 1.0), 0.0)
+                        self._set_task_active_transfer_ui(
+                            task,
+                            item_id,
+                            multi_downloaded,
+                            total_bytes=total_size,
+                            speed_bps=speed_bps,
+                            eta_seconds=eta,
+                            cap_at_99=True,
+                        )
                         time.sleep(0.5)
                 finally:
                     if executor is not None:
@@ -7938,7 +8051,7 @@ class DownloadManagerApp:
         self._cache_task_resolved_link(
             task,
             url,
-            fallback_urls=self._get_task_fallback_urls(task, primary_url=url),
+            fallback_urls=_task_fallback_urls_list(task, primary_url=url),
             page_refresh_candidates=_task_gimy_page_refresh_candidates(task) if self._get_task_source_site(task) == "gimy" else None,
         )
         native_options = _native_hls_download_options(task)
@@ -8115,7 +8228,7 @@ class DownloadManagerApp:
             raise FileNotFoundError("ffmpeg.exe was not found in the application directory")
         ffmpeg_version = _get_ffmpeg_version_summary(ffmpeg_path)
 
-        raw_fallback_urls = self._get_task_fallback_urls(task, primary_url=url)
+        raw_fallback_urls = _task_fallback_urls_list(task, primary_url=url)
         direct_fallback_urls = [candidate for candidate in raw_fallback_urls if _looks_like_direct_media_url(candidate)]
         page_refresh_candidates = _task_gimy_page_refresh_candidates(task) if source_site == "gimy" else [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls]
         gimy_failed_stream_urls = _task_gimy_failed_stream_urls(task) if source_site == "gimy" else []
@@ -8553,6 +8666,8 @@ class DownloadManagerApp:
             last_ui_update = 0.0
             last_io_poll = 0.0
             last_progress_ui_bytes = -1
+            last_checkpoint_at = 0.0
+            last_checkpoint_bytes = -1
             cached_active_output_bytes = 0
             invalidated_total_bytes = False
             near_complete_since = None
@@ -8598,10 +8713,6 @@ class DownloadManagerApp:
                         _set_task_state_fields(self.tasks[item_id], "DELETED")
                         self._discard_task(item_id)
                         return
-                    try:
-                        poll_active_output_bytes()
-                    except StopDownloadException:
-                        return
                     line = raw_line.strip()
                     if not line:
                         continue
@@ -8617,11 +8728,25 @@ class DownloadManagerApp:
                         total_done_seconds = max(resume_anchor_seconds, resume_anchor_seconds + effective_resumed_seconds)
                         now = time.time()
                         active_total_bytes = None if invalidated_total_bytes else (total_bytes_box.get("value") or total_bytes)
+                        ui_time_due = (
+                            progress.get("progress") == "end"
+                            or last_progress_ui_bytes < 0
+                            or (now - last_ui_update) >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS
+                        )
+                        checkpoint_due = (
+                            progress.get("progress") == "end"
+                            or last_checkpoint_bytes < 0
+                            or (now - last_checkpoint_at) >= FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS
+                        )
+                        should_poll_bytes = ui_time_due or checkpoint_due
                         try:
-                            active_output_bytes = poll_active_output_bytes(
-                                now=now,
-                                force=(progress.get("progress") == "end"),
-                            )
+                            if should_poll_bytes:
+                                active_output_bytes = poll_active_output_bytes(
+                                    now=now,
+                                    force=(progress.get("progress") == "end"),
+                                )
+                            else:
+                                active_output_bytes = cached_active_output_bytes
                         except StopDownloadException:
                             return
                         resumed_bytes = active_output_bytes
@@ -8630,9 +8755,9 @@ class DownloadManagerApp:
                         current_bytes = base_bytes + resumed_bytes
                         should_refresh_progress_ui = (
                             progress.get("progress") == "end"
+                            or ui_time_due
                             or last_progress_ui_bytes < 0
                             or abs(current_bytes - last_progress_ui_bytes) >= FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA
-                            or (now - last_ui_update) >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS
                         )
                         if active_total_bytes and active_total_bytes > 0 and progress.get("progress") != "end":
                             if self._should_invalidate_m3u8_total_bytes(current_bytes, active_total_bytes):
@@ -8685,20 +8810,23 @@ class DownloadManagerApp:
                                 else:
                                     near_complete_since = None
                             if active_total_bytes and active_total_bytes > 0 and should_refresh_progress_ui:
-                                self._set_task_named_column_text(item_id, "size", format_transfer_size(current_bytes, active_total_bytes))
+                                row_updates = {"size": format_transfer_size(current_bytes, active_total_bytes)}
+                            else:
+                                row_updates = {}
                             if duration_percent is None:
                                 progress_percent = percent
                         else:
+                            row_updates = {}
                             near_complete_since = None
                             if duration_percent is None and should_refresh_progress_ui:
-                                self._set_task_named_column_text(item_id, "progress", "--")
+                                row_updates["progress"] = "--"
                         if duration_percent is not None:
                             progress_percent = duration_percent
                         if progress_percent is not None and should_refresh_progress_ui:
-                            self._set_task_named_column_text(item_id, "progress", f"{progress_percent:.1f}%")
+                            row_updates["progress"] = f"{progress_percent:.1f}%"
                         if not (active_total_bytes and active_total_bytes > 0) and current_bytes > 0:
                             if should_refresh_progress_ui:
-                                self._set_task_named_column_text(item_id, "size", format_transfer_size(current_bytes))
+                                row_updates["size"] = format_transfer_size(current_bytes)
                         if now - last_ui_update >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS:
                             instant_bps = 0.0
                             if active_output_bytes > 0 and out_ms > 0:
@@ -8710,27 +8838,37 @@ class DownloadManagerApp:
                             elif total_duration > 0 and instant_bps > 0:
                                 eta_seconds = max(total_duration - total_done_seconds, 0.0)
                             if instant_bps > 0 and eta_seconds is not None:
-                                self._set_task_named_column_text(item_id, "speed_eta", f"{format_transfer_rate(instant_bps) if instant_bps else '-'} | {format_eta(float(eta_seconds))}")
+                                row_updates["speed_eta"] = f"{format_transfer_rate(instant_bps) if instant_bps else '-'} | {format_eta(float(eta_seconds))}"
                             elif instant_bps > 0:
-                                self._set_task_named_column_text(item_id, "speed_eta", format_transfer_rate(instant_bps) if instant_bps else "-")
+                                row_updates["speed_eta"] = format_transfer_rate(instant_bps) if instant_bps else "-"
                             last_ui_update = now
+                        if row_updates:
+                            self._set_task_row_columns(item_id, row_updates)
                         if should_refresh_progress_ui:
                             last_progress_ui_bytes = current_bytes
-                        checkpoint_seconds = self._get_resume_checkpoint_seconds(
-                            active_output_path,
-                            total_done_seconds,
-                            total_duration=total_duration,
-                            base_offset_seconds=(resume_seek_seconds if resume_anchor_seconds > 0 else 0.0),
-                            trim_initial_seconds=(resume_overlap_seconds if resume_anchor_seconds > 0 else 0.0),
-                        )
-                        self._save_resume_progress(
-                            progress_path,
-                            checkpoint_seconds,
-                            source_url=resume_key,
-                            bytes_done=current_bytes,
-                            min_interval_seconds=FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
-                            min_bytes_delta=FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA,
-                        )
+                        if (
+                            progress.get("progress") == "end"
+                            or checkpoint_due
+                            or last_checkpoint_bytes < 0
+                            or abs(current_bytes - last_checkpoint_bytes) >= FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA
+                        ):
+                            checkpoint_seconds = self._get_resume_checkpoint_seconds(
+                                active_output_path,
+                                total_done_seconds,
+                                total_duration=total_duration,
+                                base_offset_seconds=(resume_seek_seconds if resume_anchor_seconds > 0 else 0.0),
+                                trim_initial_seconds=(resume_overlap_seconds if resume_anchor_seconds > 0 else 0.0),
+                            )
+                            self._save_resume_progress(
+                                progress_path,
+                                checkpoint_seconds,
+                                source_url=resume_key,
+                                bytes_done=current_bytes,
+                                min_interval_seconds=FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
+                                min_bytes_delta=FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA,
+                            )
+                            last_checkpoint_at = now
+                            last_checkpoint_bytes = current_bytes
                     if progress.get("progress") == "end":
                         break
                 return_code = proc.wait()
@@ -8982,7 +9120,13 @@ class DownloadManagerApp:
                 existing_item_id=item_id,
                 is_mp3=is_mp3,
                 source_site=source_site,
-                extra_task_data=self._build_extra_task_data_from_task(task),
+                extra_task_data=self._build_extra_task_data(
+                    source_page=self._get_task_source_page(task),
+                    fallback_urls=_task_fallback_urls_list(task),
+                    resolved_url=_task_resolved_url(task),
+                    resolved_url_saved_at=_task_resolved_url_saved_at(task),
+                    page_refresh_candidates=_task_gimy_page_refresh_candidates(task),
+                ),
             )
 
     def delete_selected(self):
@@ -9509,20 +9653,16 @@ class DownloadManagerApp:
             if status != "downloading":
                 return
             _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
-            _set_task_aux_fields(task, downloaded_bytes=downloaded, total_bytes=total)
-            self._set_task_named_column_text(item_id, "size", format_transfer_size(downloaded, total))
-            percent = format_progress_percent(downloaded, total) if total else None
-            if percent is not None:
-                self._set_task_named_column_text(item_id, "progress", f"{percent:.1f}%")
             speed = _event_speed(d)
             eta = _event_eta(d)
-            speed_text = format_transfer_rate(speed) if speed else "-"
-            if eta not in (None, ""):
-                speed_text = f"{speed_text} | {format_eta(float(eta))}"
-            self._set_task_named_column_text(item_id, "speed_eta", speed_text)
-            status_text = self._downloading_status_text()
-            if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
-                self._set_task_status_mode_ui(item_id, self._downloading_status_text())
+            self._set_task_active_transfer_ui(
+                task,
+                item_id,
+                downloaded,
+                total_bytes=total,
+                speed_bps=speed,
+                eta_seconds=eta,
+            )
 
         ydl_opts = {
             "color": "never",
@@ -10041,7 +10181,7 @@ class DownloadManagerApp:
                 if not m3u8_url:
                     raise Exception("Failed to extract xiaoyakankan m3u8")
                 _set_task_identity(source_site="xiaoyakankan", fallback_urls=[u for u in fallback_urls if u], source_page=url)
-                task_fallback_urls = self._get_task_fallback_urls(task)
+                task_fallback_urls = _task_fallback_urls_list(task)
                 write_error_log("xiaoyakankan parse success", Exception("xiaoyakankan parse success"), url=url, item_id=item_id, stream_url=m3u8_url, fallback_count=len(task_fallback_urls))
                 self._log_m3u8_route_selected(task, item_id, m3u8_url, source_site="xiaoyakankan", fallback_urls=task_fallback_urls)
                 self._download_m3u8_with_ffmpeg(item_id, m3u8_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
@@ -10713,7 +10853,7 @@ class DownloadManagerApp:
                 page_refresh_candidates = _task_gimy_page_refresh_candidates(task)
                 fallback_episode_candidates = [
                     candidate
-                    for candidate in self._get_task_fallback_urls(task, primary_url=url)
+                    for candidate in _task_fallback_urls_list(task, primary_url=url)
                     if _is_gimy_episode_page_url(candidate)
                 ]
                 next_episode_candidates = _filter_gimy_untried_page_candidates(
