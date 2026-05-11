@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260511-2670"
+APP_BUILD = "20260511-2680"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1008,19 +1008,11 @@ def _task_in_states(task, *states):
     return _task_state_value(task) in states
 
 
-def _task_last_status_text(task, default=""):
-    return str(_task_field_value(task, "_last_status_text", default) or default)
-
-
 def _task_last_speed_bps(task, default=0.0):
     try:
         return max(float(_task_field_value(task, "_last_speed_bps", default) or 0.0), 0.0)
     except Exception:
         return max(float(default or 0.0), 0.0)
-
-
-def _task_stop_reason_value(task, default=None):
-    return _task_field_value(task, "_stop_reason", default)
 
 
 def _task_process_handle(task, default=None):
@@ -4791,7 +4783,7 @@ class DownloadManagerApp:
     def _final_add_download(self, url, is_mp3, custom_name=None, source_site=None, extra_task_data=None):
         url = _normalize_download_url(url)
         if self._count_live_tasks() >= MAX_QUEUE_TASKS:
-            self._show_warning(self._queue_limit_reached_text())
+            self._show_warning(f"Queue limit reached ({MAX_QUEUE_TASKS}).")
             self._clear_url_entry()
             return
         existing_item_id = self._find_existing_task_id(url, is_mp3)
@@ -4824,7 +4816,7 @@ class DownloadManagerApp:
             return []
         episodes = _sort_download_targets_naturally(episodes)
         default_target = selected_episode if selected_episode in episodes else episodes[0]
-        if len(episodes) > 1 and self._ask_warning_yesno(self._playlist_add_all_text(len(episodes))):
+        if len(episodes) > 1 and self._ask_warning_yesno(t("msg_playlist_add_all", count=len(episodes))):
             return episodes
         return [default_target]
 
@@ -5152,7 +5144,7 @@ class DownloadManagerApp:
         extra_task_data = extra_task_data or {}
         item_id = existing_item_id
         if item_id is None:
-            queued_status = self._queued_status_text()
+            queued_status = t("status_queued") if "status_queued" in I18N_DICT.get(CURRENT_LANG, {}) else "排隊中"
             item_id = self.tree.insert("", tk.END, values=(short_name, "0.0%", "-", "-", queued_status))
             self._apply_row_status_style(item_id, queued_status)
 
@@ -5191,7 +5183,7 @@ class DownloadManagerApp:
 
             self._start_daemon_thread(fetch_title)
         else:
-            self._set_task_status_mode_ui(item_id, self._queued_status_text(), clear_metrics=True)
+            self._set_task_status_mode_ui(item_id, t("status_queued") if "status_queued" in I18N_DICT.get(CURRENT_LANG, {}) else "排隊中", clear_metrics=True)
             if source_site is None:
                 source_site = _task_source_site_name(self.tasks.get(item_id, {}))
         task_data = {
@@ -5366,7 +5358,7 @@ class DownloadManagerApp:
             return
         filename = _task_output_path_value(task)
         self._update_task_size_from_file(item_id, filename)
-        self._set_task_status_mode_ui(item_id, self._finished_status_text(), complete_progress=True)
+        self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", complete_progress=True)
         self._finalize_completed_task(task)
 
     def _discard_task(self, item_id):
@@ -5390,7 +5382,7 @@ class DownloadManagerApp:
             self._discard_task(item_id)
             return
         if state == "PAUSE_REQUESTED":
-            self._set_task_status_mode_ui(item_id, self._paused_status_text())
+            self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
             _set_task_stop_fields(task, "PAUSED", stop_reason=None)
             return
 
@@ -5415,29 +5407,8 @@ class DownloadManagerApp:
                 counts["ERROR"] += 1
         return counts
 
-    def _downloading_status_text(self):
-        return t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中"
-
-    def _queued_status_text(self):
-        return t("status_queued") if "status_queued" in I18N_DICT.get(CURRENT_LANG, {}) else "排隊中"
-
-    def _paused_status_text(self):
-        return t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停"
-
-    def _finished_status_text(self):
-        return t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成"
-
-    def _error_status_text(self):
-        return t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤"
-
-    def _dialog_title_text(self, key, fallback):
-        return _dialog_title_text_fallback(key, fallback)
-
-    def _warning_title_text(self):
-        return self._dialog_title_text("msg_warning", "警告")
-
     def _show_warning(self, message, parent=None):
-        messagebox.showwarning(self._warning_title_text(), message, parent=parent)
+        messagebox.showwarning(_dialog_title_text_fallback("msg_warning", "警告"), message, parent=parent)
 
     def _schedule_warning(self, message, parent=None):
         self._schedule_ui_call(lambda msg=message, target=parent: self._show_warning(msg, parent=target))
@@ -5447,22 +5418,13 @@ class DownloadManagerApp:
         self._schedule_ui_call(lambda _item_id=item_id: (self._discard_task(_item_id), self._delete_tree_item(_item_id)))
 
     def _ask_warning_yesno(self, message, parent=None):
-        return messagebox.askyesno(self._warning_title_text(), message, parent=parent)
-
-    def _error_title_text(self):
-        return self._dialog_title_text("msg_error", "錯誤")
+        return messagebox.askyesno(_dialog_title_text_fallback("msg_warning", "警告"), message, parent=parent)
 
     def _show_error(self, message, parent=None):
-        messagebox.showerror(self._error_title_text(), message, parent=parent)
+        messagebox.showerror(_dialog_title_text_fallback("msg_error", "錯誤"), message, parent=parent)
 
     def _schedule_error(self, message, parent=None):
         self._schedule_ui_call(lambda msg=message, target=parent: self._show_error(msg, parent=target))
-
-    def _queue_limit_reached_text(self):
-        return f"Queue limit reached ({MAX_QUEUE_TASKS})."
-
-    def _playlist_add_all_text(self, count):
-        return t("msg_playlist_add_all", count=count)
 
     def _clear_url_entry(self):
         self.url_entry.delete(0, tk.END)
@@ -5721,7 +5683,7 @@ class DownloadManagerApp:
             media_url,
             reason=reason,
             state=_task_state_value(task),
-            stop_reason=_task_stop_reason_value(task),
+            stop_reason=_task_field_value(task, "_stop_reason", None),
             **extra,
         )
         try:
@@ -5793,7 +5755,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         filename = _task_output_path_value(task) if task else ""
         self._update_task_size_from_file(item_id, filename)
-        self._set_task_status_mode_ui(item_id, self._finished_status_text(), message, complete_progress=True)
+        self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", message, complete_progress=True)
         if task:
             self._finalize_completed_task(task, clear_resume_requested=True)
 
@@ -7256,7 +7218,7 @@ class DownloadManagerApp:
                 if self._is_pause_requested_state(state):
                     self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, url, "pause_requested")
                     _set_task_state_fields(self.tasks[item_id], "PAUSED")
-                    self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                    self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
                     return
                 if self._is_delete_requested_state(state):
                     self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, url, "delete_requested")
@@ -7320,7 +7282,7 @@ class DownloadManagerApp:
             return True
         _set_task_state_fields(task, "PAUSED", disk_full_pause=True)
         message = note or self._disk_full_pause_text()
-        self._set_task_status_mode_ui(item_id, self._paused_status_text(), message)
+        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停", message)
         write_error_log(
             "disk full auto pause",
             Exception("disk space low"),
@@ -7373,7 +7335,7 @@ class DownloadManagerApp:
             self._show_warning(warning_body, parent=self.root)
         except Exception:
             pass
-        self._set_task_status_mode_ui(item_id, self._paused_status_text(), self._disk_full_pause_text())
+        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停", self._disk_full_pause_text())
         _set_task_state_fields(task, "PAUSED", disk_full_pause=True)
         return False
 
@@ -7454,8 +7416,8 @@ class DownloadManagerApp:
         if eta_seconds not in (None, ""):
             speed_text = f"{speed_text} | {format_eta(float(eta_seconds))}"
         updates["speed_eta"] = speed_text
-        status_text = self._downloading_status_text()
-        if _task_last_status_text(self.tasks.get(item_id, {})) != status_text:
+        status_text = t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中"
+        if str(_task_field_value(self.tasks.get(item_id, {}), "_last_status_text", "") or "") != status_text:
             if task is not None:
                 _set_task_aux_fields(task, _last_status_text=str(status_text))
             updates["status"] = status_text
@@ -7568,7 +7530,7 @@ class DownloadManagerApp:
                     except Exception:
                         pass
                     _set_task_state_fields(self.tasks[item_id], "PAUSED")
-                    self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                    self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
                     self._log_mega_event(
                         "mega cmd terminate requested",
                         "mega cmd terminate requested",
@@ -7687,7 +7649,7 @@ class DownloadManagerApp:
                 self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
                 return
 
-        self._set_task_status_mode_ui(item_id, self._downloading_status_text(), "MEGA 下載中")
+        self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", "MEGA 下載中")
         mega_get_cmd = _find_megacmd_get_command()
         if mega_get_cmd:
             self._download_mega_with_megacmd(item_id, url, save_dir, output_path=source_out_path or out_path or None, total_size=total_size)
@@ -7835,7 +7797,7 @@ class DownloadManagerApp:
                     state = _task_state_value(self.tasks.get(item_id, {}))
                     if state == "PAUSE_REQUESTED":
                         _set_task_state_fields(self.tasks[item_id], "PAUSED")
-                        self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
                         try:
                             if res is not None:
                                 res.close()
@@ -7941,7 +7903,7 @@ class DownloadManagerApp:
                                 future.cancel()
                             if current_task_state == "PAUSE_REQUESTED":
                                 _set_task_state_fields(self.tasks[item_id], "PAUSED")
-                                self._set_task_named_column_text(item_id, "status", self._paused_status_text())
+                                self._set_task_named_column_text(item_id, "status", t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
                             return
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         required_bytes = max(total_size - multi_downloaded, 0) if total_size > 0 else None
@@ -8674,7 +8636,7 @@ class DownloadManagerApp:
                     if state == "PAUSE_REQUESTED":
                         self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, candidate_url, "pause_requested")
                         _set_task_state_fields(self.tasks[item_id], "PAUSED")
-                        self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
                         return
                     if state == "DELETE_REQUESTED":
                         self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, candidate_url, "delete_requested")
@@ -8950,7 +8912,7 @@ class DownloadManagerApp:
 
             current_task = self.tasks.get(item_id, {})
             current_state = _task_state_value(current_task)
-            stop_reason = _task_stop_reason_value(current_task)
+            stop_reason = _task_field_value(current_task, "_stop_reason", None)
             if return_code != 0 and (self._is_stop_requested_state(current_state) or stop_reason in STOP_REASONS):
                 if self._is_pause_requested_state(current_state) or stop_reason == STOP_REASON_PAUSE:
                     raise StopDownloadException("pause requested")
@@ -9046,7 +9008,7 @@ class DownloadManagerApp:
             state = _task_state_value(self.tasks.get(item_id, {}))
             if state == "DOWNLOADING" or self._is_pause_requested_state(state):
                 _set_task_stop_fields(self.tasks[item_id], "PAUSE_REQUESTED", stop_reason=STOP_REASON_PAUSE)
-                self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
                 proc = _task_process_handle(self.tasks[item_id])
                 if proc is not None:
                     try:
@@ -9055,7 +9017,7 @@ class DownloadManagerApp:
                         pass
             elif state == "QUEUED":
                 _set_task_state_fields(self.tasks[item_id], "PAUSED")
-                self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
                 self._schedule_process_queue()
         self.persist_unfinished_state(force=True)
 
@@ -9277,10 +9239,10 @@ class DownloadManagerApp:
             state = _task_state_value(task)
             if state == "DOWNLOADING":
                 _set_task_stop_fields(task, "PAUSE_REQUESTED", stop_reason=STOP_REASON_PAUSE, resume_requested=True)
-                self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
             elif state == "QUEUED":
                 _set_task_stop_fields(task, "PAUSED", stop_reason=None, resume_requested=True)
-                self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
 
     def _force_kill_child_processes(self):
         tracked_processes = list(self._iter_active_process_handles())
@@ -9408,7 +9370,7 @@ class DownloadManagerApp:
                 source_page_counts[source_page] = source_page_counts.get(source_page, 0) + 1
             if source_site:
                 source_site_counts[source_site] = source_site_counts.get(source_site, 0) + 1
-            self._set_task_status_mode_ui(item_id, self._downloading_status_text())
+            self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中")
             self._start_daemon_thread(
                 self.download_task,
                 _task_url_value(task),
@@ -9585,7 +9547,7 @@ class DownloadManagerApp:
             )
             self._set_task_status_mode_ui(
                 item_id,
-                self._error_status_text(),
+                t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤",
                 t("msg_download_error", error=str(exc)[:45]) if "msg_download_error" in I18N_DICT.get(CURRENT_LANG, {}) else summarize_error_message(exc, "err_net", 120),
             )
 
@@ -9897,7 +9859,7 @@ class DownloadManagerApp:
                 raw_title = html.unescape(title_m.group(1)).strip()
                 clean_title = raw_title.split(" - ")[0].strip() or short_name
             _set_task_identity(name=clean_title, source_site="jable")
-            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._ui_text("eta_found_stream", "已取得串流網址"))
+            self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, url, source_site="jable", fallback_urls=[])
             self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer="https://jable.tv/", origin="https://jable.tv")
             return
@@ -10740,7 +10702,7 @@ class DownloadManagerApp:
             )
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
-            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._ui_text("eta_found_stream", "已取得串流網址"))
+            self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
@@ -10879,7 +10841,7 @@ class DownloadManagerApp:
             _set_task_aux_fields(task, _gimy_page_refresh_candidates=[])
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
-            self._set_task_status_mode_ui(item_id, self._downloading_status_text(), self._ui_text("eta_found_stream", "已取得串流網址"))
+            self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
@@ -11313,7 +11275,7 @@ class DownloadManagerApp:
                 return
             if _task_in_states(task, *PAUSED_TASK_STATES):
                 return
-            self._set_task_status_mode_ui(item_id, self._error_status_text(), summarize_error_message(e, "err_net", 120))
+            self._set_task_status_mode_ui(item_id, t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤", summarize_error_message(e, "err_net", 120))
             _set_task_state_fields(task, "ERROR")
 
     def on_closing(self):
