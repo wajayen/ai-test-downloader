@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260511-2680"
+APP_BUILD = "20260511-2690"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1006,13 +1006,6 @@ def _task_state_value(task, default=""):
 
 def _task_in_states(task, *states):
     return _task_state_value(task) in states
-
-
-def _task_last_speed_bps(task, default=0.0):
-    try:
-        return max(float(_task_field_value(task, "_last_speed_bps", default) or 0.0), 0.0)
-    except Exception:
-        return max(float(default or 0.0), 0.0)
 
 
 def _task_process_handle(task, default=None):
@@ -3072,19 +3065,6 @@ def app_title_text():
     return f"{app_name_text()} v{app_version_text()}"
 
 
-def _dialog_title_text_fallback(key, fallback):
-    translated = t(key)
-    return translated if translated != key else fallback
-
-
-def _warning_title_text_fallback():
-    return _dialog_title_text_fallback("msg_warning", "警告")
-
-
-def _error_title_text_fallback():
-    return _dialog_title_text_fallback("msg_error", "錯誤")
-
-
 def unpack_packed_javascript(text):
     if not text:
         return None
@@ -4307,7 +4287,7 @@ class DownloadManagerApp:
 
                 self._schedule_ui_call(enqueue)
             except Exception as e:
-                self._schedule_site_parse_error(e)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(e)[:40]}")
 
         def fetch_hanime_playlist():
             try:
@@ -4336,7 +4316,7 @@ class DownloadManagerApp:
 
                 self._schedule_ui_call(ask)
             except Exception as e:
-                self._schedule_site_parse_error(e)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(e)[:40]}")
 
         def fetch_movieffm_drama():
             try:
@@ -4573,7 +4553,7 @@ class DownloadManagerApp:
                 self._schedule_ui_call(enqueue)
             except Exception as exc:
                 write_error_log("xiaoyakankan series parse failure", exc, url=new_url)
-                self._schedule_site_parse_error(exc, limit=120)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
 
         def fetch_nnyy_playlist():
             try:
@@ -4622,7 +4602,7 @@ class DownloadManagerApp:
                 self._schedule_ui_call(enqueue)
             except Exception as exc:
                 write_error_log("nnyy series parse failure", exc, url=new_url)
-                self._schedule_site_parse_error(exc, limit=120)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
 
         def fetch_777tv_playlist():
             try:
@@ -4663,7 +4643,7 @@ class DownloadManagerApp:
                 self._schedule_ui_call(enqueue)
             except Exception as exc:
                 write_error_log("777tv series parse failure", exc, url=new_url)
-                self._schedule_site_parse_error(exc, limit=120)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
 
         def fetch_3kor_list():
             try:
@@ -4696,7 +4676,7 @@ class DownloadManagerApp:
                 self._schedule_ui_call(enqueue)
             except Exception as exc:
                 write_error_log("3kor list parse failure", exc, url=new_url)
-                self._schedule_site_parse_error(exc, limit=120)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
 
         def fetch_3kor_detail():
             try:
@@ -4741,7 +4721,7 @@ class DownloadManagerApp:
                 self._schedule_ui_call(enqueue)
             except Exception as exc:
                 write_error_log("3kor detail parse failure", exc, url=new_url)
-                self._schedule_site_parse_error(exc, limit=120)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
 
         lowered = new_url.lower()
         if _is_anime1_category_url(new_url):
@@ -5408,7 +5388,7 @@ class DownloadManagerApp:
         return counts
 
     def _show_warning(self, message, parent=None):
-        messagebox.showwarning(_dialog_title_text_fallback("msg_warning", "警告"), message, parent=parent)
+        messagebox.showwarning(t("msg_warning") if t("msg_warning") != "msg_warning" else "警告", message, parent=parent)
 
     def _schedule_warning(self, message, parent=None):
         self._schedule_ui_call(lambda msg=message, target=parent: self._show_warning(msg, parent=target))
@@ -5418,10 +5398,10 @@ class DownloadManagerApp:
         self._schedule_ui_call(lambda _item_id=item_id: (self._discard_task(_item_id), self._delete_tree_item(_item_id)))
 
     def _ask_warning_yesno(self, message, parent=None):
-        return messagebox.askyesno(_dialog_title_text_fallback("msg_warning", "警告"), message, parent=parent)
+        return messagebox.askyesno(t("msg_warning") if t("msg_warning") != "msg_warning" else "警告", message, parent=parent)
 
     def _show_error(self, message, parent=None):
-        messagebox.showerror(_dialog_title_text_fallback("msg_error", "錯誤"), message, parent=parent)
+        messagebox.showerror(t("msg_error") if t("msg_error") != "msg_error" else "錯誤", message, parent=parent)
 
     def _schedule_error(self, message, parent=None):
         self._schedule_ui_call(lambda msg=message, target=parent: self._show_error(msg, parent=target))
@@ -5614,7 +5594,7 @@ class DownloadManagerApp:
         )
         write_error_log(
             "m3u8 route selected",
-            self._m3u8_route_exception(site),
+            Exception(f"route=ffmpeg site={site or 'unknown'}"),
             url=media_url,
             item_id=item_id,
             source_site=site or None,
@@ -5632,12 +5612,6 @@ class DownloadManagerApp:
         fields.update(extra)
         return fields
 
-    def _ffmpeg_event_exception(self, message):
-        return Exception(str(message))
-
-    def _m3u8_route_exception(self, site):
-        return self._ffmpeg_event_exception(f"route=ffmpeg site={site or 'unknown'}")
-
     def _log_ffmpeg_event(self, title, exc, task, item_id, media_url, **extra):
         write_error_log(
             title,
@@ -5653,7 +5627,7 @@ class DownloadManagerApp:
         total_bytes_box["value"] = None
         write_error_log(
             "m3u8 total bytes invalidated",
-            self._ffmpeg_event_exception(reason),
+            Exception(str(reason)),
             url=media_url,
             item_id=item_id,
             estimated_total_bytes=estimated_total_bytes,
@@ -5677,7 +5651,7 @@ class DownloadManagerApp:
     def _terminate_ffmpeg_process(self, task, item_id, proc, media_url, reason, **extra):
         self._log_ffmpeg_event(
             "ffmpeg terminate requested",
-            self._ffmpeg_event_exception(reason),
+            Exception(str(reason)),
             task,
             item_id,
             media_url,
@@ -6329,7 +6303,7 @@ class DownloadManagerApp:
     def _get_stable_resume_base(self, url, ext="mp4", resume_key=None):
         normalized_url = _normalize_download_url(resume_key or url) or str(resume_key or url)
         digest = hashlib.sha1(normalized_url.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        return os.path.join(self._get_system_temp_dir(), f"downloader_resume_{digest}.{ext}")
+        return os.path.join(tempfile.gettempdir(), f"downloader_resume_{digest}.{ext}")
 
     def _build_resume_output_identity_key(self, task, ext="mp4", save_dir=None, fallback_name="Video"):
         preferred_output = _task_output_path_value(task)
@@ -6391,14 +6365,6 @@ class DownloadManagerApp:
             if legacy_base != primary_base and self._has_resume_artifact_family(legacy_base):
                 return legacy_base, primary_key, resume_keys
         return primary_base, primary_key, resume_keys
-
-    def _get_system_temp_dir(self):
-        return tempfile.gettempdir()
-
-    def _get_temp_download_part_path(self, out_path, index):
-        normalized_out_path = os.path.abspath(str(out_path or "download"))
-        digest = hashlib.sha1(normalized_out_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        return os.path.join(self._get_system_temp_dir(), f"downloader_http_{digest}.part{index}")
 
     def _probe_media_duration_seconds(self, path):
         if not path or not os.path.exists(path):
@@ -7181,7 +7147,7 @@ class DownloadManagerApp:
         if referer or origin:
             headers_blob = f"Referer: {referer or ''}\r\nOrigin: {origin or ''}\r\nUser-Agent: {DEFAULT_USER_AGENT}\r\n"
 
-        temp_out_path = os.path.join(self._get_system_temp_dir(), f"{safe_name}_audio_tmp.mp3")
+        temp_out_path = os.path.join(tempfile.gettempdir(), f"{safe_name}_audio_tmp.mp3")
         cmd = [
             ffmpeg_path,
             "-y",
@@ -7226,7 +7192,7 @@ class DownloadManagerApp:
                     self._discard_task(item_id)
                     return
                 current_size = self._get_existing_file_size(temp_out_path)
-                if self._maybe_auto_pause_for_disk_space(item_id, temp_out_path, note=self._disk_full_pause_text()):
+                if self._maybe_auto_pause_for_disk_space(item_id, temp_out_path, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"):
                     self._terminate_ffmpeg_process(
                         self.tasks.get(item_id, {}),
                         item_id,
@@ -7281,7 +7247,7 @@ class DownloadManagerApp:
         if not task:
             return True
         _set_task_state_fields(task, "PAUSED", disk_full_pause=True)
-        message = note or self._disk_full_pause_text()
+        message = note or (t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
         self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停", message)
         write_error_log(
             "disk full auto pause",
@@ -7309,9 +7275,6 @@ class DownloadManagerApp:
             return self._pause_task_for_disk_full(item_id, target_path, free_bytes, None, note=note)
         return False
 
-    def _disk_full_pause_text(self):
-        return t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"
-
     def _check_resume_disk_space(self, item_id):
         task = self.tasks.get(item_id) or {}
         target_path = _task_output_path_value(task, default=self.save_dir_var.get() or _APP_DIR)
@@ -7335,7 +7298,7 @@ class DownloadManagerApp:
             self._show_warning(warning_body, parent=self.root)
         except Exception:
             pass
-        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停", self._disk_full_pause_text())
+        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停", t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
         _set_task_state_fields(task, "PAUSED", disk_full_pause=True)
         return False
 
@@ -7377,7 +7340,7 @@ class DownloadManagerApp:
 
     def _set_task_parse_ui(self, item_id, key=None, fallback="", message=None, error=None):
         if error is not None:
-            self._set_task_named_column_text(item_id, "speed_eta", self._format_site_parse_error(error))
+            self._set_task_named_column_text(item_id, "speed_eta", f"{self._ui_text('err_site_parse', '解析失敗')}: {str(error)[:40]}")
             return
         if message is not None:
             self._set_task_named_column_text(item_id, "speed_eta", message)
@@ -7393,15 +7356,6 @@ class DownloadManagerApp:
             source_site="mega",
             **fields,
         )
-
-    def _site_parse_error_prefix(self):
-        return self._ui_text("err_site_parse", "解析失敗")
-
-    def _format_site_parse_error(self, error, limit=40):
-        return f"{self._site_parse_error_prefix()}: {str(error)[:max(int(limit or 0), 0)]}"
-
-    def _schedule_site_parse_error(self, error, limit=80):
-        self._schedule_error(self._format_site_parse_error(error, limit=limit))
 
     def _set_task_active_transfer_ui(self, task, item_id, downloaded_bytes, total_bytes=None, speed_bps=None, eta_seconds=None, cap_at_99=False):
         _set_task_aux_fields(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
@@ -7433,7 +7387,10 @@ class DownloadManagerApp:
         if len(active_tasks) >= LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS:
             return LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS
         for task in active_tasks:
-            speed_bps = _task_last_speed_bps(task, 0.0)
+            try:
+                speed_bps = max(float(_task_field_value(task, "_last_speed_bps", 0.0) or 0.0), 0.0)
+            except Exception:
+                speed_bps = 0.0
             if speed_bps <= 0 or speed_bps >= LOW_SPEED_CONCURRENCY_THRESHOLD_BPS:
                 return MAX_DOWNLOADS_PER_DOMAIN
         return LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS
@@ -7453,7 +7410,7 @@ class DownloadManagerApp:
             if status == "downloading":
                 target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
                 required_bytes = max(int(total) - int(downloaded), 0) if total else None
-                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
+                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"):
                     raise StopDownloadException("disk space low")
             if status == "finished":
                 return
@@ -7712,7 +7669,7 @@ class DownloadManagerApp:
         headers = dict(headers or {})
         task = self.tasks.get(item_id, {})
         self._cache_task_resolved_link(task, url, fallback_urls=_task_fallback_urls_list(task, primary_url=url))
-        pause_note = self._disk_full_pause_text()
+        pause_note = t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"
         if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=pause_note):
             return
         if "User-Agent" not in headers:
@@ -7885,7 +7842,9 @@ class DownloadManagerApp:
                         if part_start > remaining_end:
                             break
                         part_end = remaining_end if index == part_count - 1 else min(remaining_end, part_start + part_size - 1)
-                        part_path = self._get_temp_download_part_path(out_path, index)
+                        normalized_out_path = os.path.abspath(str(out_path or "download"))
+                        digest = hashlib.sha1(normalized_out_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
+                        part_path = os.path.join(tempfile.gettempdir(), f"downloader_http_{digest}.part{index}")
                         part_paths.append(part_path)
                         box = {"bytes": 0}
                         progress_boxes.append(box)
@@ -7949,7 +7908,7 @@ class DownloadManagerApp:
                             pass
         except OSError as exc:
             if getattr(exc, "errno", None) == 28:
-                self._pause_task_for_disk_full(item_id, out_path, self._get_disk_free_bytes(out_path), None, note=self._disk_full_pause_text())
+                self._pause_task_for_disk_full(item_id, out_path, self._get_disk_free_bytes(out_path), None, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
                 return
             return
         except Exception:
@@ -7992,7 +7951,7 @@ class DownloadManagerApp:
 
         progress_hook = self._make_yt_dlp_progress_hook(task, item_id, save_dir)
 
-        native_work_dir = self._get_system_temp_dir()
+        native_work_dir = tempfile.gettempdir()
         ydl_opts = {
             "color": "never",
             "nopart": False,
@@ -8027,7 +7986,7 @@ class DownloadManagerApp:
             ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
         write_error_log(
             "yt-dlp native hls fallback started",
-            self._ffmpeg_event_exception("yt-dlp native hls fallback started"),
+            Exception("yt-dlp native hls fallback started"),
             url=url,
             item_id=item_id,
             source_site=_task_source_site_name(task) or None,
@@ -8100,7 +8059,7 @@ class DownloadManagerApp:
             self._mark_task_finished(item_id)
             write_error_log(
                 "yt-dlp native hls fallback finished",
-                self._ffmpeg_event_exception("yt-dlp native hls fallback finished"),
+                Exception("yt-dlp native hls fallback finished"),
                 url=url,
                 item_id=item_id,
                 source_site=_task_source_site_name(task) or None,
@@ -8111,7 +8070,7 @@ class DownloadManagerApp:
         if self._complete_if_output_exists(item_id):
             write_error_log(
                 "yt-dlp native hls fallback finished",
-                self._ffmpeg_event_exception("yt-dlp native hls fallback finished"),
+                Exception("yt-dlp native hls fallback finished"),
                 url=url,
                 item_id=item_id,
                 source_site=_task_source_site_name(task) or None,
@@ -8121,7 +8080,7 @@ class DownloadManagerApp:
             return
         write_error_log(
             "yt-dlp native hls fallback output missing",
-            self._ffmpeg_event_exception("yt-dlp native hls fallback output missing"),
+            Exception("yt-dlp native hls fallback output missing"),
             url=url,
             item_id=item_id,
             source_site=_task_source_site_name(task) or None,
@@ -8230,7 +8189,7 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在重建 Gimy 播放線...")
             write_error_log(
                 "gimy detail page rebuild",
-                self._ffmpeg_event_exception("rebuilding gimy episode sources from detail page"),
+                Exception("rebuilding gimy episode sources from detail page"),
                 item_id=item_id,
                 stream_url=url,
                 refresh_url=detail_refresh_url,
@@ -8326,7 +8285,7 @@ class DownloadManagerApp:
         if _should_prefer_native_hls(url, task) and not _native_fallback_done:
             write_error_log(
                 "preferred native hls route selected",
-                self._ffmpeg_event_exception("preferred native hls route selected"),
+                Exception("preferred native hls route selected"),
                 url=url,
                 item_id=item_id,
                 source_site=_task_source_site_name(task) or None,
@@ -8538,7 +8497,7 @@ class DownloadManagerApp:
             active_output_path = resume_out_path if resume_anchor_seconds > 0 else temp_out_path
             self._log_ffmpeg_event(
                 "ffmpeg download started",
-                self._ffmpeg_event_exception("ffmpeg started"),
+                Exception("ffmpeg started"),
                 task,
                 item_id,
                 candidate_url,
@@ -8615,7 +8574,7 @@ class DownloadManagerApp:
                 required_bytes = None
                 if active_total_bytes:
                     required_bytes = max(int(active_total_bytes) - int(base_bytes + cached_active_output_bytes), 0)
-                if self._maybe_auto_pause_for_disk_space(item_id, active_output_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
+                if self._maybe_auto_pause_for_disk_space(item_id, active_output_path, required_bytes=required_bytes, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"):
                     self._terminate_ffmpeg_process(
                         self.tasks.get(item_id, {}),
                         item_id,
@@ -8901,7 +8860,7 @@ class DownloadManagerApp:
                 self._mark_task_finished(item_id)
                 self._log_ffmpeg_event(
                     "ffmpeg download finished",
-                    self._ffmpeg_event_exception("ffmpeg finished"),
+                    Exception("ffmpeg finished"),
                     task,
                     item_id,
                     candidate_url,
@@ -8921,7 +8880,7 @@ class DownloadManagerApp:
             if return_code == 15 and _unexpected_retry_count < len(FFMPEG_UNEXPECTED_RETRY_DELAYS):
                 self._log_ffmpeg_event(
                     "ffmpeg unexpected termination retry",
-                    self._ffmpeg_event_exception("ffmpeg exited with code 15 without a stop request"),
+                    Exception("ffmpeg exited with code 15 without a stop request"),
                     current_task,
                     item_id,
                     candidate_url,
@@ -8952,7 +8911,7 @@ class DownloadManagerApp:
             if return_code == 15 and not _native_fallback_done and _task_source_site_name(current_task) == "gimy":
                 write_error_log(
                     "ffmpeg handoff to yt-dlp native",
-                    self._ffmpeg_event_exception("ffmpeg code 15 fallback to yt-dlp native"),
+                    Exception("ffmpeg code 15 fallback to yt-dlp native"),
                     url=candidate_url,
                     item_id=item_id,
                     source_site=_task_source_site_name(current_task) or None,
@@ -9384,7 +9343,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         if not task:
             return
-        sys_temp_dir = self._get_system_temp_dir()
+        sys_temp_dir = tempfile.gettempdir()
         filename = _task_output_path_value(task)
         if filename:
             base_name = os.path.splitext(os.path.basename(filename))[0]
@@ -9583,7 +9542,7 @@ class DownloadManagerApp:
             if status == "downloading":
                 target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
                 required_bytes = max(int(total) - int(downloaded), 0) if total else None
-                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_text()):
+                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"):
                     raise StopDownloadException("disk space low")
             if status == "finished":
                 return
@@ -9610,7 +9569,7 @@ class DownloadManagerApp:
             "file_access_retries": 3,
             "skip_unavailable_fragments": False,
             "concurrent_fragment_downloads": _generic_ytdlp_concurrent_fragments(task),
-            "paths": {"home": save_dir, "temp": self._get_system_temp_dir()},
+            "paths": {"home": save_dir, "temp": tempfile.gettempdir()},
             "outtmpl": {"default": "%(title)s.%(ext)s"},
             "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
             "merge_output_format": "mp4",
@@ -10548,7 +10507,7 @@ class DownloadManagerApp:
                     self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在重新取得 Gimy 串流...")
                     write_error_log(
                         "gimy episode page refresh",
-                        self._ffmpeg_event_exception("refreshing gimy episode page after parse-stage source mismatch"),
+                        Exception("refreshing gimy episode page after parse-stage source mismatch"),
                         item_id=item_id,
                         page_url=current_page_url or url,
                         refresh_url=refresh_url,
@@ -10578,7 +10537,7 @@ class DownloadManagerApp:
                         self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在重建 Gimy 播放線...")
                         write_error_log(
                             "gimy detail page rebuild",
-                            self._ffmpeg_event_exception("rebuilding gimy episode sources after parse-stage source mismatch"),
+                            Exception("rebuilding gimy episode sources after parse-stage source mismatch"),
                             item_id=item_id,
                             page_url=url,
                             refresh_url=detail_refresh_url,
@@ -10821,7 +10780,7 @@ class DownloadManagerApp:
                     self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在重新取得 Gimy 串流...")
                     write_error_log(
                         "gimy play page retry",
-                        self._ffmpeg_event_exception("retrying alternate gimy play page after stream URL missing"),
+                        Exception("retrying alternate gimy play page after stream URL missing"),
                         item_id=item_id,
                         page_url=url,
                         refresh_url=refresh_url,
@@ -11360,7 +11319,7 @@ def main():
             warning_root.withdraw()
             warning_root.attributes("-topmost", True)
             try:
-                messagebox.showwarning(_warning_title_text_fallback(), t("msg_already_running"), parent=warning_root)
+                messagebox.showwarning(t("msg_warning") if t("msg_warning") != "msg_warning" else "警告", t("msg_already_running"), parent=warning_root)
             finally:
                 warning_root.destroy()
             return
@@ -11402,7 +11361,7 @@ def main():
             fallback_root.withdraw()
             fallback_root.attributes("-topmost", True)
             try:
-                messagebox.showerror(_warning_title_text_fallback(), f"啟動失敗：{exc}", parent=fallback_root)
+                messagebox.showerror(t("msg_error") if t("msg_error") != "msg_error" else "錯誤", f"啟動失敗：{exc}", parent=fallback_root)
             finally:
                 fallback_root.destroy()
         except Exception:
