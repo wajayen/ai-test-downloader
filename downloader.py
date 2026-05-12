@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260512-2700"
+APP_BUILD = "20260512-2710"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -98,13 +98,18 @@ FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "gimy": 15.0,
+    "99itv": 15.0,
     "movieffm": 15.0,
 }
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 5
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
+    "99itv": 10,
     "gimy": 3,
     "missav": 8,
     "movieffm": 10,
+}
+YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
+    "99itv": False,
 }
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 6
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
@@ -890,16 +895,6 @@ def _task_name_text(task, fallback_name=""):
     return str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or fallback_name or "").strip()
 
 
-def _set_task_name_fields(task, name):
-    target = task if task is not None else {}
-    cleaned_name = str(name or "").strip()
-    if not cleaned_name:
-        return ""
-    target["short_name"] = cleaned_name
-    target["name"] = cleaned_name
-    return cleaned_name
-
-
 def _task_output_basename(task, fallback_name):
     name = _task_name_text(task, fallback_name=fallback_name)
     safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip()
@@ -938,23 +933,6 @@ def _task_display_name(task, fallback_url="", fallback_name="", default_is_mp3=F
     return str(fallback_name or "").strip()
 
 
-def _set_task_source_fields(task, source_site=None, source_page=None, fallback_urls=None, primary_url=None):
-    target = task if task is not None else {}
-    updates = {}
-    if source_site:
-        normalized_site = str(source_site).strip().lower()
-        target["source_site"] = normalized_site
-        updates["source_site"] = normalized_site
-    if source_page:
-        normalized_page = _normalize_download_url(source_page)
-        if normalized_page:
-            target["source_page"] = normalized_page
-            updates["source_page"] = normalized_page
-    if fallback_urls is not None:
-        normalized_urls = _dedupe_download_urls(fallback_urls, primary_url=primary_url)
-        target["fallback_urls"] = normalized_urls
-        updates["fallback_urls"] = normalized_urls
-    return updates
 
 
 def _set_task_state_fields(task, state=None, **fields):
@@ -1791,6 +1769,24 @@ def _extract_player_js_object(page_text, *var_names):
     return None
 
 
+def _decode_maccms_player_url(raw_url, encrypt_mode=0):
+    decoded_url = str(raw_url or "").strip()
+    if not decoded_url:
+        return ""
+    try:
+        encrypt_value = int(encrypt_mode or 0)
+    except (TypeError, ValueError):
+        encrypt_value = 0
+    try:
+        if encrypt_value == 1:
+            decoded_url = urllib.parse.unquote(decoded_url)
+        elif encrypt_value == 2:
+            decoded_url = urllib.parse.unquote(base64.b64decode(decoded_url).decode("utf-8", "ignore"))
+    except Exception:
+        pass
+    return _normalize_download_url(decoded_url)
+
+
 def _parse_js_object(blob):
     text = (blob or "").strip().rstrip(";")
     try:
@@ -2303,6 +2299,16 @@ def _trim_site_suffix_from_title(raw_title):
     return raw_title
 
 
+def _clean_99itv_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*-\s*99i影城.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*-99i影城.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*線上看\s*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/") or str(raw_title or "").strip()
+
+
 def _looks_like_placeholder_page_title(title_text, page_text=""):
     normalized_title = re.sub(r"\s+", " ", str(title_text or "")).strip().lower()
     normalized_page = str(page_text or "").lower()
@@ -2522,6 +2528,7 @@ def _is_supported_download_page_url(url):
         "missav",
         "avjoy",
         "hanime1.me",
+        "hanimeone.me",
         "anime1",
         "instagram.com",
         "facebook.com",
@@ -2801,6 +2808,8 @@ def _should_prefer_native_hls(url, task=None):
         # XiaoyaKankan frequently leaves partial-looking final mp4 artifacts when native HLS is interrupted.
         # Start directly on the ffmpeg path so resume uses stable sidecars instead of misclassified final files.
         return False
+    if source_site == "99itv":
+        return True
     if source_site == "missav":
         return True
     if any(marker in host for marker in ("qqqrst.com", "ppqrrs.com", "surrit.com")):
@@ -2826,6 +2835,7 @@ def _native_hls_download_options(task=None):
     return {
         "socket_timeout": _native_hls_socket_timeout(task),
         "concurrent_fragment_downloads": _native_hls_concurrent_fragments(task),
+        "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(_native_hls_source_site(task), True)),
     }
 
 
@@ -3229,44 +3239,6 @@ def install_ffmpeg_to_app_dir(progress_callback=None):
 
 
 _FFMPEG_VERSION_SUMMARY_CACHE = {}
-
-
-def _get_ffmpeg_version_summary(ffmpeg_path):
-    clean_path = str(ffmpeg_path or "").strip()
-    if not clean_path:
-        return ""
-    cached = _FFMPEG_VERSION_SUMMARY_CACHE.get(clean_path)
-    if cached is not None:
-        return cached
-    summary = ""
-    try:
-        startupinfo = None
-        creationflags = 0
-        if platform.system() == "Windows":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        proc = subprocess.run(
-            [clean_path, "-version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=15,
-            startupinfo=startupinfo,
-            creationflags=creationflags,
-        )
-        first_line = ""
-        for line in (proc.stdout or "").splitlines():
-            first_line = line.strip()
-            if first_line:
-                break
-        summary = first_line[:160]
-    except Exception:
-        summary = ""
-    _FFMPEG_VERSION_SUMMARY_CACHE[clean_path] = summary
-    return summary
 
 
 def _ffmpeg_command_preview(cmd):
@@ -4268,12 +4240,13 @@ class DownloadManagerApp:
                 list_id = (qs.get("list") or [""])[0]
                 if not list_id:
                     return
-                pl_url = "https://hanime1.me/playlist?list=" + list_id
+                playlist_base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'hanime1.me'}"
+                pl_url = urllib.parse.urljoin(playlist_base, "/playlist?list=" + list_id)
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(pl_url, impersonate="chrome110", timeout=15)
                 seen = set()
                 links = []
-                for match in re.finditer(r'href=[\"\'](https?://hanime1\.me/watch\?v=[^\"\']+)[\"\']', resp.text):
+                for match in re.finditer(r'href=[\"\'](https?://(?:hanime1|hanimeone)\.me/watch\?v=[^\"\']+)[\"\']', resp.text):
                     link = match.group(1).replace("&amp;", "&").split("&list=", 1)[0]
                     if link in seen:
                         continue
@@ -4695,6 +4668,16 @@ class DownloadManagerApp:
                 write_error_log("3kor detail parse failure", exc, url=new_url)
                 self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
 
+        def fetch_99itv_single():
+            try:
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(new_url, impersonate="chrome110", timeout=15, headers={"Referer": new_url})
+                page_title = _clean_99itv_title(_extract_html_title(resp.text, "99iTV"))
+                self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="99itv")
+            except Exception as exc:
+                write_error_log("99itv parse failure", exc, url=new_url)
+                self._final_add_download(new_url, is_mp3=is_mp3)
+
         lowered = new_url.lower()
         if _is_anime1_category_url(new_url):
             self._start_background_parse(fetch_anime1)
@@ -4702,7 +4685,7 @@ class DownloadManagerApp:
         if "gimy" in lowered and ("/detail/" in lowered or "/voddetail/" in lowered or "/voddetail2/" in lowered or "/vod/" in lowered):
             self._start_background_parse(fetch_gimy_detail)
             return
-        if "hanime1.me" in lowered and "list=" in lowered:
+        if ("hanime1.me" in lowered or "hanimeone.me" in lowered) and "list=" in lowered:
             self._start_background_parse(fetch_hanime_playlist)
             return
         if "movieffm.net" in lowered and "/tvshows/" in lowered:
@@ -4728,6 +4711,9 @@ class DownloadManagerApp:
             return
         if "3kor.com" in lowered and re.search(r"/detail/\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
             self._start_background_parse(fetch_3kor_detail)
+            return
+        if "99itv.net" in lowered and re.search(r"/vodplay/\d+-\d+-\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
+            self._start_background_parse(fetch_99itv_single)
             return
         self._final_add_download(new_url, is_mp3=is_mp3)
         return
@@ -5130,8 +5116,11 @@ class DownloadManagerApp:
                     return
                 title = "".join(c for c in title if c not in '\\/:*?"<>|')
                 if title and _task_state_value(self.tasks.get(item_id, {})) == "QUEUED":
-                    _set_task_name_fields(self.tasks[item_id], title)
-                    self._schedule_tree_update(item_id, "name", title)
+                    cleaned_title = str(title or "").strip()
+                    if cleaned_title:
+                        self.tasks[item_id]["short_name"] = cleaned_title
+                        self.tasks[item_id]["name"] = cleaned_title
+                        self._schedule_tree_update(item_id, "name", cleaned_title)
 
             self._start_daemon_thread(fetch_title)
         else:
@@ -5793,7 +5782,7 @@ class DownloadManagerApp:
         return True
 
     def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None):
-        if _task_source_site_name(task) not in ("gimy", "movieffm", "missav", "njavtv", "xiaoyakankan"):
+        if _task_source_site_name(task) not in ("gimy", "movieffm", "missav", "njavtv", "xiaoyakankan", "99itv"):
             return False
         if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
             return False
@@ -7550,19 +7539,23 @@ class DownloadManagerApp:
             safe_name = _task_display_name(task, fallback_url=url, default_is_mp3=is_mp3) or "MEGA folder"
 
         display_name = os.path.splitext(safe_name)[0] if is_mp3 and safe_name else safe_name
-        normalized_name = _set_task_name_fields(task, display_name)
+        normalized_name = str(display_name or "").strip()
+        if normalized_name:
+            task["short_name"] = normalized_name
+            task["name"] = normalized_name
         self._set_task_named_column_text(item_id, "name", normalized_name)
-        self._update_task_state_entry(
-            task,
-            name=normalized_name,
-            **_set_task_source_fields(
-                task,
-                source_site="mega",
-                source_page=url,
-                fallback_urls=[],
-                primary_url=_task_url_value(task),
-            ),
-        )
+        source_updates = {}
+        normalized_site = "mega"
+        task["source_site"] = normalized_site
+        source_updates["source_site"] = normalized_site
+        normalized_page = _normalize_download_url(url)
+        if normalized_page:
+            task["source_page"] = normalized_page
+            source_updates["source_page"] = normalized_page
+        normalized_urls = _dedupe_download_urls([], primary_url=_task_url_value(task))
+        task["fallback_urls"] = normalized_urls
+        source_updates["fallback_urls"] = normalized_urls
+        self._update_task_state_entry(task, name=normalized_name, **source_updates)
 
         if total_size and total_size > 0:
             if total_size and total_size > 0:
@@ -7940,7 +7933,7 @@ class DownloadManagerApp:
             "no_warnings": False,
             "quiet": True,
             "hls_prefer_native": True,
-            "hls_use_mpegts": True,
+            "hls_use_mpegts": native_options["hls_use_mpegts"],
             "socket_timeout": native_options["socket_timeout"],
             "retry_sleep_functions": _yt_dlp_retry_sleep_functions(),
             "http_headers": {
@@ -8084,7 +8077,38 @@ class DownloadManagerApp:
         ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
         if not os.path.exists(ffmpeg_path) and ffmpeg_path == os.path.join(_APP_DIR, "ffmpeg.exe"):
             raise FileNotFoundError("ffmpeg.exe was not found in the application directory")
-        ffmpeg_version = _get_ffmpeg_version_summary(ffmpeg_path)
+        clean_ffmpeg_path = str(ffmpeg_path or "").strip()
+        ffmpeg_version = ""
+        if clean_ffmpeg_path:
+            cached_ffmpeg_version = _FFMPEG_VERSION_SUMMARY_CACHE.get(clean_ffmpeg_path)
+            if cached_ffmpeg_version is not None:
+                ffmpeg_version = cached_ffmpeg_version
+            else:
+                try:
+                    startupinfo = None
+                    creationflags = 0
+                    if platform.system() == "Windows":
+                        startupinfo = subprocess.STARTUPINFO()
+                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        startupinfo.wShowWindow = 0
+                        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    version_proc = subprocess.run(
+                        [clean_ffmpeg_path, "-version"],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="ignore",
+                        timeout=15,
+                        startupinfo=startupinfo,
+                        creationflags=creationflags,
+                    )
+                    for line in (version_proc.stdout or "").splitlines():
+                        ffmpeg_version = line.strip()[:160]
+                        if ffmpeg_version:
+                            break
+                except Exception:
+                    ffmpeg_version = ""
+                _FFMPEG_VERSION_SUMMARY_CACHE[clean_ffmpeg_path] = ffmpeg_version
 
         raw_fallback_urls = _task_fallback_urls_list(task, primary_url=url)
         direct_fallback_urls = [candidate for candidate in raw_fallback_urls if _looks_like_direct_media_url(candidate)]
@@ -9358,6 +9382,22 @@ class DownloadManagerApp:
 
     def _download_with_cached_resolved_link(self, task, item_id, source_url, cached_resolved_url, save_dir, use_impersonate, is_mp3):
         self._set_task_parse_ui(item_id, message="使用已記錄下載連結續傳...")
+        if _task_source_site_name(task) == "99itv":
+            source_page_url = self._get_task_source_page(task, fallback_url=source_url)
+            parsed_source_page = urllib.parse.urlparse(source_page_url or "")
+            if source_page_url and "99itv.net" in parsed_source_page.netloc:
+                try:
+                    c_req = get_curl_cffi_requests()
+                    site_root = f"{parsed_source_page.scheme or 'https'}://{parsed_source_page.netloc}"
+                    resp = c_req.get(source_page_url, impersonate="chrome110", timeout=20, headers={"Referer": site_root + "/"})
+                    refreshed_title = _clean_99itv_title(_extract_html_title(resp.text, _task_name_text(task, "99iTV") or "99iTV"))
+                    if refreshed_title:
+                        task["short_name"] = refreshed_title
+                        task["name"] = refreshed_title
+                        self._set_task_named_column_text(item_id, "name", refreshed_title)
+                        self._update_task_state_entry(task, name=refreshed_title, source_site="99itv", source_page=source_page_url)
+                except Exception:
+                    pass
         if _is_expired_signed_media_url(cached_resolved_url):
             write_error_log(
                 "cached resolved url expired",
@@ -9598,18 +9638,25 @@ class DownloadManagerApp:
         def _set_task_identity(name=None, source_site=None, source_page=None, fallback_urls=None):
             updates = {}
             if name:
-                normalized_name = _set_task_name_fields(task, name)
-                self._set_task_named_column_text(item_id, "name", normalized_name)
-                updates["name"] = normalized_name
-            updates.update(
-                _set_task_source_fields(
-                    task,
-                    source_site=source_site,
-                    source_page=source_page,
-                    fallback_urls=fallback_urls,
-                    primary_url=_task_url_value(task),
-                )
-            )
+                normalized_name = str(name or "").strip()
+                if normalized_name:
+                    task["short_name"] = normalized_name
+                    task["name"] = normalized_name
+                    self._set_task_named_column_text(item_id, "name", normalized_name)
+                    updates["name"] = normalized_name
+            if source_site:
+                normalized_site = str(source_site).strip().lower()
+                task["source_site"] = normalized_site
+                updates["source_site"] = normalized_site
+            if source_page:
+                normalized_page = _normalize_download_url(source_page)
+                if normalized_page:
+                    task["source_page"] = normalized_page
+                    updates["source_page"] = normalized_page
+            if fallback_urls is not None:
+                normalized_urls = _dedupe_download_urls(fallback_urls, primary_url=_task_url_value(task))
+                task["fallback_urls"] = normalized_urls
+                updates["fallback_urls"] = normalized_urls
             if updates:
                 self._update_task_state_entry(task, **updates)
 
@@ -10777,10 +10824,11 @@ class DownloadManagerApp:
             self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
 
-        if "hanime1.me" in parsed_url.netloc and "watch" in parsed_url.path:
+        if parsed_url.netloc and ("hanime1.me" in parsed_url.netloc or "hanimeone.me" in parsed_url.netloc) and "watch" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_site_hanime", fallback="正在解析 Hanime1 頁面...")
             c_req = get_curl_cffi_requests()
-            resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://hanime1.me/"})
+            hanime_site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+            resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": hanime_site_root + "/"})
             source_match = re.search(r'<source\s+[^>]*src=["\']([^"\']+)["\']', resp.text, re.IGNORECASE)
             if not source_match:
                 source_match = re.search(r'(https?://[^"\'\s]+\.m3u8[^"\'\s]*)', resp.text)
@@ -10790,7 +10838,30 @@ class DownloadManagerApp:
             page_title = _extract_html_title(resp.text, short_name)
             _set_task_identity(name=page_title, source_site="hanime1", source_page=url, fallback_urls=[])
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="hanime1", fallback_urls=[])
-            self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer="https://hanime1.me/", origin="https://hanime1.me")
+            self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=hanime_site_root + "/", origin=hanime_site_root)
+            return
+
+        if "99itv.net" in parsed_url.netloc and "/vodplay/" in parsed_url.path:
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="正在解析 99iTV 頁面...")
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+            resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": site_root + "/"})
+            player_data = _extract_player_js_object(resp.text, "player_data", "player_aaaa", "player")
+            stream_url = ""
+            if player_data:
+                stream_url = _decode_maccms_player_url(player_data.get("url"), player_data.get("encrypt"))
+                if not stream_url:
+                    candidates = _collect_player_m3u8_candidates(player_data, base_url=url)
+                    stream_url = candidates[0] if candidates else ""
+            if not stream_url:
+                stream_candidates = _extract_m3u8_candidates_from_text(resp.text, base_url=url)
+                stream_url = stream_candidates[0] if stream_candidates else ""
+            if not stream_url:
+                raise Exception("99iTV source URL missing")
+            page_title = _clean_99itv_title(_extract_html_title(resp.text, short_name or "99iTV"))
+            _set_task_identity(name=page_title, source_site="99itv", source_page=url, fallback_urls=[])
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="99itv", fallback_urls=[])
+            self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
             return
 
         if "missav" in parsed_url.netloc:
