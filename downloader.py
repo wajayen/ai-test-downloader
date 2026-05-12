@@ -1,4 +1,4 @@
-﻿"""Readable restored source for downloader 2122.
+"""Readable restored source for downloader 2122.
 
 This file was rebuilt from the recovered 2122 executable payload and then
 hand-repaired into a maintainable Python source file.
@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260511-2690"
+APP_BUILD = "20260512-2700"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -851,7 +851,8 @@ def _dedupe_download_urls(candidates, primary_url=None):
 
 
 def _prefer_playlist_m3u8_candidates(candidates):
-    return _prefer_playlist_m3u8_candidates(candidates)
+    playlist_candidates = [c for c in candidates if "playlist.m3u8" in (c or "").lower()]
+    return playlist_candidates if playlist_candidates else candidates
 
 
 def _task_field_value(task, field_name, default=None):
@@ -868,13 +869,6 @@ def _task_source_site_name(task, fallback_site=""):
 
 def _task_fallback_urls_list(task, primary_url=None):
     return _dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=primary_url)
-
-
-def _task_source_page_url(task, fallback_url=""):
-    source_page = _normalize_download_url(_task_field_value(task, "source_page", ""))
-    if source_page:
-        return source_page
-    return _normalize_download_url(fallback_url)
 
 
 def _task_url_value(task, fallback_url=""):
@@ -1062,15 +1056,9 @@ def _task_gimy_failed_stream_hosts(task):
     return normalized_hosts
 
 
-def _task_gimy_failed_stream_filters(task):
-    return (
-        set(_task_gimy_failed_stream_urls(task)),
-        set(_task_gimy_failed_stream_hosts(task)),
-    )
-
-
 def _filter_gimy_failed_stream_candidates(task, candidates):
-    failed_urls, failed_hosts = _task_gimy_failed_stream_filters(task)
+    failed_urls = set(_task_gimy_failed_stream_urls(task))
+    failed_hosts = set(_task_gimy_failed_stream_hosts(task))
     filtered = []
     for candidate in candidates or []:
         normalized_candidate = _normalize_download_url(candidate)
@@ -1104,22 +1092,6 @@ def _task_resolved_url_saved_at(task, default=0.0):
         return float(_task_field_value(task, "resolved_url_saved_at", default) or default)
     except (TypeError, ValueError):
         return float(default or 0.0)
-
-
-def _task_gimy_detail_refresh_done(task):
-    return bool(_task_field_value(task, "_gimy_detail_refresh_done", False))
-
-
-def _task_gimy_source_refresh_history(task):
-    raw_history = _task_field_value(task, "_gimy_source_refresh_history", [])
-    if isinstance(raw_history, str):
-        raw_history = [raw_history]
-    normalized_history = []
-    for candidate in raw_history or []:
-        normalized_candidate = _normalize_download_url(candidate)
-        if normalized_candidate and normalized_candidate not in normalized_history:
-            normalized_history.append(normalized_candidate)
-    return normalized_history
 
 
 def _is_http_404_download_error(exc):
@@ -5337,7 +5309,11 @@ class DownloadManagerApp:
         if not task:
             return
         filename = _task_output_path_value(task)
-        self._update_task_size_from_file(item_id, filename)
+        if filename and os.path.exists(filename):
+            try:
+                self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
+            except OSError:
+                pass
         self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", complete_progress=True)
         self._finalize_completed_task(task)
 
@@ -5484,7 +5460,10 @@ class DownloadManagerApp:
         return data
 
     def _get_task_source_page(self, task, fallback_url=""):
-        return _task_source_page_url(task, fallback_url=fallback_url)
+        source_page = _normalize_download_url(_task_field_value(task, "source_page", ""))
+        if source_page:
+            return source_page
+        return _normalize_download_url(fallback_url)
 
     def _get_existing_file_size(self, path):
         try:
@@ -5728,7 +5707,11 @@ class DownloadManagerApp:
     def _mark_existing_file_complete(self, item_id, message):
         task = self.tasks.get(item_id)
         filename = _task_output_path_value(task) if task else ""
-        self._update_task_size_from_file(item_id, filename)
+        if filename and os.path.exists(filename):
+            try:
+                self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
+            except OSError:
+                pass
         self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", message, complete_progress=True)
         if task:
             self._finalize_completed_task(task, clear_resume_requested=True)
@@ -7305,17 +7288,6 @@ class DownloadManagerApp:
     def _set_task_named_column_text(self, item_id, column, value):
         self.update_tree(item_id, column, value, force=True)
 
-    def _set_task_row_columns(self, item_id, updates):
-        if updates:
-            self.update_tree_many(item_id, updates, force=True)
-
-    def _update_task_size_from_file(self, item_id, filename):
-        if filename and os.path.exists(filename):
-            try:
-                self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
-            except OSError:
-                pass
-
     def _finalize_completed_task(self, task, clear_resume_requested=False):
         _set_task_stop_fields(task, "FINISHED", resume_requested=(False if clear_resume_requested else None))
         remove_from_state(_task_url_value(task))
@@ -7331,9 +7303,9 @@ class DownloadManagerApp:
         if message is not None:
             updates["speed_eta"] = message
         if updates:
-            self._set_task_row_columns(item_id, updates)
+            self.update_tree_many(item_id, updates, force=True)
         if clear_metrics:
-            self._set_task_row_columns(item_id, {"progress": "--", "size": "-", "speed_eta": "-"})
+            self.update_tree_many(item_id, {"progress": "--", "size": "-", "speed_eta": "-"}, force=True)
 
     def _ui_text(self, key, fallback):
         return t(key) if key in I18N_DICT.get(CURRENT_LANG, {}) else fallback
@@ -7346,16 +7318,6 @@ class DownloadManagerApp:
             self._set_task_named_column_text(item_id, "speed_eta", message)
             return
         self._set_task_named_column_text(item_id, "speed_eta", self._ui_text(key, fallback))
-
-    def _log_mega_event(self, event_name, message, url, item_id, **fields):
-        write_error_log(
-            event_name,
-            Exception(message),
-            url=url,
-            item_id=item_id,
-            source_site="mega",
-            **fields,
-        )
 
     def _set_task_active_transfer_ui(self, task, item_id, downloaded_bytes, total_bytes=None, speed_bps=None, eta_seconds=None, cap_at_99=False):
         _set_task_aux_fields(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
@@ -7375,7 +7337,7 @@ class DownloadManagerApp:
             if task is not None:
                 _set_task_aux_fields(task, _last_status_text=str(status_text))
             updates["status"] = status_text
-        self._set_task_row_columns(item_id, updates)
+        self.update_tree_many(item_id, updates, force=True)
 
     def _effective_domain_download_limit(self):
         active_tasks = []
@@ -7448,11 +7410,12 @@ class DownloadManagerApp:
             raise RuntimeError("MEGAcmd is not available")
 
         cmd = list(mega_get_cmd) + [url, save_dir]
-        self._log_mega_event(
+        write_error_log(
             "mega cmd download started",
-            "mega cmd download started",
-            url,
-            item_id,
+            Exception("mega cmd download started"),
+            url=url,
+            item_id=item_id,
+            source_site="mega",
             save_dir=save_dir,
             output_path=output_path,
             total_size=total_size,
@@ -7488,11 +7451,12 @@ class DownloadManagerApp:
                         pass
                     _set_task_state_fields(self.tasks[item_id], "PAUSED")
                     self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
-                    self._log_mega_event(
+                    write_error_log(
                         "mega cmd terminate requested",
-                        "mega cmd terminate requested",
-                        url,
-                        item_id,
+                        Exception("mega cmd terminate requested"),
+                        url=url,
+                        item_id=item_id,
+                        source_site="mega",
                         output_path=output_path,
                         reason="pause_requested",
                     )
@@ -7503,11 +7467,12 @@ class DownloadManagerApp:
                         proc.wait(timeout=5)
                     except Exception:
                         pass
-                    self._log_mega_event(
+                    write_error_log(
                         "mega cmd terminate requested",
-                        "mega cmd terminate requested",
-                        url,
-                        item_id,
+                        Exception("mega cmd terminate requested"),
+                        url=url,
+                        item_id=item_id,
+                        source_site="mega",
                         output_path=output_path,
                         reason="delete_requested",
                     )
@@ -7536,11 +7501,12 @@ class DownloadManagerApp:
         if return_code != 0:
             raise RuntimeError(f"MEGAcmd exited with code {return_code}")
 
-        self._log_mega_event(
+        write_error_log(
             "mega cmd download finished",
-            "mega cmd download finished",
-            url,
-            item_id,
+            Exception("mega cmd download finished"),
+            url=url,
+            item_id=item_id,
+            source_site="mega",
             output_path=output_path,
             total_size=total_size,
         )
@@ -7628,11 +7594,12 @@ class DownloadManagerApp:
         if is_folder_link:
             raise RuntimeError("MEGA folder links require MEGAcmd for stable download support")
 
-        self._log_mega_event(
+        write_error_log(
             "mega public download started",
-            "mega public download started",
-            url,
-            item_id,
+            Exception("mega public download started"),
+            url=url,
+            item_id=item_id,
+            source_site="mega",
             output_path=out_path,
             total_size=total_size,
             backend="mega-py-v2",
@@ -7645,11 +7612,12 @@ class DownloadManagerApp:
                 _set_task_aux_fields(task, filename=final_path)
                 self._set_task_named_column_text(item_id, "name", _output_name_from_path(final_path))
                 out_path = final_path
-        self._log_mega_event(
+        write_error_log(
             "mega public download finished",
-            "mega public download finished",
-            url,
-            item_id,
+            Exception("mega public download finished"),
+            url=url,
+            item_id=item_id,
+            source_site="mega",
             output_path=out_path,
             backend="mega-py-v2",
         )
@@ -7908,7 +7876,8 @@ class DownloadManagerApp:
                             pass
         except OSError as exc:
             if getattr(exc, "errno", None) == 28:
-                self._pause_task_for_disk_full(item_id, out_path, self._get_disk_free_bytes(out_path), None, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
+                free_bytes = self._get_disk_free_bytes(out_path)
+                self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
                 return
             return
         except Exception:
@@ -8122,7 +8091,7 @@ class DownloadManagerApp:
         page_refresh_candidates = _task_gimy_page_refresh_candidates(task) if source_site == "gimy" else [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls]
         gimy_failed_stream_urls = _task_gimy_failed_stream_urls(task) if source_site == "gimy" else []
         gimy_failed_stream_hosts = _task_gimy_failed_stream_hosts(task) if source_site == "gimy" else []
-        detail_refresh_done = _task_gimy_detail_refresh_done(task)
+        detail_refresh_done = bool(_task_field_value(task, "_gimy_detail_refresh_done", False))
         if source_site == "gimy" and len(direct_fallback_urls) > GIMY_DIRECT_STREAM_FALLBACK_LIMIT:
             direct_fallback_urls = direct_fallback_urls[:GIMY_DIRECT_STREAM_FALLBACK_LIMIT]
         if gimy_failed_stream_urls:
@@ -8208,7 +8177,14 @@ class DownloadManagerApp:
         def _gimy_refresh_after_stream_failure(exc_obj):
             current_page_url = _task_url_value(task, fallback_url=url)
             source_page_url = self._get_task_source_page(task, fallback_url=current_page_url)
-            refresh_history = _task_gimy_source_refresh_history(task)
+            raw_refresh_history = _task_field_value(task, "_gimy_source_refresh_history", [])
+            if isinstance(raw_refresh_history, str):
+                raw_refresh_history = [raw_refresh_history]
+            refresh_history = []
+            for candidate in raw_refresh_history or []:
+                normalized_candidate = _normalize_download_url(candidate)
+                if normalized_candidate and normalized_candidate not in refresh_history:
+                    refresh_history.append(normalized_candidate)
             current_candidate_urls = [candidate for candidate in (current_page_url, source_page_url) if candidate]
             for current_candidate_url in current_candidate_urls:
                 normalized_current_candidate = _normalize_download_url(current_candidate_url)
@@ -8732,7 +8708,7 @@ class DownloadManagerApp:
                                 row_updates["speed_eta"] = format_transfer_rate(instant_bps) if instant_bps else "-"
                             last_ui_update = now
                         if row_updates:
-                            self._set_task_row_columns(item_id, row_updates)
+                            self.update_tree_many(item_id, row_updates, force=True)
                         if should_refresh_progress_ui:
                             last_progress_ui_bytes = current_bytes
                         if (
@@ -9152,7 +9128,7 @@ class DownloadManagerApp:
 
     def _iter_active_process_handles(self):
         seen = set()
-        for task in self.tasks.values():
+        for item_id, task in self.tasks.items():
             proc = _task_process_handle(task)
             if proc is None:
                 continue
@@ -9160,7 +9136,7 @@ class DownloadManagerApp:
             if proc_id in seen:
                 continue
             seen.add(proc_id)
-            yield task, proc
+            yield item_id, task, proc
 
     def _terminate_process_handle(self, proc, timeout_seconds=3.0):
         if proc is None:
@@ -9206,7 +9182,7 @@ class DownloadManagerApp:
     def _force_kill_child_processes(self):
         tracked_processes = list(self._iter_active_process_handles())
         tracked_pairs = []
-        for task, proc in tracked_processes:
+        for _item_id, task, proc in tracked_processes:
             try:
                 if proc is not None and proc.poll() is None:
                     tracked_pairs.append((task, proc))
@@ -9250,7 +9226,7 @@ class DownloadManagerApp:
                 break
             tracked_pairs = remaining
             time.sleep(0.05)
-        for task, proc in tracked_processes:
+        for _item_id, task, proc in tracked_processes:
             try:
                 self._terminate_process_handle(proc, timeout_seconds=0.1)
             finally:
@@ -9746,7 +9722,6 @@ class DownloadManagerApp:
                 filename = f"{_task_output_basename(task, 'downloaded_file')}{inferred_direct_media_ext}"
             output_path = os.path.join(save_dir, filename)
             _set_task_aux_fields(task, filename=output_path)
-            self._set_task_named_column_text(item_id, "name", _output_name_from_path(output_path))
             self._set_task_named_column_text(item_id, "name", filename)
             direct_headers = {"User-Agent": DEFAULT_USER_AGENT}
             direct_referer = self._get_task_source_page(task)
@@ -10265,7 +10240,8 @@ class DownloadManagerApp:
             direct_fallback_candidates = []
             external_source_urls = []
             deferred_episode_urls = []
-            gimy_failed_stream_urls, gimy_failed_stream_hosts = _task_gimy_failed_stream_filters(task)
+            gimy_failed_stream_urls = set(_task_gimy_failed_stream_urls(task))
+            gimy_failed_stream_hosts = set(_task_gimy_failed_stream_hosts(task))
             last_gimy_error = None
             page_title = short_name or "Gimy"
             def gimy_fetch_text(target_url, referer_value, impersonate_name):
@@ -10448,7 +10424,6 @@ class DownloadManagerApp:
                 out_name = f"{_task_output_basename(task, page_title or 'Video')}{media_ext}"
                 out_path = os.path.join(save_dir, out_name)
                 _set_task_aux_fields(task, filename=out_path)
-                self._set_task_named_column_text(item_id, "name", _output_name_from_path(out_path))
                 self._set_task_named_column_text(item_id, "name", out_name)
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_http_media(
@@ -10470,7 +10445,6 @@ class DownloadManagerApp:
                 external_url = supported_external_pages[0]
                 fallback_urls = [candidate for candidate in (supported_external_pages[1:] + deferred_episode_urls) if candidate and candidate != external_url]
                 _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
-                _set_task_aux_fields(task, _gimy_source_refresh_history=[])
                 _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
@@ -10515,7 +10489,7 @@ class DownloadManagerApp:
                         deferred_count=len(available_episode_page_candidates),
                     )
                     return self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
-                if not _task_gimy_detail_refresh_done(task):
+                if not bool(_task_field_value(task, "_gimy_detail_refresh_done", False)):
                     detail_page_candidates = _collect_gimy_detail_page_urls(
                         self._get_task_source_page(task, fallback_url=url) or url,
                         current_page_url,
@@ -10596,7 +10570,6 @@ class DownloadManagerApp:
                         out_name = f"{_task_output_basename(task, page_title or 'Video')}{media_ext}"
                         out_path = os.path.join(save_dir, out_name)
                         _set_task_aux_fields(task, filename=out_path)
-                        self._set_task_named_column_text(item_id, "name", _output_name_from_path(out_path))
                         self._set_task_named_column_text(item_id, "name", out_name)
                         self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                         self._download_http_media(
@@ -10618,7 +10591,6 @@ class DownloadManagerApp:
                         external_url = supported_external_pages[0]
                         fallback_urls = [candidate for candidate in (supported_external_pages[1:] + deferred_episode_urls) if candidate and candidate != external_url]
                         _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
-                        _set_task_aux_fields(task, _gimy_source_refresh_history=[])
                         _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
                         self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                         self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
