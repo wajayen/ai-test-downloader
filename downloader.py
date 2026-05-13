@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260513-2730"
+APP_BUILD = "20260513-2740"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -111,7 +111,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 8
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "99itv": 12,
     "777tv": 12,
-    "gimy": 10,
+    "gimy": 16,
     "jable": 12,
     "missav": 12,
     "nnyy": 16,
@@ -121,14 +121,14 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
 YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "99itv": False,
     "777tv": False,
-    "gimy": False,
+    "gimy": True,
     "jable": False,
     "nnyy": False,
     "xiaoyakankan": False,
 }
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 8
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
-    "gimy": 4,
+    "gimy": 10,
     "missav": 12,
     "movieffm": 12,
     "mixdrop": 12,
@@ -999,10 +999,6 @@ def _task_state_value(task, default=""):
     return str(_task_field_value(task, "state", default) or default)
 
 
-def _task_in_states(task, *states):
-    return _task_state_value(task) in states
-
-
 def _task_process_handle(task, default=None):
     return _task_field_value(task, "_proc", default)
 
@@ -1088,13 +1084,6 @@ def _task_resolved_url(task, fallback_url=""):
     return _normalize_download_url(fallback_url)
 
 
-def _task_resolved_url_saved_at(task, default=0.0):
-    try:
-        return float(_task_field_value(task, "resolved_url_saved_at", default) or default)
-    except (TypeError, ValueError):
-        return float(default or 0.0)
-
-
 def _is_http_404_download_error(exc):
     if exc is None:
         return False
@@ -1135,30 +1124,15 @@ def _append_normalized_unique_candidates(target_list, *candidates):
     return updated
 
 
-def _event_downloaded_bytes(info, default=0):
-    info = info or {}
-    return info.get("downloaded_bytes") or default
-
-
-def _event_total_bytes(info, default=None):
-    info = info or {}
-    total = info.get("total_bytes")
-    if total:
-        return total
-    return info.get("total_bytes_estimate", default)
-
-
-def _event_status(info, default=""):
-    info = info or {}
-    return str(info.get("status", default) or default)
-
-
 def _event_transfer_metrics(info, default_path="", default_downloaded=0, default_total=None):
     info = info or {}
+    total = info.get("total_bytes")
+    if not total:
+        total = info.get("total_bytes_estimate", default_total)
     return (
         str(info.get("tmpfilename") or info.get("filename") or default_path or ""),
-        _event_downloaded_bytes(info, default_downloaded),
-        _event_total_bytes(info, default_total),
+        info.get("downloaded_bytes") or default_downloaded,
+        total,
     )
 
 
@@ -2814,7 +2788,7 @@ def _should_prefer_native_hls(url, task=None):
     host = str(parsed.netloc or "").strip().lower()
     source_site = _task_source_site_name(task)
     if source_site == "gimy":
-        if any(marker in host for marker in ("ppqrrs", "qqqrst", "surrit")):
+        if any(marker in host for marker in ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd")):
             return True
         return False
     if source_site == "movieffm":
@@ -5213,7 +5187,7 @@ class DownloadManagerApp:
             source_page=self._get_task_source_page(task_data),
             fallback_urls=_task_fallback_urls_list(task_data, primary_url=url),
             resolved_url=_task_resolved_url(task_data),
-            resolved_url_saved_at=_task_resolved_url_saved_at(task_data),
+            resolved_url_saved_at=float(_task_field_value(task_data, "resolved_url_saved_at", 0.0) or 0.0),
             page_refresh_candidates=_task_gimy_page_refresh_candidates(task_data),
         )
         task_data["fallback_urls"] = normalized_extra.get("fallback_urls", [])
@@ -5402,7 +5376,7 @@ class DownloadManagerApp:
             return
 
     def _is_live_task(self, task):
-        return not _task_in_states(task, *TERMINAL_TASK_STATES)
+        return _task_state_value(task) not in TERMINAL_TASK_STATES
 
     def _iter_live_tasks(self):
         for task in self.tasks.values():
@@ -5412,13 +5386,13 @@ class DownloadManagerApp:
     def _collect_state_counts(self):
         counts = {"DOWNLOADING": 0, "QUEUED": 0, "PAUSED": 0, "ERROR": 0}
         for task in self.tasks.values():
-            if _task_in_states(task, "DOWNLOADING"):
+            if _task_state_value(task) == "DOWNLOADING":
                 counts["DOWNLOADING"] += 1
-            elif _task_in_states(task, "QUEUED"):
+            elif _task_state_value(task) == "QUEUED":
                 counts["QUEUED"] += 1
-            elif _task_in_states(task, *PAUSED_TASK_STATES):
+            elif _task_state_value(task) in PAUSED_TASK_STATES:
                 counts["PAUSED"] += 1
-            elif _task_in_states(task, "ERROR"):
+            elif _task_state_value(task) == "ERROR":
                 counts["ERROR"] += 1
         return counts
 
@@ -5756,11 +5730,11 @@ class DownloadManagerApp:
                     "fallback_urls": list(fallback_urls),
                     "source_page": source_page,
                     "resolved_url": _task_resolved_url(task),
-                    "resolved_url_saved_at": _task_resolved_url_saved_at(task),
+                    "resolved_url_saved_at": float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                     "page_refresh_candidates": list(_task_gimy_page_refresh_candidates(task)),
                 }
             )
-            signature_append((url, name, is_mp3, _task_resume_requested(task), source_site, fallback_urls, source_page, _task_resolved_url(task), _task_resolved_url_saved_at(task), tuple(_task_gimy_page_refresh_candidates(task))))
+            signature_append((url, name, is_mp3, _task_resume_requested(task), source_site, fallback_urls, source_page, _task_resolved_url(task), float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0), tuple(_task_gimy_page_refresh_candidates(task))))
         return entries, tuple(signature_parts)
 
     def _mark_existing_file_complete(self, item_id, message):
@@ -7424,7 +7398,7 @@ class DownloadManagerApp:
                 raise StopDownloadException("pause requested")
             if self._is_delete_requested_state(task_state):
                 raise KeyboardInterrupt()
-            status = _event_status(d)
+            status = str((d or {}).get("status", "") or "")
             if status == "downloading":
                 target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
                 required_bytes = max(int(total) - int(downloaded), 0) if total else None
@@ -7982,6 +7956,12 @@ class DownloadManagerApp:
         if yt_dlp_module is None:
             raise RuntimeError("yt-dlp module is not available")
         task = self.tasks.get(item_id, {})
+        source_site = _task_source_site_name(task)
+        if source_site == "gimy":
+            referer = self._get_task_source_page(task, fallback_url=referer) or referer
+            parsed_ref = urllib.parse.urlsplit(referer)
+            if parsed_ref.scheme and parsed_ref.netloc:
+                origin = f"{parsed_ref.scheme}://{parsed_ref.netloc}"
         temp_out_path, resume_key, resume_keys = self._resolve_resume_artifact_base(
             task,
             url,
@@ -8055,7 +8035,7 @@ class DownloadManagerApp:
         )
         info = None
         with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if _task_source_site_name(task) in ("99itv", "777tv", "movieffm", "gimy", "nnyy", "xiaoyakankan", "jable") and _looks_like_manifest_url(url):
+            if source_site in ("99itv", "777tv", "movieffm", "gimy", "nnyy", "xiaoyakankan", "jable") and _looks_like_manifest_url(url):
                 info = ydl.extract_info(url, download=True)
             elif _looks_like_manifest_url(url):
                 protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
@@ -9129,7 +9109,7 @@ class DownloadManagerApp:
                     source_page=self._get_task_source_page(task),
                     fallback_urls=_task_fallback_urls_list(task),
                     resolved_url=_task_resolved_url(task),
-                    resolved_url_saved_at=_task_resolved_url_saved_at(task),
+                    resolved_url_saved_at=float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                     page_refresh_candidates=_task_gimy_page_refresh_candidates(task),
                 ),
             )
@@ -9733,7 +9713,7 @@ class DownloadManagerApp:
                 raise StopDownloadException("pause requested")
             if self._is_delete_requested_state(task_state):
                 raise KeyboardInterrupt()
-            status = _event_status(d)
+            status = str((d or {}).get("status", "") or "")
             if status == "downloading":
                 target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
                 required_bytes = max(int(total) - int(downloaded), 0) if total else None
@@ -9813,6 +9793,24 @@ class DownloadManagerApp:
                     continue
             if last_exc:
                 raise last_exc
+
+        def _download_manifest_with_generic_ytdlp(target_url, referer=None, origin=None):
+            headers = dict(ydl_opts.get("http_headers") or {})
+            headers["User-Agent"] = DEFAULT_USER_AGENT
+            if referer:
+                headers["Referer"] = referer
+            else:
+                headers.pop("Referer", None)
+            if origin:
+                headers["Origin"] = origin
+            else:
+                headers.pop("Origin", None)
+            ydl_opts["http_headers"] = headers
+            ydl_opts["outtmpl"] = {"default": f"{safe_name}.%(ext)s"}
+            _run_yt_dlp(target_url)
+            if _task_state_value(self.tasks.get(item_id, {})) == "DELETED":
+                raise KeyboardInterrupt()
+            self._mark_task_finished(item_id)
 
         def _set_task_identity(name=None, source_site=None, source_page=None, fallback_urls=None):
             updates = {}
@@ -10665,7 +10663,7 @@ class DownloadManagerApp:
                 _set_task_identity(
                     name=page_title,
                     source_site="gimy",
-                    source_page=self._get_task_source_page(task, fallback_url=url) or url,
+                    source_page=url,
                     fallback_urls=direct_media_fallback_urls,
                 )
                 if is_mp3:
@@ -10703,7 +10701,7 @@ class DownloadManagerApp:
                 external_url = supported_external_pages[0]
                 fallback_urls = [candidate for candidate in (supported_external_pages[1:] + deferred_episode_urls) if candidate and candidate != external_url]
                 _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
-                _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
+                _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
@@ -10890,10 +10888,10 @@ class DownloadManagerApp:
                 _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_fallback_urls),
             )
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
-            _set_task_identity(name=page_title, source_site="gimy", source_page=self._get_task_source_page(task, fallback_url=url) or url, fallback_urls=fallback_urls)
+            _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
-            self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+            _download_manifest_with_generic_ytdlp(stream_url, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
 
         if "gimy" in parsed_url.netloc and ("/play/" in parsed_url.path or "/vodplay/" in parsed_url.path or "/video/" in parsed_url.path):
@@ -11032,7 +11030,7 @@ class DownloadManagerApp:
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
-            self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+            _download_manifest_with_generic_ytdlp(stream_url, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
 
         if parsed_url.netloc and ("hanime1.me" in parsed_url.netloc or "hanimeone.me" in parsed_url.netloc) and "watch" in parsed_url.path:
@@ -11466,7 +11464,7 @@ class DownloadManagerApp:
 
         try:
             _run_yt_dlp(url)
-            if _task_in_states(self.tasks.get(item_id, {}), "DELETED"):
+            if _task_state_value(self.tasks.get(item_id, {})) == "DELETED":
                 raise KeyboardInterrupt()
             self._mark_task_finished(item_id)
         except (StopDownloadException, KeyboardInterrupt):
@@ -11483,10 +11481,10 @@ class DownloadManagerApp:
                 use_impersonate=use_impersonate,
                 is_mp3=is_mp3,
             )
-            if _task_in_states(task, "DELETED", "DELETE_REQUESTED"):
+            if _task_state_value(task) in ("DELETED", "DELETE_REQUESTED"):
                 self._discard_task(item_id)
                 return
-            if _task_in_states(task, *PAUSED_TASK_STATES):
+            if _task_state_value(task) in PAUSED_TASK_STATES:
                 return
             self._set_task_status_mode_ui(item_id, t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤", summarize_error_message(e, "err_net", 120))
             _set_task_state_fields(task, "ERROR")
