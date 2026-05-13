@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260512-2710"
+APP_BUILD = "20260513-2720"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -73,6 +73,8 @@ MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {}
 MAX_DOWNLOADS_PER_SOURCE_SITE = {}
 LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
 LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 10
+RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 10.0
+RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 100 * 1024
 MAX_QUEUE_TASKS = 300
 DISK_SPACE_RESERVE_BYTES = 256 * 1024 * 1024
 STATE_PERSIST_INTERVAL_SECONDS = 2.5
@@ -101,34 +103,37 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "99itv": 15.0,
     "movieffm": 15.0,
 }
-YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 5
+YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 8
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
-    "99itv": 10,
+    "99itv": 12,
     "gimy": 3,
-    "missav": 8,
-    "movieffm": 10,
+    "missav": 12,
+    "movieffm": 14,
 }
 YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "99itv": False,
 }
-YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 6
+YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 8
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "gimy": 4,
-    "missav": 8,
-    "movieffm": 10,
-    "mixdrop": 10,
+    "missav": 12,
+    "movieffm": 12,
+    "mixdrop": 12,
+    "99itv": 10,
 }
-HTTP_MULTIPART_TRIGGER_SECONDS = 0.5
-HTTP_MULTIPART_TRIGGER_SPEED_BPS = 3 * 1024 * 1024
-HTTP_MULTIPART_MIN_REMAINING_BYTES = 4 * 1024 * 1024
-HTTP_MULTIPART_PART_COUNT_DEFAULT = 10
+HTTP_MULTIPART_TRIGGER_SECONDS = 0.35
+HTTP_MULTIPART_TRIGGER_SPEED_BPS = 5 * 1024 * 1024
+HTTP_MULTIPART_MIN_REMAINING_BYTES = 2 * 1024 * 1024
+HTTP_MULTIPART_PART_COUNT_DEFAULT = 12
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "anime1": 4,
-    "mixdrop": 12,
-    "movieffm": 12,
+    "mixdrop": 14,
+    "movieffm": 14,
+    "missav": 12,
+    "avjoy": 12,
 }
-HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 8 * 1024 * 1024
-HTTP_MULTIPART_IMMEDIATE_SITES = frozenset(("movieffm", "mixdrop"))
+HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 4 * 1024 * 1024
+HTTP_MULTIPART_IMMEDIATE_SITES = frozenset(("movieffm", "mixdrop", "missav", "avjoy"))
 M3U8_TOTAL_BYTES_PROBE_WORKERS = 4
 M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
     "gimy": 4,
@@ -638,6 +643,10 @@ def language_display_name(lang_code):
 
 class StopDownloadException(BaseException):
     """Control-flow exception used by the original downloader runtime."""
+
+
+class ResumeLowSpeedReanalysisException(Exception):
+    """Trigger one source-page reanalysis when a resumed transfer stays too slow."""
 
 
 def t(key, **kwargs):
@@ -2052,7 +2061,18 @@ def _url_host_resolves(url):
     return _hostname_resolves(hostname)
 
 
-def _select_reachable_stream_candidates(primary_url, fallback_urls=()):
+def _movieffm_stream_priority(url):
+    host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+    if "lzcdn" in host:
+        return 0
+    if "ukubf" in host:
+        return 1
+    if "bdzybf" in host:
+        return 50
+    return 100
+
+
+def _select_reachable_stream_candidates(primary_url, fallback_urls=(), source_site=""):
     ordered = []
     seen = set()
     for raw_url in [primary_url, *(fallback_urls or [])]:
@@ -2063,6 +2083,8 @@ def _select_reachable_stream_candidates(primary_url, fallback_urls=()):
         ordered.append(normalized_url)
     if not ordered:
         return "", [], False
+    if source_site == "movieffm":
+        ordered = sorted(ordered, key=_movieffm_stream_priority)
     reachable = [candidate for candidate in ordered if _url_host_resolves(candidate)]
     preferred = reachable[0] if reachable else ordered[0]
     remaining = [candidate for candidate in ordered if candidate != preferred]
@@ -2701,6 +2723,8 @@ class UIThrottler:
                         self.tree.set(item_id, column=col, value=value_text)
                 except tk.TclError:
                     continue
+        except ResumeLowSpeedReanalysisException:
+            raise
         except Exception:
             return
 
@@ -2793,8 +2817,10 @@ def _should_prefer_native_hls(url, task=None):
     if source_site == "gimy":
         return False
     if source_site == "movieffm":
-        # MovieFFM repeatedly falls back to ffmpeg after native HLS artifact rejection.
-        # Skip the native detour so downloads start on the stable path immediately.
+        # MovieFFM source quality varies a lot. Keep the conservative ffmpeg default,
+        # but let stable direct-CDN playlists use the faster native HLS route.
+        if any(marker in host for marker in ("lzcdn", "bdzybf", "ukubf")):
+            return True
         return False
     if source_site == "njavtv":
         # NJAVTV surrit playlists often produce tiny native-HLS artifacts, then recover on ffmpeg.
@@ -2859,9 +2885,9 @@ def _http_multipart_part_count(task=None, total_size=0):
     if total_size and total_size < 16 * 1024 * 1024:
         configured = min(configured, 4)
     elif total_size and total_size < 64 * 1024 * 1024:
-        configured = min(configured, 8)
+        configured = min(configured, 10)
     configured = max(2, configured)
-    return min(configured, 12)
+    return min(configured, 14)
 
 
 def _should_start_http_multipart_immediately(task=None, total_size=0):
@@ -4279,6 +4305,7 @@ class DownloadManagerApp:
                             preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
                                 external_source_urls[0],
                                 external_source_urls[1:],
+                                source_site="movieffm",
                             )
                             if not preferred_url or not has_reachable:
                                 self._schedule_warning("MovieFFM 來源主機目前無法解析")
@@ -4297,6 +4324,7 @@ class DownloadManagerApp:
                         preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
                             candidates[0],
                             candidates[1:],
+                            source_site="movieffm",
                         )
                         if not preferred_url or not has_reachable:
                             self._schedule_warning("MovieFFM 來源主機目前無法解析")
@@ -4318,7 +4346,7 @@ class DownloadManagerApp:
                     for ep_url, ep_name in targets:
                         episode_key = _movieffm_numbered_episode_key(ep_name.rsplit(" ", 1)[-1])
                         fallback_urls = [u for u in episode_fallbacks.get(episode_key, []) if u != ep_url]
-                        preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(ep_url, fallback_urls)
+                        preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(ep_url, fallback_urls, source_site="movieffm")
                         if not preferred_url or not has_reachable:
                             skipped_names.append(ep_name)
                             continue
@@ -4369,7 +4397,7 @@ class DownloadManagerApp:
                     selected_targets = self._choose_playlist_targets(episodes, episodes[0])
                     skipped_names = []
                     for ep_url, ep_name, detail_url, fallback_urls in selected_targets:
-                        preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(ep_url, fallback_urls)
+                        preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(ep_url, fallback_urls, source_site="movieffm")
                         if not preferred_url or not has_reachable:
                             skipped_names.append(ep_name)
                             continue
@@ -5304,7 +5332,8 @@ class DownloadManagerApp:
             except OSError:
                 pass
         self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", complete_progress=True)
-        self._finalize_completed_task(task)
+        _set_task_stop_fields(task, "FINISHED")
+        remove_from_state(_task_url_value(task))
 
     def _discard_task(self, item_id):
         self._cleanup_temp_files(item_id)
@@ -5703,7 +5732,8 @@ class DownloadManagerApp:
                 pass
         self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", message, complete_progress=True)
         if task:
-            self._finalize_completed_task(task, clear_resume_requested=True)
+            _set_task_stop_fields(task, "FINISHED", resume_requested=False)
+            remove_from_state(_task_url_value(task))
 
     def _has_resume_artifact_state(self, task, save_dir=None, is_mp3=None):
         if not task:
@@ -7277,10 +7307,6 @@ class DownloadManagerApp:
     def _set_task_named_column_text(self, item_id, column, value):
         self.update_tree(item_id, column, value, force=True)
 
-    def _finalize_completed_task(self, task, clear_resume_requested=False):
-        _set_task_stop_fields(task, "FINISHED", resume_requested=(False if clear_resume_requested else None))
-        remove_from_state(_task_url_value(task))
-
     def _set_task_status_mode_ui(self, item_id, status_text, message=None, complete_progress=False, clear_metrics=False):
         updates = {}
         if complete_progress:
@@ -7389,6 +7415,15 @@ class DownloadManagerApp:
                 )
                 last_ui_update = now
                 last_ui_bytes = downloaded
+                if self._should_trigger_resume_low_speed_reanalysis(
+                    task,
+                    _task_url_value(task),
+                    save_dir,
+                    speed,
+                    is_mp3=_task_is_mp3_enabled(task),
+                    now=now,
+                ):
+                    raise ResumeLowSpeedReanalysisException("resume transfer stayed below the low-speed threshold")
 
         return progress_hook
 
@@ -7776,6 +7811,14 @@ class DownloadManagerApp:
                             eta_seconds=eta,
                             cap_at_99=True,
                         )
+                        if self._should_trigger_resume_low_speed_reanalysis(
+                            task,
+                            _task_url_value(task),
+                            os.path.dirname(out_path) or _APP_DIR,
+                            speed_bps,
+                            now=now,
+                        ):
+                            raise ResumeLowSpeedReanalysisException("resume transfer stayed below the low-speed threshold")
             if res is not None:
                 try:
                     res.close()
@@ -7848,6 +7891,17 @@ class DownloadManagerApp:
                             eta_seconds=eta,
                             cap_at_99=True,
                         )
+                        if self._should_trigger_resume_low_speed_reanalysis(
+                            task,
+                            _task_url_value(task),
+                            os.path.dirname(out_path) or _APP_DIR,
+                            speed_bps,
+                            now=now,
+                        ):
+                            stop_event.set()
+                            for future in futures:
+                                future.cancel()
+                            raise ResumeLowSpeedReanalysisException("resume transfer stayed below the low-speed threshold")
                         time.sleep(0.5)
                 finally:
                     if executor is not None:
@@ -7960,7 +8014,9 @@ class DownloadManagerApp:
         )
         info = None
         with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if _looks_like_manifest_url(url):
+            if _task_source_site_name(task) in ("99itv", "movieffm") and _looks_like_manifest_url(url):
+                info = ydl.extract_info(url, download=True)
+            elif _looks_like_manifest_url(url):
                 protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
                 direct_info = {
                     "id": safe_name,
@@ -8301,6 +8357,8 @@ class DownloadManagerApp:
                     referer=referer,
                     origin=origin,
                 )
+            except ResumeLowSpeedReanalysisException:
+                raise
             except Exception as native_exc:
                 _remember_gimy_failed_stream(url)
                 if source_site == "gimy":
@@ -8731,6 +8789,24 @@ class DownloadManagerApp:
                             elif instant_bps > 0:
                                 row_updates["speed_eta"] = format_transfer_rate(instant_bps) if instant_bps else "-"
                             last_ui_update = now
+                            if self._should_trigger_resume_low_speed_reanalysis(
+                                task,
+                                _task_url_value(task, fallback_url=candidate_url),
+                                save_dir,
+                                instant_bps,
+                                is_mp3=is_mp3,
+                                now=now,
+                            ):
+                                self._terminate_ffmpeg_process(
+                                    self.tasks.get(item_id, {}),
+                                    item_id,
+                                    proc,
+                                    candidate_url,
+                                    "resume_low_speed_reanalysis",
+                                    bytes=current_bytes,
+                                    speed_bps=instant_bps,
+                                )
+                                raise ResumeLowSpeedReanalysisException("resume transfer stayed below the low-speed threshold")
                         if row_updates:
                             self.update_tree_many(item_id, row_updates, force=True)
                         if should_refresh_progress_ui:
@@ -9359,7 +9435,66 @@ class DownloadManagerApp:
                     except Exception:
                         continue
 
-    def _clear_cached_resolved_link(self, task):
+    def _prepare_resume_low_speed_watch(self, task, source_url, save_dir, is_mp3=False):
+        watching_resume = (
+            _task_resume_requested(task)
+            or bool(_task_resolved_url(task))
+            or self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3)
+        )
+        source_page = self._get_task_source_page(task, fallback_url=source_url)
+        if watching_resume and source_page:
+            _set_task_aux_fields(
+                task,
+                _resume_low_speed_watch_started_at=time.time(),
+                _resume_low_speed_reanalysis_attempted=False,
+            )
+        else:
+            _set_task_aux_fields(
+                task,
+                _resume_low_speed_watch_started_at=0.0,
+                _resume_low_speed_reanalysis_attempted=False,
+            )
+
+    def _should_trigger_resume_low_speed_reanalysis(self, task, source_url, save_dir, speed_bps, is_mp3=False, now=None):
+        if task is None:
+            return False
+        if bool(_task_field_value(task, "_resume_low_speed_reanalysis_attempted", False)):
+            return False
+        started_at = float(_task_field_value(task, "_resume_low_speed_watch_started_at", 0.0) or 0.0)
+        if started_at <= 0:
+            return False
+        source_page = self._get_task_source_page(task, fallback_url=source_url)
+        if not source_page:
+            return False
+        now = time.time() if now is None else now
+        if (now - started_at) < RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS:
+            return False
+        try:
+            normalized_speed = max(float(speed_bps or 0.0), 0.0)
+        except Exception:
+            normalized_speed = 0.0
+        if normalized_speed <= 0 or normalized_speed >= RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS:
+            return False
+        _set_task_aux_fields(
+            task,
+            _resume_low_speed_reanalysis_attempted=True,
+            _resume_low_speed_watch_started_at=0.0,
+        )
+        write_error_log(
+            "resume low speed reanalysis requested",
+            Exception("resume low speed reanalysis requested"),
+            url=source_url,
+            item_id=_task_field_value(task, "item_id", None),
+            source_site=_task_source_site_name(task) or None,
+            source_page=source_page,
+            speed_bps=normalized_speed,
+            threshold_bps=RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS,
+            elapsed_seconds=max(now - started_at, 0.0),
+            is_mp3=bool(is_mp3),
+        )
+        return True
+
+    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False):
         self._set_cached_resolved_link_state(
             task,
             resolved_url="",
@@ -9367,9 +9502,6 @@ class DownloadManagerApp:
             page_refresh_candidates=[],
             clear_source_refresh_history=True,
         )
-
-    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False):
-        self._clear_cached_resolved_link(task)
         if expired:
             self._set_task_parse_ui(item_id, message="已記錄連結已過期，重新分析頁面...")
         else:
@@ -9423,7 +9555,7 @@ class DownloadManagerApp:
         try:
             self._download_task_internal(cached_resolved_url, item_id, save_dir, use_impersonate, is_mp3)
             return True
-        except (StopDownloadException, KeyboardInterrupt):
+        except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
             raise
         except Exception as cached_exc:
             write_error_log(
@@ -9472,6 +9604,7 @@ class DownloadManagerApp:
         try:
             task = self.tasks.get(item_id, {})
             cached_resolved_url = _task_resolved_url(task)
+            self._prepare_resume_low_speed_watch(task, url, save_dir, is_mp3=is_mp3)
             url_lower = url.lower()
             if ("//anime1.me/" in url_lower or "//anime1.pw/" in url_lower) and use_impersonate:
                 self._set_task_status_mode_ui(
@@ -9507,6 +9640,11 @@ class DownloadManagerApp:
                 self._schedule_summary_refresh()
 
             self._schedule_ui_call(finish_dl)
+        except ResumeLowSpeedReanalysisException:
+            if has_anime1_lock:
+                anime1_dl_lock.release()
+                has_anime1_lock = False
+            self._retry_source_after_cached_link_failure(task, item_id, url, save_dir, use_impersonate, is_mp3, expired=False)
         except (StopDownloadException, KeyboardInterrupt):
             self._handle_stopped_download(item_id)
         except Exception as exc:
@@ -9627,7 +9765,7 @@ class DownloadManagerApp:
                         ydl = module.YoutubeDL(current_opts)
                     ydl.download([target_url])
                     return
-                except (StopDownloadException, KeyboardInterrupt):
+                except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
                     raise
                 except Exception as exc:
                     last_exc = exc
@@ -10144,7 +10282,9 @@ class DownloadManagerApp:
                 raise Exception("MovieFFM stream URL missing")
             _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=candidates[1:])
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="movieffm")
-            self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer="https://www.movieffm.net/", origin="https://www.movieffm.net")
+            parsed_page = urllib.parse.urlsplit(url)
+            page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
+            self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
             return
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" in parsed_url.path:
@@ -10160,6 +10300,7 @@ class DownloadManagerApp:
                     preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
                         external_source_urls[0],
                         external_source_urls[1:],
+                        source_site="movieffm",
                     )
                     if not preferred_url or not has_reachable:
                         raise Exception("MovieFFM stream host did not resolve")
@@ -10167,17 +10308,19 @@ class DownloadManagerApp:
                     return self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
                 if not candidates:
                     raise Exception("MovieFFM detail page stream URL missing")
-                preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(candidates[0], candidates[1:])
+                preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(candidates[0], candidates[1:], source_site="movieffm")
                 if not preferred_url or not has_reachable:
                     raise Exception("MovieFFM stream host did not resolve")
                 _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=ordered_fallbacks)
                 self._log_m3u8_route_selected(task, item_id, preferred_url, source_site="movieffm", fallback_urls=ordered_fallbacks)
-                self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer="https://www.movieffm.net/", origin="https://www.movieffm.net")
+                parsed_page = urllib.parse.urlsplit(url)
+                page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
+                self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
                 return
             primary_url, primary_name = episodes[0]
             episode_key = _movieffm_numbered_episode_key(primary_name.rsplit(" ", 1)[-1])
             fallback_urls = [u for u in episode_fallbacks.get(episode_key, []) if u != primary_url]
-            preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(primary_url, fallback_urls)
+            preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(primary_url, fallback_urls, source_site="movieffm")
             if not preferred_url or not has_reachable:
                 raise Exception("MovieFFM episode stream host did not resolve")
             _set_task_identity(
