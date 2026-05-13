@@ -85,3 +85,34 @@ _tmp_disasm_*.txt
 # Historical one-off spec files
 downloader_20*.spec
 
+# Local one-off scripts / scratch files
+apply_*.py
+check_*.py
+cleanup.py
+find_*.py
+fix_*.py
+patch_*.py
+print_*.py
+refactor*.py
+scratch_*.py
+test*.py
+run_test.ps1
+test.url
+dnd_types.txt
+
+# Local alternate packaging files
+DownloaderPro.spec
+ZhuaZhuaZhua.spec
+build_mac.sh
+downloader_backup_pre_fix_*.spec
+
+# Vendored / external repos kept only for local experiments
+cobalt/
+parth-dl/
+
+# Local media / asset variants not used by the tracked project
+index\ [index].mp4.part-Frag*
+taiwan_satellite.jpg
+taiwan_satellite_masked.png
+taiwan_satellite_src.png
+taiwan_symbol.png
