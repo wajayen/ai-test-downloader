@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260513-2720"
+APP_BUILD = "20260513-2730"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -101,17 +101,30 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "gimy": 15.0,
     "99itv": 15.0,
+    "777tv": 15.0,
+    "nnyy": 15.0,
     "movieffm": 15.0,
+    "xiaoyakankan": 15.0,
+    "jable": 15.0,
 }
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 8
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "99itv": 12,
-    "gimy": 3,
+    "777tv": 12,
+    "gimy": 10,
+    "jable": 12,
     "missav": 12,
+    "nnyy": 16,
     "movieffm": 14,
+    "xiaoyakankan": 12,
 }
 YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "99itv": False,
+    "777tv": False,
+    "gimy": False,
+    "jable": False,
+    "nnyy": False,
+    "xiaoyakankan": False,
 }
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 8
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
@@ -120,6 +133,7 @@ YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "movieffm": 12,
     "mixdrop": 12,
     "99itv": 10,
+    "nnyy": 10,
 }
 HTTP_MULTIPART_TRIGGER_SECONDS = 0.35
 HTTP_MULTIPART_TRIGGER_SPEED_BPS = 5 * 1024 * 1024
@@ -1139,28 +1153,13 @@ def _event_status(info, default=""):
     return str(info.get("status", default) or default)
 
 
-def _event_output_path(info, default=""):
-    info = info or {}
-    return str(info.get("tmpfilename") or info.get("filename") or default or "")
-
-
 def _event_transfer_metrics(info, default_path="", default_downloaded=0, default_total=None):
     info = info or {}
     return (
-        _event_output_path(info, default_path),
+        str(info.get("tmpfilename") or info.get("filename") or default_path or ""),
         _event_downloaded_bytes(info, default_downloaded),
         _event_total_bytes(info, default_total),
     )
-
-
-def _event_speed(info, default=None):
-    info = info or {}
-    return info.get("speed", default)
-
-
-def _event_eta(info, default=None):
-    info = info or {}
-    return info.get("eta", default)
 
 
 def _detect_browser_cookie_source():
@@ -2815,6 +2814,8 @@ def _should_prefer_native_hls(url, task=None):
     host = str(parsed.netloc or "").strip().lower()
     source_site = _task_source_site_name(task)
     if source_site == "gimy":
+        if any(marker in host for marker in ("ppqrrs", "qqqrst", "surrit")):
+            return True
         return False
     if source_site == "movieffm":
         # MovieFFM source quality varies a lot. Keep the conservative ffmpeg default,
@@ -2831,10 +2832,32 @@ def _should_prefer_native_hls(url, task=None):
         # Start directly on the ffmpeg path to avoid the native detour and range mismatch failures.
         return False
     if source_site == "xiaoyakankan":
-        # XiaoyaKankan frequently leaves partial-looking final mp4 artifacts when native HLS is interrupted.
-        # Start directly on the ffmpeg path so resume uses stable sidecars instead of misclassified final files.
+        if any(
+            marker in host
+            for marker in (
+                "huyall",
+                "ijycnd",
+                "jisuzyv",
+                "bfvvs",
+                "gsuus",
+                "hhuus",
+                "qsstvw",
+                "subokk",
+            )
+        ):
+            return True
+        return False
+    if source_site == "jable":
+        if any(marker in host for marker in ("mushroomtrack", "hls.sb-cd.com", "cdn77.org")):
+            return True
+        return False
+    if source_site == "nnyy":
+        if any(marker in host for marker in ("lz-cdn", "lzcdn", "ppqrrs", "qqqrst", "surrit")):
+            return True
         return False
     if source_site == "99itv":
+        return True
+    if source_site == "777tv":
         return True
     if source_site == "missav":
         return True
@@ -4531,6 +4554,24 @@ class DownloadManagerApp:
         def fetch_nnyy_playlist():
             try:
                 parsed_url = urllib.parse.urlsplit(new_url)
+                if re.search(r"/dianying/\d+\.html$", parsed_url.path, re.IGNORECASE):
+                    c_req = get_curl_cffi_requests()
+                    resp = c_req.get(
+                        new_url,
+                        impersonate="chrome110",
+                        timeout=20,
+                        headers={"Referer": "https://nnyy.in/", "User-Agent": DEFAULT_USER_AGENT},
+                    )
+                    page_title = _extract_html_title(resp.text, "?芸敶梢")
+                    page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or "?芸敶梢"
+                    self._final_add_download(
+                        new_url,
+                        is_mp3=is_mp3,
+                        custom_name=page_title,
+                        source_site="nnyy",
+                        extra_task_data=self._build_extra_task_data(source_page=new_url),
+                    )
+                    return
                 if not re.search(r"/(?:dianshiju|dongman|zongyi)/\d+\.html$", parsed_url.path, re.IGNORECASE):
                     self._final_add_download(new_url, is_mp3=is_mp3)
                     return
@@ -7394,8 +7435,8 @@ class DownloadManagerApp:
             if status != "downloading":
                 return
             _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
-            speed = _event_speed(d)
-            eta = _event_eta(d)
+            speed = (d or {}).get("speed")
+            eta = (d or {}).get("eta")
             now = time.time()
             should_refresh_ui = (
                 downloaded <= 0
@@ -8014,7 +8055,7 @@ class DownloadManagerApp:
         )
         info = None
         with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if _task_source_site_name(task) in ("99itv", "movieffm") and _looks_like_manifest_url(url):
+            if _task_source_site_name(task) in ("99itv", "777tv", "movieffm", "gimy", "nnyy", "xiaoyakankan", "jable") and _looks_like_manifest_url(url):
                 info = ydl.extract_info(url, download=True)
             elif _looks_like_manifest_url(url):
                 protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
@@ -9703,8 +9744,8 @@ class DownloadManagerApp:
             if status != "downloading":
                 return
             _target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
-            speed = _event_speed(d)
-            eta = _event_eta(d)
+            speed = (d or {}).get("speed")
+            eta = (d or {}).get("eta")
             self._set_task_active_transfer_ui(
                 task,
                 item_id,
@@ -10043,7 +10084,13 @@ class DownloadManagerApp:
             selected_episode_name = next((name for slug, name in episode_entries if slug == selected_slug), "")
             selected_episode_name = _normalize_nnyy_episode_name(selected_episode_name, ep_slug=selected_slug, pad_width=episode_pad_width)
             display_name = _task_name_text(task, "").strip()
-            if not display_name:
+            auto_generated_name = default_short_name_for_url(url, is_mp3=is_mp3)
+            if (
+                not display_name
+                or display_name == auto_generated_name
+                or is_auto_generated_short_name(url, display_name, is_mp3=is_mp3)
+                or display_name.lower().endswith(".html")
+            ):
                 display_name = f"{page_title} {selected_episode_name}".strip() if selected_episode_name else page_title
             fallback_urls = candidates[1:]
             _set_task_identity(name=display_name, source_site="nnyy", source_page=url, fallback_urls=fallback_urls)
@@ -10264,27 +10311,48 @@ class DownloadManagerApp:
                 primary_url, primary_name = episodes[0]
                 episode_key = _movieffm_numbered_episode_key(primary_name.rsplit(" ", 1)[-1])
                 fallback_urls = [u for u in episode_fallbacks.get(episode_key, []) if u != primary_url]
+                preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
+                    primary_url,
+                    fallback_urls,
+                    source_site="movieffm",
+                )
+                if not preferred_url or not has_reachable:
+                    raise Exception("MovieFFM stream host did not resolve")
                 _set_task_identity(
                     name=primary_name,
                     source_site="movieffm",
                     source_page=detail_url,
-                    fallback_urls=fallback_urls,
+                    fallback_urls=ordered_fallbacks,
                 )
-                self._download_task_internal(primary_url, item_id, save_dir, use_impersonate, is_mp3)
+                self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
             page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(resp.text, short_name)
             if not candidates and not player_data and not external_source_urls:
                 raise Exception("MovieFFM player data not found")
             if not candidates and external_source_urls:
-                _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=external_source_urls[1:])
-                return self._download_task_internal(external_source_urls[0], item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
+                preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
+                    external_source_urls[0],
+                    external_source_urls[1:],
+                    source_site="movieffm",
+                )
+                if not preferred_url or not has_reachable:
+                    raise Exception("MovieFFM stream host did not resolve")
+                _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=ordered_fallbacks)
+                return self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
             if not candidates:
                 raise Exception("MovieFFM stream URL missing")
-            _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=candidates[1:])
-            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="movieffm")
+            preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
+                candidates[0],
+                candidates[1:],
+                source_site="movieffm",
+            )
+            if not preferred_url or not has_reachable:
+                raise Exception("MovieFFM stream host did not resolve")
+            _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=ordered_fallbacks)
+            self._log_m3u8_route_selected(task, item_id, preferred_url, source_site="movieffm", fallback_urls=ordered_fallbacks)
             parsed_page = urllib.parse.urlsplit(url)
             page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
-            self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
+            self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
             return
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" in parsed_url.path:
