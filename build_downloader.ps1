@@ -15,6 +15,17 @@ if (-not $buildInfo) {
 }
 $buildId = $buildInfo.Matches[0].Groups[1].Value
 $versionedExe = Join-Path $distDir ("downloader_{0}.exe" -f ($buildId -replace '-', '_'))
+$publishScript = Join-Path $projectRoot 'publish_github.ps1'
+
+function Get-BuildSequenceNumber {
+    param(
+        [string]$BuildIdentifier
+    )
+    if ($BuildIdentifier -match '-(\d+)$') {
+        return [int]$Matches[1]
+    }
+    throw "Unable to parse build sequence number from '$BuildIdentifier'"
+}
 
 function Sync-BundledBinary {
     param(
@@ -36,3 +47,13 @@ function Sync-BundledBinary {
 Sync-BundledBinary -SourcePath $ffmpegSource -DestinationPath (Join-Path $distDir 'ffmpeg.exe')
 Sync-BundledBinary -SourcePath $ffprobeSource -DestinationPath (Join-Path $distDir 'ffprobe.exe')
 Copy-Item -LiteralPath (Join-Path $distDir 'downloader.exe') -Destination $versionedExe -Force
+
+$buildSequence = Get-BuildSequenceNumber -BuildIdentifier $buildId
+if (($buildSequence % 10) -eq 0) {
+    if (-not (Test-Path -LiteralPath $publishScript)) {
+        throw "Publish script not found: $publishScript"
+    }
+    & $publishScript -BuildId $buildId -VersionedExe $versionedExe -TagName ("v{0}" -f $buildSequence)
+} else {
+    Write-Host ("Build {0} did not reach an automatic GitHub sync point." -f $buildId)
+}

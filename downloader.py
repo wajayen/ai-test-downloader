@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260513-2740"
+APP_BUILD = "20260514-2762"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -102,8 +102,10 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "gimy": 15.0,
     "99itv": 15.0,
     "777tv": 15.0,
+    "18jav": 15.0,
     "nnyy": 15.0,
     "movieffm": 15.0,
+    "missav": 15.0,
     "xiaoyakankan": 15.0,
     "jable": 15.0,
 }
@@ -111,27 +113,32 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 8
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "99itv": 12,
     "777tv": 12,
+    "18jav": 16,
     "gimy": 16,
     "jable": 12,
-    "missav": 12,
+    "missav": 16,
     "nnyy": 16,
-    "movieffm": 14,
+    "movieffm": 16,
     "xiaoyakankan": 12,
 }
 YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "99itv": False,
     "777tv": False,
+    "18jav": False,
     "gimy": True,
     "jable": False,
+    "missav": False,
     "nnyy": False,
     "xiaoyakankan": False,
 }
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 8
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
+    "18jav": 10,
     "gimy": 10,
-    "missav": 12,
-    "movieffm": 12,
+    "missav": 16,
+    "movieffm": 14,
     "mixdrop": 12,
+    "njavtv": 12,
     "99itv": 10,
     "nnyy": 10,
 }
@@ -784,6 +791,8 @@ def _normalize_state_entry(entry):
         normalized["resolved_url_saved_at"] = 0.0
     page_refresh_candidates = normalized.get("page_refresh_candidates", [])
     normalized["page_refresh_candidates"] = [u for u in page_refresh_candidates if isinstance(u, str) and u.strip()] if isinstance(page_refresh_candidates, list) else []
+    normalized["filename"] = str(normalized.get("filename", "") or "").strip()
+    normalized["temp_filename"] = str(normalized.get("temp_filename", "") or "").strip()
     return normalized
 
 
@@ -1567,6 +1576,10 @@ def _extract_movieffm_m3u8_candidates(page_html):
     candidates = []
     for match in re.finditer(r"videourl\s*:\s*'([^']+)'", str(page_html or ""), re.IGNORECASE):
         candidate = _normalize_download_url(html.unescape(match.group(1)).strip())
+        if candidate and (_looks_like_manifest_url(candidate) or _looks_like_http_media_url(candidate)):
+            candidates.append(candidate)
+    for match in re.finditer(r"url\s*:\s*'([^']+\.m3u8[^']*)'", str(page_html or ""), re.IGNORECASE):
+        candidate = _normalize_download_url(html.unescape(match.group(1)).strip())
         if candidate:
             candidates.append(candidate)
     for match in re.finditer(r'"url"\s*:\s*"([^"]+\.m3u8[^"]*)"', str(page_html or ""), re.IGNORECASE):
@@ -1660,7 +1673,16 @@ def _is_expired_signed_media_url(url, now_ts=None):
 
 def _extract_movieffm_external_source_urls(page_html):
     candidates = []
-    allowed_hosts = ("mixdrop.ag", "m1xdrop.click", "dood.so", "dood.pm", "dood.wf", "dood.re", "dood.yt")
+    allowed_hosts = (
+        "mixdrop.ag",
+        "m1xdrop.click",
+        "dood.so",
+        "dood.pm",
+        "dood.wf",
+        "dood.re",
+        "dood.yt",
+        "evoload.io",
+    )
     raw_html = str(page_html or "")
     normalized_html = html.unescape(raw_html).replace("\\/", "/")
 
@@ -1686,6 +1708,10 @@ def _extract_movieffm_external_source_urls(page_html):
         _append_candidate(normalized_candidate)
     for shortcode_match in re.finditer(r'\[pmoive\b[^\]]*\burl\s*=\s*["\']([^"\']+)["\']', normalized_html, re.IGNORECASE):
         _append_candidate(shortcode_match.group(1))
+    for match in re.finditer(r"videourl\s*:\s*'([^']+)'", normalized_html, re.IGNORECASE):
+        _append_candidate(match.group(1))
+    for match in re.finditer(r'"url"\s*:\s*"((?:https?:)?//[^"]+)"\s*,\s*"type"\s*:\s*"iframe"', normalized_html, re.IGNORECASE):
+        _append_candidate(match.group(1))
     return _dedupe_download_urls(candidates)
 
 
@@ -1787,9 +1813,25 @@ def _extract_movieffm_playback_candidates(page_html, fallback_title="MovieFFM"):
     candidates = []
     external_source_urls = []
     if player_data:
+        videourls = player_data.get("videourls")
+        if isinstance(videourls, list):
+            for entry in videourls:
+                if not isinstance(entry, dict):
+                    continue
+                raw_candidate = _normalize_download_url(entry.get("url"))
+                if not raw_candidate:
+                    continue
+                entry_type = str(entry.get("type") or "").strip().lower()
+                if entry_type == "iframe":
+                    external_source_urls.append(raw_candidate)
+                else:
+                    candidates.append(raw_candidate)
         primary_url = _normalize_download_url(player_data.get("url"))
-        if primary_url:
-            candidates.append(primary_url)
+        if primary_url and primary_url not in candidates and primary_url not in external_source_urls:
+            if _looks_like_manifest_url(primary_url) or _looks_like_http_media_url(primary_url):
+                candidates.append(primary_url)
+            else:
+                external_source_urls.append(primary_url)
         for key in ("urls", "backup", "backup_urls", "m3u8_urls"):
             value = player_data.get(key)
             if isinstance(value, list):
@@ -1805,6 +1847,13 @@ def _extract_movieffm_playback_candidates(page_html, fallback_title="MovieFFM"):
         _dedupe_download_urls(external_source_urls),
         player_data,
     )
+
+
+def _extract_movieffm_post_id(page_html):
+    match = re.search(r"\bpostid\s*:\s*(\d+)", str(page_html or ""), re.IGNORECASE)
+    if match:
+        return str(match.group(1) or "").strip()
+    return ""
 
 
 def _extract_movieffm_detail_page_urls(page_html, current_url=None):
@@ -1833,6 +1882,60 @@ def _collect_movieffm_tvshow_detail_pages(page_html, page_url, fallback_title="M
         seen.add(detail_url)
         detail_pages.append((detail_url, f"{show_title} Season {index}"))
     return show_title, detail_pages
+
+
+def _looks_like_parked_domain_html(page_html):
+    page_text = str(page_html or "")
+    lowered = page_text.lower()
+    return any(marker in lowered for marker in (
+        "assets.abovedomains.com",
+        "forsale.min.js",
+        "domain may be for sale",
+        "this domain is for sale",
+        "buy this domain",
+    ))
+
+
+def _should_use_ffmpeg_for_movieffm_manifest(stream_url):
+    host = urllib.parse.urlsplit(_normalize_download_url(stream_url)).netloc.lower()
+    return any(marker in host for marker in (
+        "okzy",
+        "youku.cdn7-okzy.com",
+    ))
+
+
+def _movieffm_manifest_candidate_is_dead(stream_url, referer="https://www.movieffm.net/"):
+    normalized_url = _normalize_download_url(stream_url)
+    host = urllib.parse.urlsplit(normalized_url).netloc.lower()
+    if not normalized_url or "okzy" not in host:
+        return False
+    try:
+        c_req = get_curl_cffi_requests()
+        session = c_req.Session(impersonate="chrome120")
+        try:
+            resp = session.get(
+                normalized_url,
+                timeout=10,
+                headers={
+                    "User-Agent": DEFAULT_USER_AGENT,
+                    "Referer": referer or "https://www.movieffm.net/",
+                    "Origin": "https://www.movieffm.net",
+                    "Accept": "*/*",
+                },
+            )
+            body = str(resp.text or "")
+            if resp.status_code >= 400:
+                return True
+            if "#EXTM3U" in body or normalized_url.lower().endswith(".m3u8"):
+                return False
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+    except Exception:
+        return True
+    return False
 
 
 def _decode_js_escaped_text(value):
@@ -2036,10 +2139,16 @@ def _url_host_resolves(url):
 
 def _movieffm_stream_priority(url):
     host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
-    if "lzcdn" in host:
+    if "xluuss" in host:
         return 0
-    if "ukubf" in host:
+    if "lzcdn" in host:
         return 1
+    if "letvoss" in host:
+        return 2
+    if "subokk" in host:
+        return 3
+    if "ukubf" in host:
+        return 4
     if "bdzybf" in host:
         return 50
     return 100
@@ -2324,6 +2433,320 @@ def _looks_like_placeholder_page_title(title_text, page_text=""):
     if any(marker in normalized_page for marker in page_markers):
         return True
     return False
+
+
+def _clean_ppp_porn_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*-\s*PPP\.Porn\s*\|.*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/") or str(raw_title or "").strip()
+
+
+def _clean_18jav_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*[-|]\s*18JAV.*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/") or str(raw_title or "").strip()
+
+
+def _clean_18av_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*[-|,]\s*18AV.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*,\s*(?:H動畫|H動漫|裏番).*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _is_18av_preview_media_url(url):
+    lowered = str(url or "").strip().lower()
+    if not lowered:
+        return False
+    return any(
+        marker in lowered
+        for marker in (
+            "imgstream1.com",
+            "gifb.",
+            "fchost1.",
+            "fbhost1.",
+        )
+    )
+
+
+def _decode_18av_payload(encoded_value, base_value, xor_value):
+    encoded_text = str(encoded_value or "").strip()
+    if not encoded_text:
+        return ""
+    try:
+        base_num = int(base_value)
+        xor_num = int(xor_value)
+    except Exception:
+        return ""
+    if base_num < 2:
+        return ""
+    split_char = chr(base_num + 97)
+    parts = [part for part in encoded_text.split(split_char) if part]
+    decoded_chars = []
+    try:
+        for part in parts:
+            decoded_chars.append(chr(int(part, base_num) ^ xor_num))
+    except Exception:
+        return ""
+    return "".join(decoded_chars)
+
+
+def _decrypt_18av_player_id(encoded_value, base_value, xor_value, aes_key, aes_iv):
+    stage1_payload = _decode_18av_payload(encoded_value, base_value, xor_value)
+    if not stage1_payload:
+        return "", ""
+    key_text = str(aes_key or "")
+    iv_text = str(aes_iv or "")
+    if not CryptoAES or not key_text or not iv_text:
+        return stage1_payload, ""
+    try:
+        cipher = CryptoAES.new(
+            key_text.encode("utf-8"),
+            CryptoAES.MODE_CBC,
+            iv_text.encode("utf-8"),
+        )
+        decrypted = cipher.decrypt(base64.b64decode(stage1_payload))
+        pad = decrypted[-1] if decrypted else 0
+        if 1 <= pad <= 16 and decrypted.endswith(bytes([pad]) * pad):
+            decrypted = decrypted[:-pad]
+        player_id = decrypted.decode("utf-8", errors="ignore").strip()
+        return stage1_payload, player_id
+    except Exception:
+        return stage1_payload, ""
+
+
+def _extract_18av_protected_player(page_text):
+    html_text = str(page_text or "")
+    iframe_prefix_match = re.search(
+        r"//18av\.mm-cg\.com/js/player/play\.php\?numresolution=\d+&id=",
+        html_text,
+        re.IGNORECASE,
+    )
+    encoded_id_match = re.search(
+        r"mvarr\['[^']+'\]\s*=\s*\[\[['\"](?:a_iframe_id_[^'\"]+)['\"],['\"]([^'\"]+)['\"]",
+        html_text,
+        re.IGNORECASE,
+    )
+    xor_match = re.search(r"\bhadeedg252\s*=\s*(\d+)", html_text)
+    base_match = re.search(r"\bhcdeedg252\s*=\s*(\d+)", html_text)
+    key_match = re.search(r"\bargdeqweqweqwe\s*=\s*['\"]([^'\"]+)['\"]", html_text)
+    iv_match = re.search(r"\bhdddedg252\s*=\s*['\"]([^'\"]+)['\"]", html_text)
+    encoded_id = encoded_id_match.group(1) if encoded_id_match else ""
+    decoded_payload_stage1, decoded_payload = _decrypt_18av_player_id(
+        encoded_id,
+        base_match.group(1) if base_match else "",
+        xor_match.group(1) if xor_match else "",
+        key_match.group(1) if key_match else "",
+        iv_match.group(1) if iv_match else "",
+    )
+    return {
+        "iframe_prefix": iframe_prefix_match.group(0) if iframe_prefix_match else "",
+        "encoded_id": encoded_id,
+        "decoded_payload_stage1": decoded_payload_stage1,
+        "decoded_payload": decoded_payload,
+        "xor_value": xor_match.group(1) if xor_match else "",
+        "base_value": base_match.group(1) if base_match else "",
+        "aes_key": key_match.group(1) if key_match else "",
+        "aes_iv": iv_match.group(1) if iv_match else "",
+    }
+
+
+def _resolve_18av_protected_player_media(page_url, page_html):
+    protected_player = _extract_18av_protected_player(page_html)
+    iframe_prefix = protected_player.get("iframe_prefix") or ""
+    if not iframe_prefix:
+        return "", "", "", protected_player
+    parsed = urllib.parse.urlparse(_normalize_download_url(page_url) or page_url)
+    site_root = f"{parsed.scheme}://{parsed.netloc}"
+    player_base = urllib.parse.urljoin(site_root + "/", iframe_prefix)
+    player_ids = []
+    for candidate in (
+        protected_player.get("decoded_payload"),
+        protected_player.get("encoded_id"),
+    ):
+        candidate = str(candidate or "").strip()
+        if candidate and candidate not in player_ids:
+            player_ids.append(candidate)
+    if not player_ids:
+        player_ids.append("")
+    c_req = get_curl_cffi_requests()
+    common_headers = {
+        "Referer": _normalize_download_url(page_url) or (site_root + "/"),
+        "Origin": site_root,
+        "User-Agent": DEFAULT_USER_AGENT,
+    }
+    last_probe_url = player_base
+    for player_id in player_ids:
+        probe_url = player_base + urllib.parse.quote(player_id, safe="")
+        last_probe_url = probe_url
+        try:
+            probe_resp = c_req.get(
+                probe_url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=common_headers,
+                cookies={"javascript_cookie_AgreeTOS_save1": "javascript_cookie_AgreeTOS_save2"},
+            )
+        except Exception:
+            continue
+        probe_html = str(getattr(probe_resp, "text", "") or "")
+        probe_candidates = _extract_candidate_media_urls(probe_html, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+        manifest_candidates = [
+            candidate for candidate in probe_candidates
+            if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
+        ]
+        direct_media_candidates = [
+            candidate for candidate in probe_candidates
+            if _looks_like_http_media_url(candidate) and "_preview.mp4" not in candidate.lower() and "/preview.mp4" not in candidate.lower()
+        ]
+        if manifest_candidates:
+            return manifest_candidates[0], "", probe_url, protected_player
+        if direct_media_candidates:
+            return "", direct_media_candidates[0], probe_url, protected_player
+    return "", "", last_probe_url, protected_player
+
+
+def _clean_pikpak_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s+Shared by\s+.*?\|\s*PikPak.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\|\s*PikPak.*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/") or str(raw_title or "").strip()
+
+
+def _extract_pikpak_nuxt_payload(page_text):
+    script_match = re.search(
+        r'<script[^>]+id=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>',
+        str(page_text or ""),
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not script_match:
+        return []
+    try:
+        payload = json.loads(html.unescape(script_match.group(1)))
+    except Exception:
+        return []
+    return payload if isinstance(payload, list) else []
+
+
+def _resolve_pikpak_nuxt_value(payload, value, seen=None, depth=0):
+    if depth > 12:
+        return value
+    if isinstance(value, int) and 0 <= value < len(payload):
+        if seen is None:
+            seen = set()
+        if value in seen:
+            return payload[value]
+        seen = set(seen)
+        seen.add(value)
+        return _resolve_pikpak_nuxt_value(payload, payload[value], seen=seen, depth=depth + 1)
+    if isinstance(value, list):
+        return [_resolve_pikpak_nuxt_value(payload, item, seen=seen, depth=depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _resolve_pikpak_nuxt_value(payload, item, seen=seen, depth=depth + 1)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _extract_pikpak_share_entries(page_text):
+    payload = _extract_pikpak_nuxt_payload(page_text)
+    if not payload:
+        return []
+    entries = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        kind = _resolve_pikpak_nuxt_value(payload, item.get("kind"))
+        if kind != "drive#file":
+            continue
+        resolved = {}
+        for field in (
+            "id",
+            "parent_id",
+            "name",
+            "size",
+            "file_extension",
+            "mime_type",
+            "web_content_link",
+            "links",
+            "medias",
+            "params",
+            "apps",
+            "file_category",
+            "phase",
+            "audit",
+            "thumbnail_link",
+            "icon_link",
+        ):
+            if field in item:
+                resolved[field] = _resolve_pikpak_nuxt_value(payload, item.get(field))
+        entries.append(resolved)
+    return entries
+
+
+def _is_pikpak_video_entry(entry):
+    if not isinstance(entry, dict):
+        return False
+    file_category = str(entry.get("file_category") or "").strip().upper()
+    mime_type = str(entry.get("mime_type") or "").strip().lower()
+    file_name = str(entry.get("name") or "").strip().lower()
+    return (
+        file_category == "VIDEO"
+        or mime_type.startswith("video/")
+        or file_name.endswith((".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"))
+    )
+
+
+def _pick_pikpak_primary_video_entry(entries):
+    videos = [entry for entry in entries if _is_pikpak_video_entry(entry)]
+    if not videos:
+        return None
+
+    def _video_rank(entry):
+        try:
+            size = int(str(entry.get("size") or "0"))
+        except Exception:
+            size = 0
+        return size
+
+    return max(videos, key=_video_rank)
+
+
+def _extract_pikpak_media_candidates(entries):
+    candidates = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        direct_url = _normalize_download_url(entry.get("web_content_link"))
+        if direct_url and direct_url not in candidates:
+            candidates.append(direct_url)
+        for source in (entry.get("links"), entry.get("medias"), entry.get("params"), entry.get("apps")):
+            nested = []
+            _walk_media_urls(source, nested)
+            for candidate in nested:
+                normalized = _normalize_download_url(candidate)
+                if normalized and normalized not in candidates:
+                    candidates.append(normalized)
+    return candidates
+
+
+def _pikpak_display_name(entry, fallback_name):
+    raw_name = str((entry or {}).get("name") or "").strip()
+    if raw_name:
+        stem = os.path.splitext(raw_name)[0].strip()
+        if stem:
+            return stem
+        return raw_name
+    return str(fallback_name or "").strip()
 
 
 def _extract_html_title(page_text, fallback_name):
@@ -2794,7 +3217,7 @@ def _should_prefer_native_hls(url, task=None):
     if source_site == "movieffm":
         # MovieFFM source quality varies a lot. Keep the conservative ffmpeg default,
         # but let stable direct-CDN playlists use the faster native HLS route.
-        if any(marker in host for marker in ("lzcdn", "bdzybf", "ukubf")):
+        if any(marker in host for marker in ("xluuss", "lzcdn", "letvoss", "subokk", "bdzybf", "ukubf", "ijycnd", "qsstvw", "gsuus", "hhuus", "huyall", "bfllvip")):
             return True
         return False
     if source_site == "njavtv":
@@ -2823,6 +3246,10 @@ def _should_prefer_native_hls(url, task=None):
         return False
     if source_site == "jable":
         if any(marker in host for marker in ("mushroomtrack", "hls.sb-cd.com", "cdn77.org")):
+            return True
+        return False
+    if source_site == "18jav":
+        if any(marker in host for marker in ("hshdkshd", "cdnlab.live")):
             return True
         return False
     if source_site == "nnyy":
@@ -4096,7 +4523,10 @@ class DownloadManagerApp:
                         "fallback_urls": _task_fallback_urls_list(task),
                         "source_page": self._get_task_source_page(task),
                         "resolved_url": _task_resolved_url(task),
+                        "resolved_url_saved_at": float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                         "page_refresh_candidates": _task_gimy_page_refresh_candidates(task),
+                        "filename": str(_task_field_value(task, "filename", "") or "").strip(),
+                        "temp_filename": str(_task_field_value(task, "temp_filename", "") or "").strip(),
                     },
                 )
             )
@@ -4721,6 +5151,27 @@ class DownloadManagerApp:
                 write_error_log("99itv parse failure", exc, url=new_url)
                 self._final_add_download(new_url, is_mp3=is_mp3)
 
+        def fetch_njavtv_single():
+            try:
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome110",
+                    timeout=15,
+                    headers={"Referer": "https://njavtv.com/", "Origin": "https://njavtv.com", "User-Agent": DEFAULT_USER_AGENT},
+                )
+                parsed_new_url = urllib.parse.urlsplit(new_url)
+                slug = parsed_new_url.path.strip("/").split("/")[-1]
+                fallback_title = slug.upper()
+                code_m = re.search(r"([A-Za-z]+)-(\d+)", slug, re.IGNORECASE)
+                if code_m:
+                    fallback_title = f"{code_m.group(1).upper()}-{code_m.group(2)}"
+                page_title = _extract_html_title(resp.text, fallback_title)
+                self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="njavtv")
+            except Exception as exc:
+                write_error_log("njavtv parse failure", exc, url=new_url)
+                self._final_add_download(new_url, is_mp3=is_mp3)
+
         lowered = new_url.lower()
         if _is_anime1_category_url(new_url):
             self._start_background_parse(fetch_anime1)
@@ -4757,6 +5208,9 @@ class DownloadManagerApp:
             return
         if "99itv.net" in lowered and re.search(r"/vodplay/\d+-\d+-\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
             self._start_background_parse(fetch_99itv_single)
+            return
+        if "njavtv.com" in lowered:
+            self._start_background_parse(fetch_njavtv_single)
             return
         self._final_add_download(new_url, is_mp3=is_mp3)
         return
@@ -5732,9 +6186,11 @@ class DownloadManagerApp:
                     "resolved_url": _task_resolved_url(task),
                     "resolved_url_saved_at": float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                     "page_refresh_candidates": list(_task_gimy_page_refresh_candidates(task)),
+                    "filename": str(_task_field_value(task, "filename", "") or "").strip(),
+                    "temp_filename": str(_task_field_value(task, "temp_filename", "") or "").strip(),
                 }
             )
-            signature_append((url, name, is_mp3, _task_resume_requested(task), source_site, fallback_urls, source_page, _task_resolved_url(task), float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0), tuple(_task_gimy_page_refresh_candidates(task))))
+            signature_append((url, name, is_mp3, _task_resume_requested(task), source_site, fallback_urls, source_page, _task_resolved_url(task), float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0), tuple(_task_gimy_page_refresh_candidates(task)), str(_task_field_value(task, "filename", "") or "").strip(), str(_task_field_value(task, "temp_filename", "") or "").strip()))
         return entries, tuple(signature_parts)
 
     def _mark_existing_file_complete(self, item_id, message):
@@ -8035,7 +8491,7 @@ class DownloadManagerApp:
         )
         info = None
         with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if source_site in ("99itv", "777tv", "movieffm", "gimy", "nnyy", "xiaoyakankan", "jable") and _looks_like_manifest_url(url):
+            if source_site in ("99itv", "777tv", "movieffm", "gimy", "missav", "nnyy", "xiaoyakankan", "jable", "18jav") and _looks_like_manifest_url(url):
                 info = ydl.extract_info(url, download=True)
             elif _looks_like_manifest_url(url):
                 protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
@@ -10043,7 +10499,8 @@ class DownloadManagerApp:
                 title = f"{code_m.group(1).upper()}-{code_m.group(2)}"
             title = _extract_html_title(resp.text, title)
             _set_task_identity(name=title, source_site="njavtv")
-            self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer="https://njavtv.com/", origin="https://njavtv.com")
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="njavtv", fallback_urls=[])
+            _download_manifest_with_generic_ytdlp(stream_url, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             return
 
         if "nnyy.in" in parsed_url.netloc and re.search(r"/(?:dianying|dianshiju|zongyi|dongman)/\d+\.html$", parsed_url.path, re.IGNORECASE):
@@ -10297,6 +10754,44 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, key="eta_site_movieffm", fallback="正在解析 MovieFFM 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://www.movieffm.net/"})
+            def _movieffm_api_fallback_candidates(page_text, page_link):
+                post_id = _extract_movieffm_post_id(page_text)
+                if not post_id:
+                    return [], []
+                api_base = f"https://www.movieffm.net/wp-json/dooplayer/v1/post/{post_id}"
+                manifest_candidates = []
+                external_candidates = []
+                page_headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": page_link}
+                for source_index in range(0, 8):
+                    api_url = f"{api_base}?type=movie&source={source_index}"
+                    try:
+                        api_resp = c_req.get(api_url, impersonate="chrome110", timeout=15, headers=page_headers)
+                        api_data = api_resp.json()
+                    except Exception:
+                        continue
+                    embed_url = _normalize_download_url((api_data or {}).get("embed_url"))
+                    embed_type = str((api_data or {}).get("type") or "").strip().lower()
+                    if not embed_url:
+                        continue
+                    if embed_type == "iframe":
+                        external_candidates.append(embed_url)
+                        continue
+                    if "movieffm.net/ap/" in embed_url:
+                        try:
+                            ap_resp = c_req.get(embed_url, impersonate="chrome110", timeout=20, headers=page_headers)
+                            extracted = _extract_movieffm_m3u8_candidates(ap_resp.text)
+                            if not extracted:
+                                extracted = _extract_candidate_media_urls(ap_resp.text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
+                            for candidate in extracted:
+                                normalized_candidate = _normalize_download_url(candidate)
+                                if normalized_candidate:
+                                    manifest_candidates.append(normalized_candidate)
+                        except Exception:
+                            pass
+                        continue
+                    if _looks_like_manifest_url(embed_url) or _looks_like_http_media_url(embed_url):
+                        manifest_candidates.append(embed_url)
+                return _dedupe_download_urls(manifest_candidates), _dedupe_download_urls(external_candidates)
             if "/tvshows/" in parsed_url.path:
                 _, detail_pages = _collect_movieffm_tvshow_detail_pages(resp.text, url, short_name or "MovieFFM")
                 if not detail_pages:
@@ -10325,8 +10820,19 @@ class DownloadManagerApp:
                 self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
             page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(resp.text, short_name)
+            api_candidates, api_external_source_urls = _movieffm_api_fallback_candidates(resp.text, url)
+            for candidate in api_candidates:
+                if candidate not in candidates:
+                    candidates.append(candidate)
+            for candidate in api_external_source_urls:
+                if candidate not in external_source_urls:
+                    external_source_urls.append(candidate)
             if not candidates and not player_data and not external_source_urls:
                 raise Exception("MovieFFM player data not found")
+            candidates = [
+                candidate for candidate in candidates
+                if not _movieffm_manifest_candidate_is_dead(candidate, referer=url)
+            ]
             if not candidates and external_source_urls:
                 preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
                     external_source_urls[0],
@@ -10338,7 +10844,7 @@ class DownloadManagerApp:
                 _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=ordered_fallbacks)
                 return self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
             if not candidates:
-                raise Exception("MovieFFM stream URL missing")
+                raise Exception("MovieFFM stream unavailable")
             preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
                 candidates[0],
                 candidates[1:],
@@ -10350,18 +10856,72 @@ class DownloadManagerApp:
             self._log_m3u8_route_selected(task, item_id, preferred_url, source_site="movieffm", fallback_urls=ordered_fallbacks)
             parsed_page = urllib.parse.urlsplit(url)
             page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
-            self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
+            if _should_use_ffmpeg_for_movieffm_manifest(preferred_url):
+                self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
+            elif _should_prefer_native_hls(preferred_url, task):
+                self._download_m3u8_with_ytdlp_native(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
+            else:
+                _download_manifest_with_generic_ytdlp(preferred_url, referer=url, origin=page_origin)
             return
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_site_movieffm", fallback="正在解析 MovieFFM 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
+            def _movieffm_api_fallback_candidates(page_text, page_link):
+                post_id = _extract_movieffm_post_id(page_text)
+                if not post_id:
+                    return [], []
+                api_base = f"https://www.movieffm.net/wp-json/dooplayer/v1/post/{post_id}"
+                manifest_candidates = []
+                external_candidates = []
+                page_headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": page_link}
+                for source_index in range(0, 8):
+                    api_url = f"{api_base}?type=movie&source={source_index}"
+                    try:
+                        api_resp = c_req.get(api_url, impersonate="chrome110", timeout=15, headers=page_headers)
+                        api_data = api_resp.json()
+                    except Exception:
+                        continue
+                    embed_url = _normalize_download_url((api_data or {}).get("embed_url"))
+                    embed_type = str((api_data or {}).get("type") or "").strip().lower()
+                    if not embed_url:
+                        continue
+                    if embed_type == "iframe":
+                        external_candidates.append(embed_url)
+                        continue
+                    if "movieffm.net/ap/" in embed_url:
+                        try:
+                            ap_resp = c_req.get(embed_url, impersonate="chrome110", timeout=20, headers=page_headers)
+                            extracted = _extract_movieffm_m3u8_candidates(ap_resp.text)
+                            if not extracted:
+                                extracted = _extract_candidate_media_urls(ap_resp.text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
+                            for candidate in extracted:
+                                normalized_candidate = _normalize_download_url(candidate)
+                                if normalized_candidate:
+                                    manifest_candidates.append(normalized_candidate)
+                        except Exception:
+                            pass
+                        continue
+                    if _looks_like_manifest_url(embed_url) or _looks_like_http_media_url(embed_url):
+                        manifest_candidates.append(embed_url)
+                return _dedupe_download_urls(manifest_candidates), _dedupe_download_urls(external_candidates)
             drama_title, episodes, episode_fallbacks = _collect_movieffm_drama_episodes(resp.text, url, short_name or "MovieFFM")
             if not episodes:
                 page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(resp.text, drama_title or short_name)
+                api_candidates, api_external_source_urls = _movieffm_api_fallback_candidates(resp.text, url)
+                for candidate in api_candidates:
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+                for candidate in api_external_source_urls:
+                    if candidate not in external_source_urls:
+                        external_source_urls.append(candidate)
                 if not candidates and not player_data and not external_source_urls:
                     raise Exception("MovieFFM detail page did not expose episode links")
+                candidates = [
+                    candidate for candidate in candidates
+                    if not _movieffm_manifest_candidate_is_dead(candidate, referer=url)
+                ]
                 if not candidates and external_source_urls:
                     preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
                         external_source_urls[0],
@@ -10373,7 +10933,7 @@ class DownloadManagerApp:
                     _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=ordered_fallbacks)
                     return self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
                 if not candidates:
-                    raise Exception("MovieFFM detail page stream URL missing")
+                    raise Exception("MovieFFM detail page stream unavailable")
                 preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(candidates[0], candidates[1:], source_site="movieffm")
                 if not preferred_url or not has_reachable:
                     raise Exception("MovieFFM stream host did not resolve")
@@ -10381,7 +10941,12 @@ class DownloadManagerApp:
                 self._log_m3u8_route_selected(task, item_id, preferred_url, source_site="movieffm", fallback_urls=ordered_fallbacks)
                 parsed_page = urllib.parse.urlsplit(url)
                 page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
-                self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
+                if _should_use_ffmpeg_for_movieffm_manifest(preferred_url):
+                    self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
+                elif _should_prefer_native_hls(preferred_url, task):
+                    self._download_m3u8_with_ytdlp_native(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
+                else:
+                    _download_manifest_with_generic_ytdlp(preferred_url, referer=url, origin=page_origin)
                 return
             primary_url, primary_name = episodes[0]
             episode_key = _movieffm_numbered_episode_key(primary_name.rsplit(" ", 1)[-1])
@@ -11101,8 +11666,281 @@ class DownloadManagerApp:
                 return
             _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=candidates[1:] or direct_media_candidates)
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="missav")
-            self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+            if _task_resume_requested(task) or self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3):
+                self._download_m3u8_with_ffmpeg(
+                    item_id,
+                    candidates[0],
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=url,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                )
+            elif _should_prefer_native_hls(candidates[0], task):
+                self._download_m3u8_with_ytdlp_native(
+                    item_id,
+                    candidates[0],
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=url,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                )
+            else:
+                _download_manifest_with_generic_ytdlp(
+                    candidates[0],
+                    referer=url,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                )
             return
+
+        if "ppp.porn" in parsed_url.netloc and "/v/" in parsed_url.path:
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _clean_ppp_porn_title(_extract_html_title(resp.text, short_name or "PPP.Porn"))
+            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            manifest_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
+            ]
+            direct_media_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_http_media_url(candidate) and "_preview.mp4" not in candidate.lower()
+            ]
+            stream_url = manifest_candidates[0] if manifest_candidates else ""
+            media_url = direct_media_candidates[0] if direct_media_candidates else ""
+            fallback_urls = []
+            if stream_url:
+                fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
+                _set_task_identity(name=page_title, source_site="ppp.porn", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="ppp.porn", fallback_urls=fallback_urls)
+                self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                return
+            if media_url:
+                fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
+                _set_task_identity(name=page_title, source_site="ppp.porn", source_page=url, fallback_urls=fallback_urls)
+                if is_mp3:
+                    self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin=site_root)
+                else:
+                    ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                    out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                    out_path = os.path.join(save_dir, out_name + ext)
+                    self._download_http_media(
+                        item_id,
+                        media_url,
+                        out_path,
+                        headers={"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                    )
+                return
+            raise Exception("PPP.Porn media URL missing")
+
+        if "18jav.tv" in parsed_url.netloc and "/videos/" in parsed_url.path:
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _clean_18jav_title(_extract_html_title(resp.text, short_name or "18JAV"))
+            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            manifest_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
+            ]
+            direct_media_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_http_media_url(candidate)
+                and "_preview.mp4" not in candidate.lower()
+                and "/preview.mp4" not in candidate.lower()
+                and not _is_18av_preview_media_url(candidate)
+            ]
+            stream_url = manifest_candidates[0] if manifest_candidates else ""
+            media_url = direct_media_candidates[0] if direct_media_candidates else ""
+            fallback_urls = []
+            if stream_url:
+                fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
+                _set_task_identity(name=page_title, source_site="18jav", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18jav", fallback_urls=fallback_urls)
+                if _should_prefer_native_hls(stream_url, task):
+                    self._download_m3u8_with_ytdlp_native(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                else:
+                    _download_manifest_with_generic_ytdlp(stream_url, referer=url, origin=site_root)
+                return
+            if media_url:
+                fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
+                _set_task_identity(name=page_title, source_site="18jav", source_page=url, fallback_urls=fallback_urls)
+                if is_mp3:
+                    self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin=site_root)
+                else:
+                    ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                    out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                    out_path = os.path.join(save_dir, out_name + ext)
+                    self._download_http_media(
+                        item_id,
+                        media_url,
+                        out_path,
+                        headers={"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                    )
+                return
+            raise Exception("18JAV media URL missing")
+
+        if "18av.mm-cg.com" in parsed_url.netloc and "/animation_content/" in parsed_url.path:
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "撌脣?敺葡瘚雯?"))
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _clean_18av_title(_extract_html_title(resp.text, short_name or "18AV"))
+            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            manifest_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
+            ]
+            direct_media_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_http_media_url(candidate)
+                and "_preview.mp4" not in candidate.lower()
+                and "/preview.mp4" not in candidate.lower()
+                and not _is_18av_preview_media_url(candidate)
+            ]
+            stream_url = manifest_candidates[0] if manifest_candidates else ""
+            page_media_url = direct_media_candidates[0] if direct_media_candidates else ""
+            fallback_urls = []
+            if stream_url:
+                fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
+                _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18av", fallback_urls=fallback_urls)
+                self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                return
+            stream_url, media_url, player_probe_url, protected_player = _resolve_18av_protected_player_media(url, resp.text)
+            if stream_url:
+                _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=[])
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18av", fallback_urls=[])
+                self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                return
+            if media_url:
+                _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=[])
+                if is_mp3:
+                    self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin=site_root)
+                else:
+                    ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                    out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                    out_path = os.path.join(save_dir, out_name + ext)
+                    self._download_http_media(
+                        item_id,
+                        media_url,
+                        out_path,
+                        headers={"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                    )
+                return
+            if page_media_url:
+                fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != page_media_url]
+                _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=fallback_urls)
+                if is_mp3:
+                    self._download_direct_media_audio_with_ffmpeg(item_id, page_media_url, save_dir, referer=url, origin=site_root)
+                else:
+                    ext = os.path.splitext(urllib.parse.urlparse(page_media_url).path)[1] or ".mp4"
+                    out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                    out_path = os.path.join(save_dir, out_name + ext)
+                    self._download_http_media(
+                        item_id,
+                        page_media_url,
+                        out_path,
+                        headers={"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                    )
+                return
+            _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=[])
+            write_error_log(
+                "18av protected player unavailable",
+                Exception("18AV protected player endpoint returned empty shell"),
+                item_id=item_id,
+                url=url,
+                source_site="18av",
+                player_probe_url=player_probe_url or None,
+                iframe_prefix=protected_player.get("iframe_prefix") or None,
+                encoded_player_id=protected_player.get("encoded_id") or None,
+                decoded_payload=protected_player.get("decoded_payload") or None,
+                payload_base=protected_player.get("base_value") or None,
+                payload_xor=protected_player.get("xor_value") or None,
+                aes_key=protected_player.get("aes_key") or None,
+                aes_iv=protected_player.get("aes_iv") or None,
+            )
+            raise Exception("18AV protected player unavailable")
+
+        if "mypikpak.com" in parsed_url.netloc and parsed_url.path.startswith("/s/"):
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="正在解析 PikPak 分享頁...")
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _clean_pikpak_title(_extract_html_title(resp.text, short_name or "PikPak"))
+            share_entries = _extract_pikpak_share_entries(resp.text)
+            primary_entry = _pick_pikpak_primary_video_entry(share_entries)
+            display_name = _pikpak_display_name(primary_entry, page_title) if primary_entry else page_title
+            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            candidate_urls.extend(_extract_pikpak_media_candidates(share_entries))
+            candidate_urls = _dedupe_download_urls(candidate_urls)
+            manifest_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
+            ]
+            direct_media_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_http_media_url(candidate)
+            ]
+            stream_url = manifest_candidates[0] if manifest_candidates else ""
+            media_url = direct_media_candidates[0] if direct_media_candidates else ""
+            fallback_urls = []
+            if stream_url:
+                fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
+                _set_task_identity(name=display_name, source_site="pikpak", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="pikpak", fallback_urls=fallback_urls)
+                self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                return
+            if media_url:
+                fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
+                _set_task_identity(name=display_name, source_site="pikpak", source_page=url, fallback_urls=fallback_urls)
+                if is_mp3:
+                    self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin=site_root)
+                else:
+                    ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                    out_name = re.sub(r'[\\/:*?"<>|]+', "_", display_name).strip() or "video"
+                    out_path = os.path.join(save_dir, out_name + ext)
+                    self._download_http_media(
+                        item_id,
+                        media_url,
+                        out_path,
+                        headers={"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                    )
+                return
+            _set_task_identity(name=display_name, source_site="pikpak", source_page=url, fallback_urls=[])
+            write_error_log(
+                "pikpak protected share unavailable",
+                Exception("PikPak protected share API requires device_id and captcha_token"),
+                item_id=item_id,
+                url=url,
+                source_site="pikpak",
+                share_entry_count=len(share_entries),
+                video_name=(primary_entry or {}).get("name") if isinstance(primary_entry, dict) else None,
+                has_nuxt_data="__NUXT_DATA__" in (resp.text or ""),
+            )
+            raise Exception("PikPak protected share requires browser verification")
 
         if "avjoy.me" in parsed_url.netloc and "/video/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
@@ -11128,6 +11966,75 @@ class DownloadManagerApp:
                 self._download_http_media(item_id, media_url, out_path, headers={"Referer": safe_referer, "Origin": f"{parsed_url.scheme}://{parsed_url.netloc}", "User-Agent": ydl_opts["http_headers"]["User-Agent"]})
             return
 
+        if "evoload.io" in parsed_url.netloc:
+            self._set_task_parse_ui(item_id, key="eta_site_movieffm", fallback="正在解析 MovieFFM 外部來源...")
+            c_req = get_curl_cffi_requests()
+            source_page_referer = self._get_task_source_page(task) or "https://www.movieffm.net/"
+            evoload_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            evoload_session = self._track_network_session(c_req.Session(impersonate="chrome120"))
+            page_headers = {
+                "Referer": source_page_referer,
+                "Origin": "https://www.movieffm.net",
+                "User-Agent": DEFAULT_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            resp = evoload_session.get(url, timeout=20, headers=page_headers)
+            page_variants = [resp.text]
+            redirect_match = re.search(r"redirect_link\s*=\s*'([^']+)'", str(resp.text or ""), re.IGNORECASE)
+            if redirect_match:
+                redirect_base = html.unescape(str(redirect_match.group(1) or "").strip())
+                redirect_url = _normalize_download_url(redirect_base + "fp=-5")
+                if redirect_url and redirect_url != url:
+                    try:
+                        redirect_resp = evoload_session.get(
+                            redirect_url,
+                            timeout=20,
+                            headers={
+                                "Referer": url,
+                                "Origin": evoload_origin,
+                                "User-Agent": DEFAULT_USER_AGENT,
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                            },
+                        )
+                        page_variants.append(redirect_resp.text)
+                    except Exception:
+                        pass
+            media_candidates = []
+            for page_text in page_variants:
+                media_candidates.extend(_extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+                unpacked = unpack_packed_javascript(page_text)
+                if unpacked:
+                    media_candidates.extend(_extract_candidate_media_urls(unpacked, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+            media_candidates = _dedupe_download_urls(media_candidates)
+            media_url = next((candidate for candidate in media_candidates if _looks_like_manifest_url(candidate)), None)
+            if not media_url:
+                media_url = next((candidate for candidate in media_candidates if _looks_like_http_media_url(candidate)), None)
+            if not media_url and any(_looks_like_parked_domain_html(page_text) for page_text in page_variants):
+                raise Exception("EvoLoad source unavailable")
+            if not media_url:
+                raise Exception("EvoLoad media URL missing")
+            page_title = _task_name_text(task, short_name) or short_name or "MovieFFM"
+            fallback_urls = [candidate for candidate in media_candidates if candidate != media_url]
+            _set_task_identity(name=page_title, source_site=_task_source_site_name(task) or "movieffm", source_page=url, fallback_urls=fallback_urls)
+            if _looks_like_manifest_url(media_url):
+                self._log_m3u8_route_selected(task, item_id, media_url, source_site=_task_source_site_name(task) or "movieffm", fallback_urls=fallback_urls)
+                _download_manifest_with_generic_ytdlp(media_url, referer=url, origin=evoload_origin)
+            elif is_mp3:
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
+                self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin=evoload_origin)
+            else:
+                self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
+                ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                self._download_http_media(
+                    item_id,
+                    media_url,
+                    os.path.join(save_dir, out_name + ext),
+                    headers={"Referer": url, "Origin": evoload_origin, "User-Agent": ydl_opts["http_headers"]["User-Agent"]},
+                    session=evoload_session,
+                )
+            return
+
         if any(host in parsed_url.netloc for host in ("mixdrop.ag", "m1xdrop.click")):
             self._set_task_parse_ui(item_id, key="eta_site_movieffm", fallback="正在解析外部播放來源...")
             c_req = get_curl_cffi_requests()
@@ -11147,7 +12054,7 @@ class DownloadManagerApp:
             _set_task_identity(name=page_title, source_site=_task_source_site_name(task) or "movieffm", source_page=watch_url, fallback_urls=fallback_urls)
             if _looks_like_manifest_url(media_url):
                 self._log_m3u8_route_selected(task, item_id, media_url, source_site=_task_source_site_name(task) or "movieffm", fallback_urls=fallback_urls)
-                self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=watch_url, origin=mixdrop_origin)
+                _download_manifest_with_generic_ytdlp(media_url, referer=watch_url, origin=mixdrop_origin)
             elif is_mp3:
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=watch_url, origin=mixdrop_origin)
