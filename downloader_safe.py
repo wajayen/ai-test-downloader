@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260514-2762"
+APP_BUILD = "20260514-2770"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -6819,6 +6819,21 @@ class DownloadManagerApp:
         return any(self._has_nonempty_file(candidate_path) or os.path.exists(candidate_path) for candidate_path in candidate_paths)
 
     def _resolve_resume_artifact_base(self, task, url, ext="mp4", save_dir=None, fallback_name="Video"):
+        explicit_temp_path = str(_task_field_value(task, "temp_filename", "") or "").strip()
+        explicit_output_path = str(_task_field_value(task, "filename", "") or "").strip()
+        for explicit_path in (explicit_temp_path, explicit_output_path):
+            if explicit_path and self._has_resume_artifact_family(explicit_path):
+                resume_keys = []
+                for candidate in (
+                    _task_url_value(task, fallback_url=url),
+                    self._get_task_source_page(task, fallback_url=url),
+                    url,
+                ):
+                    normalized_candidate = _normalize_download_url(candidate)
+                    if normalized_candidate and normalized_candidate not in resume_keys:
+                        resume_keys.append(normalized_candidate)
+                primary_key = resume_keys[0] if resume_keys else (_normalize_download_url(url) or str(url or ""))
+                return explicit_path, primary_key, resume_keys
         resume_keys = []
         for candidate in (
             _task_url_value(task, fallback_url=url),
@@ -10268,6 +10283,58 @@ class DownloadManagerApp:
                 raise KeyboardInterrupt()
             self._mark_task_finished(item_id)
 
+        def _download_manifest_with_site_strategy(
+            target_url,
+            referer=None,
+            origin=None,
+            default_route="generic",
+            force_ffmpeg=False,
+        ):
+            # Keep manifest resume behavior consistent across supported sites:
+            # resumed/incomplete HLS tasks always go through the shared ffmpeg resume path,
+            # while fresh downloads can still choose native or generic yt-dlp per site.
+            if _task_resume_requested(task) or self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3):
+                self._download_m3u8_with_ffmpeg(
+                    item_id,
+                    target_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
+                )
+                return
+            if force_ffmpeg:
+                self._download_m3u8_with_ffmpeg(
+                    item_id,
+                    target_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
+                )
+                return
+            if _should_prefer_native_hls(target_url, task):
+                self._download_m3u8_with_ytdlp_native(
+                    item_id,
+                    target_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
+                )
+                return
+            if default_route == "ffmpeg":
+                self._download_m3u8_with_ffmpeg(
+                    item_id,
+                    target_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
+                )
+                return
+            _download_manifest_with_generic_ytdlp(target_url, referer=referer, origin=origin)
+
         def _set_task_identity(name=None, source_site=None, source_page=None, fallback_urls=None):
             updates = {}
             if name:
@@ -10390,7 +10457,38 @@ class DownloadManagerApp:
             ydl_opts["http_headers"]["Referer"] = referer
             ydl_opts["http_headers"]["Origin"] = origin
             self._log_m3u8_route_selected(task, item_id, url, source_site=forced_m3u8_site)
-            self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=referer, origin=origin)
+            _download_manifest_with_site_strategy(
+                url,
+                referer=referer,
+                origin=origin,
+                default_route="ffmpeg",
+            )
+            return
+
+        if _looks_like_manifest_url(url):
+            source_page_url = self._get_task_source_page(task, fallback_url="") or ""
+            referer = source_page_url or url
+            parsed_referer = urllib.parse.urlparse(referer)
+            if parsed_referer.scheme and parsed_referer.netloc:
+                origin = f"{parsed_referer.scheme}://{parsed_referer.netloc}"
+            else:
+                origin = f"{parsed_url.scheme}://{parsed_url.netloc}" if parsed_url.scheme and parsed_url.netloc else ""
+            self._log_m3u8_route_selected(
+                task,
+                item_id,
+                url,
+                source_site=_task_source_site_name(task),
+                fallback_urls=_task_fallback_urls_list(task, primary_url=url),
+            )
+            _download_manifest_with_site_strategy(
+                url,
+                referer=referer,
+                origin=origin,
+                force_ffmpeg=(
+                    _task_source_site_name(task) == "movieffm"
+                    and _should_use_ffmpeg_for_movieffm_manifest(url)
+                ),
+            )
             return
 
         inferred_direct_media_ext = _infer_media_extension_from_url(url)
@@ -10475,7 +10573,12 @@ class DownloadManagerApp:
             _set_task_identity(name=clean_title, source_site="jable")
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, url, source_site="jable", fallback_urls=[])
-            self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer="https://jable.tv/", origin="https://jable.tv")
+            _download_manifest_with_site_strategy(
+                url,
+                referer="https://jable.tv/",
+                origin="https://jable.tv",
+                default_route="ffmpeg",
+            )
             return
 
         if "njavtv.com" in parsed_url.netloc:
@@ -10500,7 +10603,11 @@ class DownloadManagerApp:
             title = _extract_html_title(resp.text, title)
             _set_task_identity(name=title, source_site="njavtv")
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="njavtv", fallback_urls=[])
-            _download_manifest_with_generic_ytdlp(stream_url, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+            _download_manifest_with_site_strategy(
+                stream_url,
+                referer=url,
+                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+            )
             return
 
         if "nnyy.in" in parsed_url.netloc and re.search(r"/(?:dianying|dianshiju|zongyi|dongman)/\d+\.html$", parsed_url.path, re.IGNORECASE):
@@ -10550,11 +10657,8 @@ class DownloadManagerApp:
             fallback_urls = candidates[1:]
             _set_task_identity(name=display_name, source_site="nnyy", source_page=url, fallback_urls=fallback_urls)
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="nnyy", fallback_urls=fallback_urls)
-            self._download_m3u8_with_ffmpeg(
-                item_id,
+            _download_manifest_with_site_strategy(
                 candidates[0],
-                save_dir,
-                is_mp3=is_mp3,
                 referer=url,
                 origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
             )
@@ -10593,7 +10697,12 @@ class DownloadManagerApp:
                 raise Exception("777TV detail page did not expose episode links")
             _set_task_identity(name=page_title, source_site="777tv", source_page=url, fallback_urls=candidates[1:])
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="777tv", fallback_urls=candidates[1:])
-            self._download_m3u8_with_ffmpeg(item_id, candidates[0], save_dir, is_mp3=is_mp3, referer="https://777tv.ai/", origin="https://777tv.ai")
+            _download_manifest_with_site_strategy(
+                candidates[0],
+                referer="https://777tv.ai/",
+                origin="https://777tv.ai",
+                default_route="ffmpeg",
+            )
             return
 
         if "play.777tv.ai" in parsed_url.netloc and re.search(r"/vod/play/id/\d+/sid/\d+/nid/\d+\.html$", parsed_url.path, re.IGNORECASE):
@@ -10612,13 +10721,11 @@ class DownloadManagerApp:
             fallback_urls = candidates[1:]
             _set_task_identity(name=display_name, source_site="777tv", source_page=url, fallback_urls=fallback_urls)
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="777tv", fallback_urls=fallback_urls)
-            self._download_m3u8_with_ffmpeg(
-                item_id,
+            _download_manifest_with_site_strategy(
                 candidates[0],
-                save_dir,
-                is_mp3=is_mp3,
                 referer=url,
                 origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                default_route="ffmpeg",
             )
             return
 
@@ -10686,13 +10793,11 @@ class DownloadManagerApp:
             ]
             _set_task_identity(name=display_name, source_site="3kor", source_page=detail_url, fallback_urls=fallback_urls)
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="3kor", fallback_urls=fallback_urls)
-            self._download_m3u8_with_ffmpeg(
-                item_id,
+            _download_manifest_with_site_strategy(
                 stream_url,
-                save_dir,
-                is_mp3=is_mp3,
                 referer=detail_url,
                 origin="https://3kor.com",
+                default_route="ffmpeg",
             )
             return
 
@@ -10744,7 +10849,12 @@ class DownloadManagerApp:
                 task_fallback_urls = _task_fallback_urls_list(task)
                 write_error_log("xiaoyakankan parse success", Exception("xiaoyakankan parse success"), url=url, item_id=item_id, stream_url=m3u8_url, fallback_count=len(task_fallback_urls))
                 self._log_m3u8_route_selected(task, item_id, m3u8_url, source_site="xiaoyakankan", fallback_urls=task_fallback_urls)
-                self._download_m3u8_with_ffmpeg(item_id, m3u8_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+                _download_manifest_with_site_strategy(
+                    m3u8_url,
+                    referer=url,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                    default_route="ffmpeg",
+                )
                 return
             except Exception as e:
                 write_error_log("xiaoyakankan parse failure", e, url=url, item_id=item_id)
@@ -10856,12 +10966,12 @@ class DownloadManagerApp:
             self._log_m3u8_route_selected(task, item_id, preferred_url, source_site="movieffm", fallback_urls=ordered_fallbacks)
             parsed_page = urllib.parse.urlsplit(url)
             page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
-            if _should_use_ffmpeg_for_movieffm_manifest(preferred_url):
-                self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
-            elif _should_prefer_native_hls(preferred_url, task):
-                self._download_m3u8_with_ytdlp_native(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
-            else:
-                _download_manifest_with_generic_ytdlp(preferred_url, referer=url, origin=page_origin)
+            _download_manifest_with_site_strategy(
+                preferred_url,
+                referer=url,
+                origin=page_origin,
+                force_ffmpeg=_should_use_ffmpeg_for_movieffm_manifest(preferred_url),
+            )
             return
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" in parsed_url.path:
@@ -10941,12 +11051,12 @@ class DownloadManagerApp:
                 self._log_m3u8_route_selected(task, item_id, preferred_url, source_site="movieffm", fallback_urls=ordered_fallbacks)
                 parsed_page = urllib.parse.urlsplit(url)
                 page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
-                if _should_use_ffmpeg_for_movieffm_manifest(preferred_url):
-                    self._download_m3u8_with_ffmpeg(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
-                elif _should_prefer_native_hls(preferred_url, task):
-                    self._download_m3u8_with_ytdlp_native(item_id, preferred_url, save_dir, is_mp3=is_mp3, referer=url, origin=page_origin)
-                else:
-                    _download_manifest_with_generic_ytdlp(preferred_url, referer=url, origin=page_origin)
+                _download_manifest_with_site_strategy(
+                    preferred_url,
+                    referer=url,
+                    origin=page_origin,
+                    force_ffmpeg=_should_use_ffmpeg_for_movieffm_manifest(preferred_url),
+                )
                 return
             primary_url, primary_name = episodes[0]
             episode_key = _movieffm_numbered_episode_key(primary_name.rsplit(" ", 1)[-1])
@@ -11456,7 +11566,11 @@ class DownloadManagerApp:
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
-            _download_manifest_with_generic_ytdlp(stream_url, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+            _download_manifest_with_site_strategy(
+                stream_url,
+                referer=url,
+                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+            )
             return
 
         if "gimy" in parsed_url.netloc and ("/play/" in parsed_url.path or "/vodplay/" in parsed_url.path or "/video/" in parsed_url.path):
@@ -11595,7 +11709,11 @@ class DownloadManagerApp:
             _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="gimy", fallback_urls=fallback_urls)
-            _download_manifest_with_generic_ytdlp(stream_url, referer=f"{parsed_url.scheme}://{parsed_url.netloc}/", origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+            _download_manifest_with_site_strategy(
+                stream_url,
+                referer=f"{parsed_url.scheme}://{parsed_url.netloc}/",
+                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+            )
             return
 
         if parsed_url.netloc and ("hanime1.me" in parsed_url.netloc or "hanimeone.me" in parsed_url.netloc) and "watch" in parsed_url.path:
@@ -11612,7 +11730,12 @@ class DownloadManagerApp:
             page_title = _extract_html_title(resp.text, short_name)
             _set_task_identity(name=page_title, source_site="hanime1", source_page=url, fallback_urls=[])
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="hanime1", fallback_urls=[])
-            self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=hanime_site_root + "/", origin=hanime_site_root)
+            _download_manifest_with_site_strategy(
+                stream_url,
+                referer=hanime_site_root + "/",
+                origin=hanime_site_root,
+                default_route="ffmpeg",
+            )
             return
 
         if "99itv.net" in parsed_url.netloc and "/vodplay/" in parsed_url.path:
@@ -11635,7 +11758,12 @@ class DownloadManagerApp:
             page_title = _clean_99itv_title(_extract_html_title(resp.text, short_name or "99iTV"))
             _set_task_identity(name=page_title, source_site="99itv", source_page=url, fallback_urls=[])
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="99itv", fallback_urls=[])
-            self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+            _download_manifest_with_site_strategy(
+                stream_url,
+                referer=url,
+                origin=site_root,
+                default_route="ffmpeg",
+            )
             return
 
         if "missav" in parsed_url.netloc:
@@ -11666,30 +11794,11 @@ class DownloadManagerApp:
                 return
             _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=candidates[1:] or direct_media_candidates)
             self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="missav")
-            if _task_resume_requested(task) or self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3):
-                self._download_m3u8_with_ffmpeg(
-                    item_id,
-                    candidates[0],
-                    save_dir,
-                    is_mp3=is_mp3,
-                    referer=url,
-                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
-                )
-            elif _should_prefer_native_hls(candidates[0], task):
-                self._download_m3u8_with_ytdlp_native(
-                    item_id,
-                    candidates[0],
-                    save_dir,
-                    is_mp3=is_mp3,
-                    referer=url,
-                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
-                )
-            else:
-                _download_manifest_with_generic_ytdlp(
-                    candidates[0],
-                    referer=url,
-                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
-                )
+            _download_manifest_with_site_strategy(
+                candidates[0],
+                referer=url,
+                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+            )
             return
 
         if "ppp.porn" in parsed_url.netloc and "/v/" in parsed_url.path:
@@ -11719,7 +11828,12 @@ class DownloadManagerApp:
                 fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
                 _set_task_identity(name=page_title, source_site="ppp.porn", source_page=url, fallback_urls=fallback_urls)
                 self._log_m3u8_route_selected(task, item_id, stream_url, source_site="ppp.porn", fallback_urls=fallback_urls)
-                self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=url,
+                    origin=site_root,
+                    default_route="ffmpeg",
+                )
                 return
             if media_url:
                 fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
@@ -11769,10 +11883,11 @@ class DownloadManagerApp:
                 fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
                 _set_task_identity(name=page_title, source_site="18jav", source_page=url, fallback_urls=fallback_urls)
                 self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18jav", fallback_urls=fallback_urls)
-                if _should_prefer_native_hls(stream_url, task):
-                    self._download_m3u8_with_ytdlp_native(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
-                else:
-                    _download_manifest_with_generic_ytdlp(stream_url, referer=url, origin=site_root)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=url,
+                    origin=site_root,
+                )
                 return
             if media_url:
                 fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
@@ -11792,7 +11907,14 @@ class DownloadManagerApp:
                 return
             raise Exception("18JAV media URL missing")
 
-        if "18av.mm-cg.com" in parsed_url.netloc and "/animation_content/" in parsed_url.path:
+        if "18av.mm-cg.com" in parsed_url.netloc and (
+            "/animation_content/" in parsed_url.path
+            or "/CensoredAnimation_content/" in parsed_url.path
+            or "/UncensoredAnimation_content/" in parsed_url.path
+            or "/chinese_content/" in parsed_url.path
+            or "/censored_content/" in parsed_url.path
+            or "/uncensored_content/" in parsed_url.path
+        ):
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "撌脣?敺葡瘚雯?"))
             c_req = get_curl_cffi_requests()
             site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
@@ -11822,13 +11944,21 @@ class DownloadManagerApp:
                 fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
                 _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=fallback_urls)
                 self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18av", fallback_urls=fallback_urls)
-                self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=url,
+                    origin=site_root,
+                )
                 return
             stream_url, media_url, player_probe_url, protected_player = _resolve_18av_protected_player_media(url, resp.text)
             if stream_url:
                 _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=[])
                 self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18av", fallback_urls=[])
-                self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=url,
+                    origin=site_root,
+                )
                 return
             if media_url:
                 _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=[])
@@ -11911,7 +12041,12 @@ class DownloadManagerApp:
                 fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
                 _set_task_identity(name=display_name, source_site="pikpak", source_page=url, fallback_urls=fallback_urls)
                 self._log_m3u8_route_selected(task, item_id, stream_url, source_site="pikpak", fallback_urls=fallback_urls)
-                self._download_m3u8_with_ffmpeg(item_id, stream_url, save_dir, is_mp3=is_mp3, referer=url, origin=site_root)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=url,
+                    origin=site_root,
+                    default_route="ffmpeg",
+                )
                 return
             if media_url:
                 fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
@@ -11959,7 +12094,12 @@ class DownloadManagerApp:
             out_path = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() + ".mp4")
             if any(ext in media_url.lower() for ext in (".m3u8", ".mpd")):
                 self._log_m3u8_route_selected(task, item_id, media_url, source_site="avjoy", fallback_urls=fallback_urls)
-                self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+                _download_manifest_with_site_strategy(
+                    media_url,
+                    referer=safe_referer,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                    default_route="ffmpeg",
+                )
             elif is_mp3:
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=safe_referer, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             else:
@@ -12018,7 +12158,11 @@ class DownloadManagerApp:
             _set_task_identity(name=page_title, source_site=_task_source_site_name(task) or "movieffm", source_page=url, fallback_urls=fallback_urls)
             if _looks_like_manifest_url(media_url):
                 self._log_m3u8_route_selected(task, item_id, media_url, source_site=_task_source_site_name(task) or "movieffm", fallback_urls=fallback_urls)
-                _download_manifest_with_generic_ytdlp(media_url, referer=url, origin=evoload_origin)
+                _download_manifest_with_site_strategy(
+                    media_url,
+                    referer=url,
+                    origin=evoload_origin,
+                )
             elif is_mp3:
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin=evoload_origin)
@@ -12054,7 +12198,11 @@ class DownloadManagerApp:
             _set_task_identity(name=page_title, source_site=_task_source_site_name(task) or "movieffm", source_page=watch_url, fallback_urls=fallback_urls)
             if _looks_like_manifest_url(media_url):
                 self._log_m3u8_route_selected(task, item_id, media_url, source_site=_task_source_site_name(task) or "movieffm", fallback_urls=fallback_urls)
-                _download_manifest_with_generic_ytdlp(media_url, referer=watch_url, origin=mixdrop_origin)
+                _download_manifest_with_site_strategy(
+                    media_url,
+                    referer=watch_url,
+                    origin=mixdrop_origin,
+                )
             elif is_mp3:
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=watch_url, origin=mixdrop_origin)
@@ -12154,7 +12302,12 @@ class DownloadManagerApp:
                 out_path = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() + ".mp4")
                 if any(ext in media_url.lower() for ext in (".m3u8", ".mpd")):
                     self._log_m3u8_route_selected(task, item_id, media_url, source_site="instagram", fallback_urls=[])
-                    self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer="https://www.instagram.com/", origin="https://www.instagram.com")
+                    _download_manifest_with_site_strategy(
+                        media_url,
+                        referer="https://www.instagram.com/",
+                        origin="https://www.instagram.com",
+                        default_route="ffmpeg",
+                    )
                 elif is_mp3:
                     self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer="https://www.instagram.com/", origin="https://www.instagram.com")
                 else:
@@ -12174,7 +12327,12 @@ class DownloadManagerApp:
                     write_error_log("instagram savereels fallback", Exception("Instagram SaveReels fallback succeeded"), url=url, item_id=item_id)
                     if any(ext in media_url.lower() for ext in (".m3u8", ".mpd")):
                         self._log_m3u8_route_selected(task, item_id, media_url, source_site="instagram", fallback_urls=fallback_urls)
-                        self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer="https://savereels.app/", origin="https://savereels.app")
+                        _download_manifest_with_site_strategy(
+                            media_url,
+                            referer="https://savereels.app/",
+                            origin="https://savereels.app",
+                            default_route="ffmpeg",
+                        )
                     elif is_mp3:
                         self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer="https://savereels.app/", origin="https://savereels.app")
                     else:
@@ -12231,7 +12389,12 @@ class DownloadManagerApp:
                 out_path = os.path.join(save_dir, re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() + ".mp4")
                 if any(ext in media_url.lower() for ext in (".m3u8", ".mpd")):
                     self._log_m3u8_route_selected(task, item_id, media_url, source_site="facebook", fallback_urls=[])
-                    self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=url, origin="https://www.facebook.com")
+                    _download_manifest_with_site_strategy(
+                        media_url,
+                        referer=url,
+                        origin="https://www.facebook.com",
+                        default_route="ffmpeg",
+                    )
                 elif is_mp3:
                     self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin="https://www.facebook.com")
                 else:
@@ -12269,7 +12432,12 @@ class DownloadManagerApp:
             media_ext = _infer_media_extension_from_url(media_url)
             if _looks_like_manifest_url(media_url):
                 self._log_m3u8_route_selected(task, item_id, media_url, source_site="twitter", fallback_urls=fallback_urls)
-                self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
+                _download_manifest_with_site_strategy(
+                    media_url,
+                    referer=url,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                    default_route="ffmpeg",
+                )
             elif is_mp3 and media_ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
                 self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin=f"{parsed_url.scheme}://{parsed_url.netloc}")
             else:
@@ -12338,7 +12506,12 @@ class DownloadManagerApp:
                     url = html.unescape(direct_m3u8.group(1))
                     _set_task_identity(name=clean_title)
                     self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
-                    self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
+                    _download_manifest_with_site_strategy(
+                        url,
+                        referer=page_url,
+                        origin=page_origin,
+                        default_route="ffmpeg",
+                    )
                     return
                 iframe_m = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', resp.text)
                 if not iframe_m:
@@ -12358,7 +12531,12 @@ class DownloadManagerApp:
                 url = m3u8_m.group(1)
                 _set_task_identity(name=clean_title)
                 self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
-                self._download_m3u8_with_ffmpeg(item_id, url, save_dir, is_mp3=is_mp3, referer=page_url, origin=page_origin)
+                _download_manifest_with_site_strategy(
+                    url,
+                    referer=page_url,
+                    origin=page_origin,
+                    default_route="ffmpeg",
+                )
                 return
             except (StopDownloadException, KeyboardInterrupt):
                 raise
