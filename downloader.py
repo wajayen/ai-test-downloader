@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260514-2770"
+APP_BUILD = "20260514-2780"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -103,6 +103,7 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "99itv": 15.0,
     "777tv": 15.0,
     "18jav": 15.0,
+    "hohoj": 15.0,
     "nnyy": 15.0,
     "movieffm": 15.0,
     "missav": 15.0,
@@ -115,6 +116,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "777tv": 12,
     "18jav": 16,
     "gimy": 16,
+    "hohoj": 12,
     "jable": 12,
     "missav": 16,
     "nnyy": 16,
@@ -126,6 +128,7 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "777tv": False,
     "18jav": False,
     "gimy": True,
+    "hohoj": False,
     "jable": False,
     "missav": False,
     "nnyy": False,
@@ -135,6 +138,7 @@ YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 8
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "18jav": 10,
     "gimy": 10,
+    "hohoj": 10,
     "missav": 16,
     "movieffm": 14,
     "mixdrop": 12,
@@ -2456,6 +2460,7 @@ def _clean_18av_title(raw_title):
     if not cleaned:
         return cleaned
     cleaned = re.sub(r"\s*[-|,]\s*18AV.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*18AV在線H成人影片.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*,\s*(?:H動畫|H動漫|裏番).*$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/,") or str(raw_title or "").strip()
 
@@ -2473,6 +2478,29 @@ def _is_18av_preview_media_url(url):
             "fbhost1.",
         )
     )
+
+
+def _clean_hohoj_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"^\[\]\s*", "", cleaned)
+    cleaned = re.sub(r"\s+HoHoJ(?:\.TV)?\s+.*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _clean_goodav_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*-\s*正妹AV.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*VR線上成人影片，亞洲第一所線上VR成人網\s*-\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _should_disable_ssl_verify_for_url(url):
+    host = urllib.parse.urlparse(str(url or "")).netloc.lower()
+    return "vr.goodav17.com" in host
 
 
 def _decode_18av_payload(encoded_value, base_value, xor_value):
@@ -3210,6 +3238,10 @@ def _should_prefer_native_hls(url, task=None):
     parsed = urllib.parse.urlparse(str(url or ""))
     host = str(parsed.netloc or "").strip().lower()
     source_site = _task_source_site_name(task)
+    if source_site == "18av":
+        if "streamfastpro" in host:
+            return True
+        return False
     if source_site == "gimy":
         if any(marker in host for marker in ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd")):
             return True
@@ -3252,6 +3284,10 @@ def _should_prefer_native_hls(url, task=None):
         if any(marker in host for marker in ("hshdkshd", "cdnlab.live")):
             return True
         return False
+    if source_site == "hohoj":
+        if any(marker in host for marker in ("ggjav", "cdnlab.live")):
+            return True
+        return False
     if source_site == "nnyy":
         if any(marker in host for marker in ("lz-cdn", "lzcdn", "ppqrrs", "qqqrst", "surrit")):
             return True
@@ -3265,6 +3301,15 @@ def _should_prefer_native_hls(url, task=None):
     if any(marker in host for marker in ("qqqrst.com", "ppqrrs.com", "surrit.com")):
         return True
     return False
+
+
+def _should_resume_manifest_with_ffmpeg(url, task=None):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    host = str(parsed.netloc or "").strip().lower()
+    source_site = _task_source_site_name(task)
+    if source_site == "18av" and "streamfastpro" in host:
+        return False
+    return True
 
 
 def _native_hls_source_site(task=None):
@@ -4966,8 +5011,8 @@ class DownloadManagerApp:
                         timeout=20,
                         headers={"Referer": "https://nnyy.in/", "User-Agent": DEFAULT_USER_AGENT},
                     )
-                    page_title = _extract_html_title(resp.text, "?芸敶梢")
-                    page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or "?芸敶梢"
+                    page_title = _extract_html_title(resp.text, "努努影院")
+                    page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or "努努影院"
                     self._final_add_download(
                         new_url,
                         is_mp3=is_mp3,
@@ -5172,6 +5217,60 @@ class DownloadManagerApp:
                 write_error_log("njavtv parse failure", exc, url=new_url)
                 self._final_add_download(new_url, is_mp3=is_mp3)
 
+        def fetch_18av_single():
+            try:
+                c_req = get_curl_cffi_requests()
+                parsed_new_url = urllib.parse.urlsplit(new_url)
+                site_root = f"{parsed_new_url.scheme}://{parsed_new_url.netloc}"
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome120",
+                    timeout=15,
+                    headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                )
+                fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "18AV"
+                page_title = _clean_18av_title(_extract_html_title(resp.text, fallback_title))
+                self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="18av")
+            except Exception as exc:
+                write_error_log("18av parse failure", exc, url=new_url)
+                self._final_add_download(new_url, is_mp3=is_mp3)
+
+        def fetch_hohoj_single():
+            try:
+                c_req = get_curl_cffi_requests()
+                parsed_new_url = urllib.parse.urlsplit(new_url)
+                site_root = f"{parsed_new_url.scheme}://{parsed_new_url.netloc}"
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome120",
+                    timeout=15,
+                    headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                )
+                fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "HoHoJ"
+                page_title = _clean_hohoj_title(_extract_html_title(resp.text, fallback_title))
+                self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="hohoj")
+            except Exception as exc:
+                write_error_log("hohoj parse failure", exc, url=new_url)
+                self._final_add_download(new_url, is_mp3=is_mp3)
+
+        def fetch_goodav_single():
+            try:
+                c_req = get_curl_cffi_requests()
+                parsed_new_url = urllib.parse.urlsplit(new_url)
+                site_root = f"{parsed_new_url.scheme}://{parsed_new_url.netloc}"
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome120",
+                    timeout=15,
+                    headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                )
+                fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "GoodAV"
+                page_title = _clean_goodav_title(_extract_html_title(resp.text, fallback_title))
+                self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="goodav17")
+            except Exception as exc:
+                write_error_log("goodav17 parse failure", exc, url=new_url)
+                self._final_add_download(new_url, is_mp3=is_mp3)
+
         lowered = new_url.lower()
         if _is_anime1_category_url(new_url):
             self._start_background_parse(fetch_anime1)
@@ -5211,6 +5310,15 @@ class DownloadManagerApp:
             return
         if "njavtv.com" in lowered:
             self._start_background_parse(fetch_njavtv_single)
+            return
+        if "18av.mm-cg.com" in lowered:
+            self._start_background_parse(fetch_18av_single)
+            return
+        if "hohoj.tv" in lowered and "/video" in lowered:
+            self._start_background_parse(fetch_hohoj_single)
+            return
+        if "goodav17.com" in lowered and "/vr_html/" in lowered:
+            self._start_background_parse(fetch_goodav_single)
             return
         self._final_add_download(new_url, is_mp3=is_mp3)
         return
@@ -7476,7 +7584,13 @@ class DownloadManagerApp:
         total_size = 0
         range_supported = False
         content_type = ""
-        prefer_curl = _is_anime1_media_url(url) or _is_anime1_media_url(headers.get("Referer", "")) or _is_anime1_media_url(headers.get("Origin", ""))
+        disable_ssl_verify = _should_disable_ssl_verify_for_url(url)
+        prefer_curl = (
+            _is_anime1_media_url(url)
+            or _is_anime1_media_url(headers.get("Referer", ""))
+            or _is_anime1_media_url(headers.get("Origin", ""))
+            or disable_ssl_verify
+        )
         if prefer_curl:
             transient_sessions = []
             try:
@@ -7499,6 +7613,7 @@ class DownloadManagerApp:
                             headers=headers,
                             timeout=20,
                             stream=True,
+                            verify=not disable_ssl_verify,
                         )
                         status = getattr(resp, "status_code", 0)
                         if status >= 400:
@@ -7571,7 +7686,13 @@ class DownloadManagerApp:
                             continue
                     for candidate_session in candidate_sessions:
                         try:
-                            resp = candidate_session.get(url, headers=headers, timeout=20, stream=True)
+                            resp = candidate_session.get(
+                                url,
+                                headers=headers,
+                                timeout=20,
+                                stream=True,
+                                verify=not disable_ssl_verify,
+                            )
                             status = getattr(resp, "status_code", 0)
                             if status >= 400:
                                 raise Exception(f"HTTP {status}")
@@ -8156,7 +8277,13 @@ class DownloadManagerApp:
             return
         if "User-Agent" not in headers:
             headers["User-Agent"] = DEFAULT_USER_AGENT
-        prefer_curl_stream = _is_anime1_media_url(url) or _is_anime1_media_url(headers.get("Referer", "")) or _is_anime1_media_url(headers.get("Origin", ""))
+        disable_ssl_verify = _should_disable_ssl_verify_for_url(url)
+        prefer_curl_stream = (
+            _is_anime1_media_url(url)
+            or _is_anime1_media_url(headers.get("Referer", ""))
+            or _is_anime1_media_url(headers.get("Origin", ""))
+            or disable_ssl_verify
+        )
         if headers.get("Referer"):
             headers["Referer"] = _safe_header_url(headers.get("Referer"))
         total_info = self._probe_http_download_info(url, headers=headers, session=session)
@@ -8202,7 +8329,13 @@ class DownloadManagerApp:
                     continue
             for candidate_session in candidate_sessions:
                 try:
-                    candidate_response = candidate_session.get(url, headers=dl_headers, timeout=20, stream=True)
+                    candidate_response = candidate_session.get(
+                        url,
+                        headers=dl_headers,
+                        timeout=20,
+                        stream=True,
+                        verify=not disable_ssl_verify,
+                    )
                     status = getattr(candidate_response, "status_code", 0)
                     if status >= 400:
                         try:
@@ -8506,7 +8639,7 @@ class DownloadManagerApp:
         )
         info = None
         with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if source_site in ("99itv", "777tv", "movieffm", "gimy", "missav", "nnyy", "xiaoyakankan", "jable", "18jav") and _looks_like_manifest_url(url):
+            if source_site in ("99itv", "777tv", "movieffm", "gimy", "missav", "nnyy", "xiaoyakankan", "jable", "18jav", "18av", "hohoj") and _looks_like_manifest_url(url):
                 info = ydl.extract_info(url, download=True)
             elif _looks_like_manifest_url(url):
                 protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
@@ -10293,7 +10426,8 @@ class DownloadManagerApp:
             # Keep manifest resume behavior consistent across supported sites:
             # resumed/incomplete HLS tasks always go through the shared ffmpeg resume path,
             # while fresh downloads can still choose native or generic yt-dlp per site.
-            if _task_resume_requested(task) or self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3):
+            resume_requested = _task_resume_requested(task) or self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3)
+            if resume_requested and _should_resume_manifest_with_ffmpeg(target_url, task):
                 self._download_m3u8_with_ffmpeg(
                     item_id,
                     target_url,
@@ -10302,6 +10436,19 @@ class DownloadManagerApp:
                     referer=referer,
                     origin=origin,
                 )
+                return
+            if resume_requested:
+                if _should_prefer_native_hls(target_url, task):
+                    self._download_m3u8_with_ytdlp_native(
+                        item_id,
+                        target_url,
+                        save_dir,
+                        is_mp3=is_mp3,
+                        referer=referer,
+                        origin=origin,
+                    )
+                    return
+                _download_manifest_with_generic_ytdlp(target_url, referer=referer, origin=origin)
                 return
             if force_ffmpeg:
                 self._download_m3u8_with_ffmpeg(
@@ -11853,6 +12000,123 @@ class DownloadManagerApp:
                 return
             raise Exception("PPP.Porn media URL missing")
 
+        if "hohoj.tv" in parsed_url.netloc and parsed_url.path.startswith("/video"):
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _clean_hohoj_title(_extract_html_title(resp.text, short_name or "HoHoJ"))
+            embed_url = urllib.parse.urljoin(url, f"/embed?{parsed_url.query}") if parsed_url.query else ""
+            embed_match = re.search(r'<iframe[^>]+class=["\']player["\'][^>]+src=["\']([^"\']+)', resp.text, re.IGNORECASE)
+            if embed_match:
+                embed_url = urllib.parse.urljoin(url, embed_match.group(1))
+            if not embed_url:
+                raise Exception("HoHoJ embed URL missing")
+            embed_resp = c_req.get(
+                embed_url,
+                impersonate="chrome120",
+                timeout=20,
+                headers={"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+            )
+            candidate_urls = _extract_candidate_media_urls(embed_resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            manifest_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
+            ]
+            direct_media_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_http_media_url(candidate)
+            ]
+            stream_url = manifest_candidates[0] if manifest_candidates else ""
+            media_url = direct_media_candidates[0] if direct_media_candidates else ""
+            fallback_urls = []
+            if stream_url:
+                fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
+                _set_task_identity(name=page_title, source_site="hohoj", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="hohoj", fallback_urls=fallback_urls)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=embed_url,
+                    origin=site_root,
+                    default_route="generic",
+                )
+                return
+            if media_url:
+                fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
+                _set_task_identity(name=page_title, source_site="hohoj", source_page=url, fallback_urls=fallback_urls)
+                if is_mp3:
+                    self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=embed_url, origin=site_root)
+                else:
+                    ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                    out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                    out_path = os.path.join(save_dir, out_name + ext)
+                    self._download_http_media(
+                        item_id,
+                        media_url,
+                        out_path,
+                        headers={"Referer": embed_url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                    )
+                return
+            raise Exception("HoHoJ media URL missing")
+
+        if "goodav17.com" in parsed_url.netloc and "/vr_html/" in parsed_url.path:
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _clean_goodav_title(_extract_html_title(resp.text, short_name or "GoodAV"))
+            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            manifest_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
+            ]
+            direct_media_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_http_media_url(candidate)
+                and "vr.goodav17.com/media/" in candidate.lower()
+            ]
+            stream_url = manifest_candidates[0] if manifest_candidates else ""
+            media_url = direct_media_candidates[0] if direct_media_candidates else ""
+            fallback_urls = []
+            if stream_url:
+                fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
+                _set_task_identity(name=page_title, source_site="goodav17", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="goodav17", fallback_urls=fallback_urls)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=url,
+                    origin=site_root,
+                    default_route="generic",
+                )
+                return
+            if media_url:
+                fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
+                _set_task_identity(name=page_title, source_site="goodav17", source_page=url, fallback_urls=fallback_urls)
+                if is_mp3:
+                    self._download_direct_media_audio_with_ffmpeg(item_id, media_url, save_dir, referer=url, origin=site_root)
+                else:
+                    ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                    out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                    out_path = os.path.join(save_dir, out_name + ext)
+                    self._download_http_media(
+                        item_id,
+                        media_url,
+                        out_path,
+                        headers={"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                    )
+                return
+            raise Exception("GoodAV media URL missing")
+
         if "18jav.tv" in parsed_url.netloc and "/videos/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
             c_req = get_curl_cffi_requests()
@@ -11911,11 +12175,13 @@ class DownloadManagerApp:
             "/animation_content/" in parsed_url.path
             or "/CensoredAnimation_content/" in parsed_url.path
             or "/UncensoredAnimation_content/" in parsed_url.path
+            or "/amateurjav_content/" in parsed_url.path
             or "/chinese_content/" in parsed_url.path
+            or "/reducing-mosaic_content/" in parsed_url.path
             or "/censored_content/" in parsed_url.path
             or "/uncensored_content/" in parsed_url.path
         ):
-            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "撌脣?敺葡瘚雯?"))
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
             c_req = get_curl_cffi_requests()
             site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
             resp = c_req.get(
