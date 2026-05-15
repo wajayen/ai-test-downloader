@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260515-2791"
+APP_BUILD = "20260515-2810"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -173,6 +173,19 @@ YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
     "18av",
     "hohoj",
 ))
+NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv", "missav"))
+NATIVE_HLS_NEVER_SITES = frozenset(("njavtv", "3kor"))
+NATIVE_HLS_HOST_MARKERS_BY_SITE = {
+    "18av": ("streamfastpro",),
+    "18jav": ("hshdkshd", "cdnlab.live"),
+    "gimy": ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd"),
+    "hohoj": ("ggjav", "cdnlab.live"),
+    "jable": ("mushroomtrack", "hls.sb-cd.com", "cdn77.org"),
+    "movieffm": ("xluuss", "lzcdn", "letvoss", "subokk", "bdzybf", "ukubf", "ijycnd", "qsstvw", "gsuus", "hhuus", "huyall", "bfllvip"),
+    "nnyy": ("lz-cdn", "lzcdn", "ppqrrs", "qqqrst", "surrit"),
+    "xiaoyakankan": ("huyall", "ijycnd", "jisuzyv", "bfvvs", "gsuus", "hhuus", "qsstvw", "subokk"),
+}
+NATIVE_HLS_GLOBAL_HOST_MARKERS = ("qqqrst.com", "ppqrrs.com", "surrit.com")
 M3U8_TOTAL_BYTES_PROBE_WORKERS = 4
 M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
     "gimy": 4,
@@ -1768,8 +1781,10 @@ def _extract_player_js_object(page_text, *var_names):
         match = re.search(pattern, page_text, re.DOTALL)
         if not match:
             continue
-        start = page_text.find("{", match.end())
-        if start < 0:
+        start = match.end()
+        while start < len(page_text) and page_text[start].isspace():
+            start += 1
+        if start >= len(page_text) or page_text[start] != "{":
             continue
         depth = 0
         in_string = False
@@ -2524,7 +2539,8 @@ def _clean_gimy_title(raw_title):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
         return cleaned
-    cleaned = re.sub(r"\s*線上看\s*(?:[-|｜]\s*Gimy.*)?$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("線上看", " ").replace("正片", " ").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = re.sub(r"\s*(?:[-|｜]\s*Gimy.*)$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/,") or str(raw_title or "").strip()
 
@@ -2606,7 +2622,7 @@ def _clean_goodav_title(raw_title):
 
 def _should_disable_ssl_verify_for_url(url):
     host = urllib.parse.urlparse(str(url or "")).netloc.lower()
-    return "vr.goodav17.com" in host
+    return "vr.goodav17.com" in host or "ggjav.com" in host
 
 
 def _normalize_goodav_title(raw_title):
@@ -2625,6 +2641,20 @@ def _goodav_title_for_display(raw_title):
     cleaned = re.sub(r"\s*-\s*正妹AV.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^\s*VR線上成人影片.*?-\s*", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _decode_goodav_embed_media_url(embed_url):
+    parsed = urllib.parse.urlsplit(str(embed_url or "").strip())
+    query = urllib.parse.parse_qs(parsed.query)
+    encoded_url = (query.get("u") or [""])[0]
+    if not encoded_url:
+        return ""
+    try:
+        padded = encoded_url + "=" * (-len(encoded_url) % 4)
+        decoded = base64.b64decode(padded).decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    return _normalize_download_url(decoded)
 
 
 def _decode_18av_payload(encoded_value, base_value, xor_value):
@@ -3362,67 +3392,14 @@ def _should_prefer_native_hls(url, task=None):
     parsed = urllib.parse.urlparse(str(url or ""))
     host = str(parsed.netloc or "").strip().lower()
     source_site = _task_source_site_name(task)
-    if source_site == "18av":
-        if "streamfastpro" in host:
-            return True
-        return False
-    if source_site == "gimy":
-        if any(marker in host for marker in ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd")):
-            return True
-        return False
-    if source_site == "movieffm":
-        # MovieFFM source quality varies a lot. Keep the conservative ffmpeg default,
-        # but let stable direct-CDN playlists use the faster native HLS route.
-        if any(marker in host for marker in ("xluuss", "lzcdn", "letvoss", "subokk", "bdzybf", "ukubf", "ijycnd", "qsstvw", "gsuus", "hhuus", "huyall", "bfllvip")):
-            return True
-        return False
-    if source_site == "njavtv":
-        # NJAVTV surrit playlists often produce tiny native-HLS artifacts, then recover on ffmpeg.
-        # Start on the stable ffmpeg path directly.
-        return False
-    if source_site == "3kor":
-        # 3KOR ffzy playlists are stable on ffmpeg, but native HLS resume can hit HTTP 416 fragment ranges.
-        # Start directly on the ffmpeg path to avoid the native detour and range mismatch failures.
-        return False
-    if source_site == "xiaoyakankan":
-        if any(
-            marker in host
-            for marker in (
-                "huyall",
-                "ijycnd",
-                "jisuzyv",
-                "bfvvs",
-                "gsuus",
-                "hhuus",
-                "qsstvw",
-                "subokk",
-            )
-        ):
-            return True
-        return False
-    if source_site == "jable":
-        if any(marker in host for marker in ("mushroomtrack", "hls.sb-cd.com", "cdn77.org")):
-            return True
-        return False
-    if source_site == "18jav":
-        if any(marker in host for marker in ("hshdkshd", "cdnlab.live")):
-            return True
-        return False
-    if source_site == "hohoj":
-        if any(marker in host for marker in ("ggjav", "cdnlab.live")):
-            return True
-        return False
-    if source_site == "nnyy":
-        if any(marker in host for marker in ("lz-cdn", "lzcdn", "ppqrrs", "qqqrst", "surrit")):
-            return True
-        return False
-    if source_site == "99itv":
+    if source_site in NATIVE_HLS_ALWAYS_SITES:
         return True
-    if source_site == "777tv":
+    if source_site in NATIVE_HLS_NEVER_SITES:
+        return False
+    site_markers = NATIVE_HLS_HOST_MARKERS_BY_SITE.get(source_site, ())
+    if any(marker in host for marker in site_markers):
         return True
-    if source_site == "missav":
-        return True
-    if any(marker in host for marker in ("qqqrst.com", "ppqrrs.com", "surrit.com")):
+    if any(marker in host for marker in NATIVE_HLS_GLOBAL_HOST_MARKERS):
         return True
     return False
 
@@ -3436,62 +3413,14 @@ def _should_resume_manifest_with_ffmpeg(url, task=None):
     return True
 
 
-def _native_hls_source_site(task=None):
-    return _task_source_site_name(task)
-
-
 def _native_hls_socket_timeout(task=None):
-    source_site = _native_hls_source_site(task)
+    source_site = _task_source_site_name(task)
     return float(YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE.get(source_site, YTDLP_HLS_NATIVE_SOCKET_TIMEOUT))
 
 
 def _native_hls_concurrent_fragments(task=None):
-    source_site = _native_hls_source_site(task)
+    source_site = _task_source_site_name(task)
     return int(YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE.get(source_site, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS))
-
-
-def _native_hls_download_options(task=None):
-    return {
-        "socket_timeout": _native_hls_socket_timeout(task),
-        "concurrent_fragment_downloads": _native_hls_concurrent_fragments(task),
-        "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(_native_hls_source_site(task), True)),
-    }
-
-
-def _should_use_direct_manifest_extract(url, task=None):
-    return _looks_like_manifest_url(url) and _task_source_site_name(task) in YTDLP_DIRECT_MANIFEST_EXTRACT_SITES
-
-
-def _generic_ytdlp_concurrent_fragments(task=None):
-    source_site = _task_source_site_name(task)
-    return int(YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE.get(source_site, YTDLP_GENERIC_CONCURRENT_FRAGMENTS))
-
-
-def _m3u8_total_bytes_probe_workers(task=None):
-    source_site = _task_source_site_name(task)
-    return int(M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE.get(source_site, M3U8_TOTAL_BYTES_PROBE_WORKERS))
-
-
-def _should_probe_exact_m3u8_total_bytes(task=None):
-    return _task_source_site_name(task) not in M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES
-
-
-def _http_multipart_part_count(task=None, total_size=0):
-    source_site = _task_source_site_name(task)
-    configured = int(HTTP_MULTIPART_PART_COUNT_BY_SITE.get(source_site, HTTP_MULTIPART_PART_COUNT_DEFAULT))
-    if total_size and total_size < 16 * 1024 * 1024:
-        configured = min(configured, 4)
-    elif total_size and total_size < 64 * 1024 * 1024:
-        configured = min(configured, 12)
-    configured = max(2, configured)
-    return min(configured, 16)
-
-
-def _should_start_http_multipart_immediately(task=None, total_size=0):
-    source_site = _task_source_site_name(task)
-    if source_site not in HTTP_MULTIPART_IMMEDIATE_SITES:
-        return False
-    return max(int(total_size or 0), 0) >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
 
 
 def _ffmpeg_hls_input_options(headers, task=None):
@@ -3516,16 +3445,6 @@ def _ffmpeg_hls_input_options(headers, task=None):
         ]
     options += list(FFMPEG_HLS_RECONNECT_OPTIONS)
     return options
-
-
-def _max_downloads_per_source_page(task=None):
-    source_site = _task_source_site_name(task)
-    return int(MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE.get(source_site, MAX_DOWNLOADS_PER_SOURCE_PAGE))
-
-
-def _max_downloads_per_source_site(task=None):
-    source_site = _task_source_site_name(task)
-    return int(MAX_DOWNLOADS_PER_SOURCE_SITE.get(source_site, MAX_DOWNLOADS_PER_DOMAIN))
 
 
 def add_to_state(url, name, is_mp3=False, source_site=None, extra_task_data=None):
@@ -5507,7 +5426,7 @@ class DownloadManagerApp:
         if "hohoj.tv" in lowered and "/video" in lowered:
             self._start_background_parse(fetch_hohoj_single)
             return
-        if "goodav17.com" in lowered and "/vr_html/" in lowered:
+        if "goodav17.com" in lowered and ("/vr_html/" in lowered or "/html/" in lowered):
             self._start_background_parse(fetch_goodav_single)
             return
         if "javfilms.com" in lowered and "/video/" in lowered:
@@ -6997,7 +6916,14 @@ class DownloadManagerApp:
                 return None
             executor = None
             try:
-                executor = DaemonThreadPoolExecutor(max_workers=_m3u8_total_bytes_probe_workers(task))
+                executor = DaemonThreadPoolExecutor(
+                    max_workers=int(
+                        M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE.get(
+                            _task_source_site_name(task),
+                            M3U8_TOTAL_BYTES_PROBE_WORKERS,
+                        )
+                    )
+                )
                 futures = [executor.submit(_probe_segment_bytes, segment_url) for segment_url in probe_urls]
                 for future in concurrent.futures.as_completed(futures, timeout=120):
                     if self._shutdown_started:
@@ -8635,7 +8561,8 @@ class DownloadManagerApp:
             and range_supported
             and total_size > 0
             and resume_bytes <= 0
-            and _should_start_http_multipart_immediately(task, total_size=total_size)
+            and _task_source_site_name(task) in HTTP_MULTIPART_IMMEDIATE_SITES
+            and max(int(total_size or 0), 0) >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
         )
         try:
             with open(out_path, mode) as f:
@@ -8728,7 +8655,19 @@ class DownloadManagerApp:
                 part_paths = []
                 remaining_start = downloaded
                 remaining_end = total_size - 1
-                part_count = _http_multipart_part_count(task, total_size=max(total_size - downloaded, 0))
+                remaining_size = max(total_size - downloaded, 0)
+                source_site = _task_source_site_name(task)
+                part_count = int(
+                    HTTP_MULTIPART_PART_COUNT_BY_SITE.get(
+                        source_site,
+                        HTTP_MULTIPART_PART_COUNT_DEFAULT,
+                    )
+                )
+                if remaining_size and remaining_size < 16 * 1024 * 1024:
+                    part_count = min(part_count, 4)
+                elif remaining_size and remaining_size < 64 * 1024 * 1024:
+                    part_count = min(part_count, 12)
+                part_count = min(max(2, part_count), 16)
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
                 futures = []
                 executor = None
@@ -8857,7 +8796,12 @@ class DownloadManagerApp:
             fallback_urls=_task_fallback_urls_list(task, primary_url=url),
             page_refresh_candidates=_task_gimy_page_refresh_candidates(task) if _task_source_site_name(task) == "gimy" else None,
         )
-        native_options = _native_hls_download_options(task)
+        source_site = _task_source_site_name(task)
+        native_options = {
+            "socket_timeout": _native_hls_socket_timeout(task),
+            "concurrent_fragment_downloads": _native_hls_concurrent_fragments(task),
+            "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(source_site, True)),
+        }
         safe_name = _task_output_basename(task, "Video")
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
@@ -8913,7 +8857,7 @@ class DownloadManagerApp:
         )
         info = None
         with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if _should_use_direct_manifest_extract(url, task):
+            if _looks_like_manifest_url(url) and _task_source_site_name(task) in YTDLP_DIRECT_MANIFEST_EXTRACT_SITES:
                 info = ydl.extract_info(url, download=True)
             elif _looks_like_manifest_url(url):
                 protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
@@ -9296,7 +9240,7 @@ class DownloadManagerApp:
                         duration_box["value"] = duration
                 except Exception:
                     pass
-                if _should_probe_exact_m3u8_total_bytes(task):
+                if _task_source_site_name(task) not in M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES:
                     try:
                         total_bytes = self._get_m3u8_total_bytes(candidate, headers={"Referer": referer, "Origin": origin}, task=task)
                         if total_bytes and total_bytes > 0:
@@ -10286,8 +10230,9 @@ class DownloadManagerApp:
                 self._get_task_source_page(task),
             )
             source_site = _task_source_site_name(task)
-            source_page_limit = _max_downloads_per_source_page(task)
-            source_site_limit = _max_downloads_per_source_site(task)
+            source_site = _task_source_site_name(task)
+            source_page_limit = int(MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE.get(source_site, MAX_DOWNLOADS_PER_SOURCE_PAGE))
+            source_site_limit = int(MAX_DOWNLOADS_PER_SOURCE_SITE.get(source_site, MAX_DOWNLOADS_PER_DOMAIN))
             if source_page_limit == MAX_DOWNLOADS_PER_SOURCE_PAGE:
                 source_page_limit = domain_limit
             if source_site_limit == MAX_DOWNLOADS_PER_DOMAIN:
@@ -10620,7 +10565,12 @@ class DownloadManagerApp:
             "fragment_retries": 20,
             "file_access_retries": 3,
             "skip_unavailable_fragments": False,
-            "concurrent_fragment_downloads": _generic_ytdlp_concurrent_fragments(task),
+            "concurrent_fragment_downloads": int(
+                YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE.get(
+                    _task_source_site_name(task),
+                    YTDLP_GENERIC_CONCURRENT_FRAGMENTS,
+                )
+            ),
             "paths": {"home": save_dir, "temp": tempfile.gettempdir()},
             "outtmpl": {"default": "%(title)s.%(ext)s"},
             "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
@@ -11492,10 +11442,10 @@ class DownloadManagerApp:
                 resp_text,
             ):
                 raise Exception("Gimy detail page did not expose episode links")
-            drama_name = short_name or "Gimy"
+            drama_name = _clean_gimy_title(short_name or "Gimy")
             title_match = re.search(r"<title>(.*?)</title>", resp_text, re.IGNORECASE | re.DOTALL)
             if title_match:
-                drama_name = html.unescape(title_match.group(1)).split("-")[0].strip() or drama_name
+                drama_name = _clean_gimy_title(html.unescape(title_match.group(1)).split("-")[0].strip()) or drama_name
                 drama_name = "".join(c for c in drama_name if c not in '\\/:*?"<>|')
             entries = self._extract_gimy_detail_entries(resp_text, base, drama_name)
             if not entries:
@@ -11535,7 +11485,7 @@ class DownloadManagerApp:
                         fallback_urls.append(entry_url)
                 ordered_episode_urls = [first_episode_url] + [candidate for candidate in fallback_urls if candidate != first_episode_url]
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
-            _set_task_identity(name=first_episode_name or drama_name, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
+            _set_task_identity(name=_clean_gimy_title(first_episode_name or drama_name), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             last_episode_error = None
             for attempt_index, episode_url in enumerate(ordered_episode_urls):
                 try:
@@ -11568,7 +11518,7 @@ class DownloadManagerApp:
             gimy_failed_stream_urls = set(_task_gimy_failed_stream_urls(task))
             gimy_failed_stream_hosts = set(_task_gimy_failed_stream_hosts(task))
             last_gimy_error = None
-            page_title = short_name or "Gimy"
+            page_title = _clean_gimy_title(short_name or "Gimy")
             def gimy_fetch_text(target_url, referer_value, impersonate_name):
                 headers = {"Referer": referer_value, "User-Agent": DEFAULT_USER_AGENT}
                 try:
@@ -11671,7 +11621,7 @@ class DownloadManagerApp:
                 if current_result["error"] is not None:
                     last_gimy_error = current_result["error"]
                 if current_result["title"]:
-                    page_title = current_result["title"] or page_title
+                    page_title = _clean_gimy_title(current_result["title"]) or page_title
                 for candidate_url in current_result["candidates"]:
                     if candidate_url not in stream_candidates:
                         stream_candidates.append(candidate_url)
@@ -11710,12 +11660,18 @@ class DownloadManagerApp:
                 if "播放失效" in resp_text or "播放失败" in resp_text or '<p class="p-2 text-error"' in resp_text:
                     last_gimy_error = Exception("Gimy episode page reports playback failure")
                     continue
+            raw_direct_fallback_candidates = _dedupe_download_urls(direct_fallback_candidates)
+            raw_external_source_urls = _dedupe_download_urls(external_source_urls)
             direct_fallback_candidates, external_source_urls = _filter_gimy_candidate_groups(
                 task,
                 direct_fallback_candidates,
                 external_source_urls,
             )
             ordered_direct_candidates = _dedupe_download_urls(stream_candidates + direct_fallback_candidates)
+            if not ordered_direct_candidates and raw_direct_fallback_candidates:
+                ordered_direct_candidates = raw_direct_fallback_candidates
+            if not external_source_urls and raw_external_source_urls:
+                external_source_urls = raw_external_source_urls
             preferred_media_urls = [candidate for candidate in external_source_urls if _looks_like_http_media_url(candidate)]
             if preferred_media_urls:
                 media_url = preferred_media_urls[0]
@@ -11766,7 +11722,7 @@ class DownloadManagerApp:
                 external_url = supported_external_pages[0]
                 fallback_urls = [candidate for candidate in (supported_external_pages[1:] + deferred_episode_urls) if candidate and candidate != external_url]
                 _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
-                _set_task_identity(name=page_title, source_site="gimy", source_page=url, fallback_urls=fallback_urls)
+                _set_task_identity(name=_clean_gimy_title(page_title), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
@@ -11798,6 +11754,8 @@ class DownloadManagerApp:
                             candidate for candidate in available_episode_page_candidates[1:]
                             if candidate != refresh_url
                         ],
+                        _gimy_failed_stream_urls=[],
+                        _gimy_failed_stream_hosts=[],
                     )
                     self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在重新取得 Gimy 串流...")
                     write_error_log(
@@ -11824,11 +11782,13 @@ class DownloadManagerApp:
                         if normalized_detail_refresh_url and normalized_detail_refresh_url not in detail_refresh_history:
                             detail_refresh_history.append(normalized_detail_refresh_url)
                         _set_task_aux_fields(
-                            task,
-                            _gimy_detail_refresh_done=True,
-                            _gimy_refresh_history=detail_refresh_history,
-                            _gimy_page_refresh_candidates=[],
-                        )
+                        task,
+                        _gimy_detail_refresh_done=True,
+                        _gimy_refresh_history=detail_refresh_history,
+                        _gimy_page_refresh_candidates=[],
+                        _gimy_failed_stream_urls=[],
+                        _gimy_failed_stream_hosts=[],
+                    )
                         self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在重建 Gimy 播放線...")
                         write_error_log(
                             "gimy detail page rebuild",
@@ -11861,7 +11821,13 @@ class DownloadManagerApp:
                         if stream_candidates or direct_fallback_candidates or external_source_urls:
                             break
                 if stream_candidates or direct_fallback_candidates or external_source_urls:
+                    raw_direct_fallback_candidates = _dedupe_download_urls(direct_fallback_candidates)
+                    raw_external_source_urls = _dedupe_download_urls(external_source_urls)
                     ordered_direct_candidates = _dedupe_download_urls(stream_candidates + direct_fallback_candidates)
+                    if not ordered_direct_candidates and raw_direct_fallback_candidates:
+                        ordered_direct_candidates = raw_direct_fallback_candidates
+                    if not external_source_urls and raw_external_source_urls:
+                        external_source_urls = raw_external_source_urls
                     preferred_media_urls = [candidate for candidate in external_source_urls if _looks_like_http_media_url(candidate)]
                     if preferred_media_urls:
                         media_url = preferred_media_urls[0]
@@ -12049,7 +12015,7 @@ class DownloadManagerApp:
                     external_url = supported_external_pages[0]
                     fallback_urls = [candidate for candidate in supported_external_pages[1:] if candidate and candidate != external_url]
                     _set_task_aux_fields(task, _gimy_page_refresh_candidates=[], _gimy_source_refresh_history=[])
-                    _set_task_identity(name=_extract_html_title(resp.text, short_name), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
+                    _set_task_identity(name=_clean_gimy_title(_extract_html_title(resp.text, short_name)), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
                     self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                     self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                     return
@@ -12313,7 +12279,7 @@ class DownloadManagerApp:
                 return
             raise Exception("HoHoJ media URL missing")
 
-        if "goodav17.com" in parsed_url.netloc and "/vr_html/" in parsed_url.path:
+        if "goodav17.com" in parsed_url.netloc and ("/vr_html/" in parsed_url.path or "/html/" in parsed_url.path):
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
             c_req = get_curl_cffi_requests()
             site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
@@ -12325,6 +12291,24 @@ class DownloadManagerApp:
             )
             page_title = _goodav_title_for_display(_extract_html_title(resp.text, short_name or "GoodAV"))
             candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            for iframe_src in re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', resp.text, re.IGNORECASE):
+                iframe_url = urllib.parse.urljoin(url, iframe_src)
+                decoded_embed_media = _decode_goodav_embed_media_url(iframe_url)
+                if decoded_embed_media:
+                    candidate_urls.append(decoded_embed_media)
+                if "ggjav.com/main/embed" in iframe_url.lower():
+                    try:
+                        embed_resp = c_req.get(
+                            iframe_url,
+                            impersonate="chrome120",
+                            timeout=20,
+                            headers={"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                        )
+                        candidate_urls.extend(
+                            _extract_candidate_media_urls(embed_resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+                        )
+                    except Exception:
+                        pass
             manifest_candidates = [
                 candidate for candidate in candidate_urls
                 if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
@@ -12332,7 +12316,10 @@ class DownloadManagerApp:
             direct_media_candidates = [
                 candidate for candidate in candidate_urls
                 if _looks_like_http_media_url(candidate)
-                and "vr.goodav17.com/media/" in candidate.lower()
+                and (
+                    "vr.goodav17.com/media/" in candidate.lower()
+                    or ("ggjav.com" in urllib.parse.urlparse(candidate).netloc.lower() and candidate.lower().endswith(".mp4"))
+                )
             ]
             stream_url = manifest_candidates[0] if manifest_candidates else ""
             media_url = direct_media_candidates[0] if direct_media_candidates else ""
