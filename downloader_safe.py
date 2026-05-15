@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260514-2780"
+APP_BUILD = "20260515-2791"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -110,18 +110,18 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "xiaoyakankan": 15.0,
     "jable": 15.0,
 }
-YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 8
+YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 10
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
-    "99itv": 12,
-    "777tv": 12,
-    "18jav": 16,
-    "gimy": 16,
-    "hohoj": 12,
-    "jable": 12,
-    "missav": 16,
-    "nnyy": 16,
-    "movieffm": 16,
-    "xiaoyakankan": 12,
+    "99itv": 14,
+    "777tv": 14,
+    "18jav": 18,
+    "gimy": 18,
+    "hohoj": 14,
+    "jable": 14,
+    "missav": 18,
+    "nnyy": 18,
+    "movieffm": 18,
+    "xiaoyakankan": 14,
 }
 YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "99itv": False,
@@ -134,31 +134,45 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "nnyy": False,
     "xiaoyakankan": False,
 }
-YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 8
+YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 10
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
-    "18jav": 10,
-    "gimy": 10,
-    "hohoj": 10,
+    "18jav": 12,
+    "gimy": 12,
+    "hohoj": 12,
     "missav": 16,
-    "movieffm": 14,
-    "mixdrop": 12,
-    "njavtv": 12,
-    "99itv": 10,
-    "nnyy": 10,
+    "movieffm": 16,
+    "mixdrop": 14,
+    "njavtv": 14,
+    "99itv": 12,
+    "nnyy": 12,
 }
 HTTP_MULTIPART_TRIGGER_SECONDS = 0.35
-HTTP_MULTIPART_TRIGGER_SPEED_BPS = 5 * 1024 * 1024
-HTTP_MULTIPART_MIN_REMAINING_BYTES = 2 * 1024 * 1024
-HTTP_MULTIPART_PART_COUNT_DEFAULT = 12
+HTTP_MULTIPART_TRIGGER_SPEED_BPS = 6 * 1024 * 1024
+HTTP_MULTIPART_MIN_REMAINING_BYTES = 1 * 1024 * 1024
+HTTP_MULTIPART_PART_COUNT_DEFAULT = 14
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "anime1": 4,
-    "mixdrop": 14,
-    "movieffm": 14,
-    "missav": 12,
-    "avjoy": 12,
+    "goodav17": 16,
+    "mixdrop": 16,
+    "movieffm": 16,
+    "missav": 14,
+    "avjoy": 14,
 }
-HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 4 * 1024 * 1024
-HTTP_MULTIPART_IMMEDIATE_SITES = frozenset(("movieffm", "mixdrop", "missav", "avjoy"))
+HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
+HTTP_MULTIPART_IMMEDIATE_SITES = frozenset(("movieffm", "mixdrop", "missav", "avjoy", "goodav17"))
+YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
+    "99itv",
+    "777tv",
+    "movieffm",
+    "gimy",
+    "missav",
+    "nnyy",
+    "xiaoyakankan",
+    "jable",
+    "18jav",
+    "18av",
+    "hohoj",
+))
 M3U8_TOTAL_BYTES_PROBE_WORKERS = 4
 M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
     "gimy": 4,
@@ -201,6 +215,8 @@ STOP_REASON_PAUSE = "pause"
 STOP_REASON_DELETE = "delete"
 STOP_REASONS = frozenset((STOP_REASON_PAUSE, STOP_REASON_DELETE))
 _ERROR_LOG_RECENT = {}
+ERROR_LOG_MAX_ENTRIES = 10
+TRACE_LOG_MAX_ENTRIES = 10
 TRACE_LOG_CONTEXTS = frozenset((
     "app start",
     "single instance lock denied",
@@ -1781,6 +1797,13 @@ def _extract_player_js_object(page_text, *var_names):
     return None
 
 
+def _safe_extract_player_js_object(page_text, *var_names):
+    try:
+        return _extract_player_js_object(page_text, *var_names)
+    except Exception:
+        return None
+
+
 def _decode_maccms_player_url(raw_url, encrypt_mode=0):
     decoded_url = str(raw_url or "").strip()
     if not decoded_url:
@@ -2489,6 +2512,89 @@ def _clean_hohoj_title(raw_title):
     return cleaned.strip(" -|/,") or str(raw_title or "").strip()
 
 
+def _clean_javfilms_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*\|\s*JAV\s*Films.*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _clean_gimy_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*線上看\s*(?:[-|｜]\s*Gimy.*)?$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*(?:[-|｜]\s*Gimy.*)$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _extract_gimy_parse_candidates(parse_text, base_url=""):
+    raw_text = str(parse_text or "").strip()
+    if not raw_text:
+        return []
+    candidates = []
+    parse_data = None
+    try:
+        parse_data = json.loads(raw_text)
+    except Exception:
+        parse_data = None
+    if isinstance(parse_data, dict):
+        for key in ("url", "video", "playurl"):
+            parsed_candidate = _normalize_download_url(parse_data.get(key))
+            if parsed_candidate:
+                candidates.append(parsed_candidate)
+    if not candidates:
+        player_like = _safe_extract_player_js_object(raw_text, "player_data", "player_aaaa", "player")
+        if isinstance(player_like, dict):
+            for key in ("url", "video", "playurl"):
+                parsed_candidate = _normalize_download_url(player_like.get(key))
+                if parsed_candidate:
+                    candidates.append(parsed_candidate)
+    if not candidates:
+        for stream_url in _extract_m3u8_candidates_from_text(raw_text, base_url=base_url):
+            if stream_url not in candidates:
+                candidates.append(stream_url)
+    if not candidates:
+        for media_url in _extract_candidate_media_urls(raw_text, allowed_exts=(".m3u8", ".mp4", ".mpd")):
+            normalized_media = _normalize_download_url(media_url)
+            if normalized_media and normalized_media not in candidates:
+                candidates.append(normalized_media)
+    return _dedupe_download_urls(candidates)
+
+
+def _is_javfilms_dmm_preview_url(url):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    return "cc3001.dmm.co.jp" in host and "/litevideo/freepv/" in path and path.endswith(".mp4")
+
+
+def _extract_javfilms_dmm_video_id(url, html_text=""):
+    match = re.search(r"/get/video/([A-Za-z0-9_-]+)", str(html_text or ""), flags=re.IGNORECASE)
+    if match:
+        return str(match.group(1) or "").strip()
+    parsed = urllib.parse.urlparse(str(url or ""))
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if segments:
+        return str(segments[-1] or "").strip()
+    return ""
+
+
+def _build_javfilms_dmm_content_url(video_id):
+    video_id_value = str(video_id or "").strip()
+    if not video_id_value:
+        return ""
+    return f"https://video.dmm.co.jp/av/content/?id={video_id_value}"
+
+
+def _build_javfilms_dmm_declared_url(video_id):
+    content_url = _build_javfilms_dmm_content_url(video_id)
+    if not content_url:
+        return ""
+    return "https://www.dmm.co.jp/age_check/=/declared=yes/?rurl=" + urllib.parse.quote(content_url, safe="")
+
+
 def _clean_goodav_title(raw_title):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
@@ -2501,6 +2607,24 @@ def _clean_goodav_title(raw_title):
 def _should_disable_ssl_verify_for_url(url):
     host = urllib.parse.urlparse(str(url or "")).netloc.lower()
     return "vr.goodav17.com" in host
+
+
+def _normalize_goodav_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*-\s*正妹AV.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*VR線上成人影片.*?-\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _goodav_title_for_display(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"\s*-\s*正妹AV.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*VR線上成人影片.*?-\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
 
 
 def _decode_18av_payload(encoded_value, base_value, xor_value):
@@ -3334,6 +3458,10 @@ def _native_hls_download_options(task=None):
     }
 
 
+def _should_use_direct_manifest_extract(url, task=None):
+    return _looks_like_manifest_url(url) and _task_source_site_name(task) in YTDLP_DIRECT_MANIFEST_EXTRACT_SITES
+
+
 def _generic_ytdlp_concurrent_fragments(task=None):
     source_site = _task_source_site_name(task)
     return int(YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE.get(source_site, YTDLP_GENERIC_CONCURRENT_FRAGMENTS))
@@ -3354,9 +3482,9 @@ def _http_multipart_part_count(task=None, total_size=0):
     if total_size and total_size < 16 * 1024 * 1024:
         configured = min(configured, 4)
     elif total_size and total_size < 64 * 1024 * 1024:
-        configured = min(configured, 10)
+        configured = min(configured, 12)
     configured = max(2, configured)
-    return min(configured, 14)
+    return min(configured, 16)
 
 
 def _should_start_http_multipart_immediately(task=None, total_size=0):
@@ -3611,6 +3739,48 @@ def create_taiwan_map_icon():
     return None
 
 
+def _trim_delimited_log_file(log_path, max_entries, delimiter_line="--------------------------------------------------------------------------------"):
+    if max_entries <= 0:
+        return
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            log_text = f.read()
+        raw_entries = [chunk.strip() for chunk in log_text.split(delimiter_line) if chunk.strip()]
+        if len(raw_entries) <= max_entries:
+            return
+        kept_entries = raw_entries[-max_entries:]
+        normalized_text = ""
+        for entry in kept_entries:
+            normalized_text += entry.rstrip() + f"\n{delimiter_line}\n"
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(normalized_text)
+    except Exception:
+        pass
+
+
+def _append_trace_log_line(message):
+    try:
+        with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(str(message or "").rstrip() + "\n")
+        _trim_line_log_file(TRACE_LOG_FILE, TRACE_LOG_MAX_ENTRIES)
+    except Exception:
+        pass
+
+
+def _trim_line_log_file(log_path, max_entries):
+    if max_entries <= 0:
+        return
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) <= max_entries:
+            return
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.writelines(lines[-max_entries:])
+    except Exception:
+        pass
+
+
 def write_error_log(context, exc, **extra):
     try:
         now = time.time()
@@ -3643,6 +3813,8 @@ def write_error_log(context, exc, **extra):
         lines.append("--------------------------------------------------------------------------------")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+        if log_path == ERROR_LOG_FILE and ERROR_LOG_MAX_ENTRIES > 0:
+            _trim_delimited_log_file(log_path, ERROR_LOG_MAX_ENTRIES)
     except Exception:
         return
 
@@ -4691,7 +4863,7 @@ class DownloadManagerApp:
                 drama_name = "Gimy"
                 m_title = re.search(r"<title>(.*?)</title>", resp_text)
                 if m_title:
-                    drama_name = html.unescape(m_title.group(1)).split("-")[0].strip() or drama_name
+                    drama_name = _clean_gimy_title(html.unescape(m_title.group(1)).split("-")[0].strip()) or drama_name
                     drama_name = "".join(c for c in drama_name if c not in '\\/:*?"<>|')
                 entries = self._extract_gimy_detail_entries(resp_text, base, drama_name)
                 if not entries:
@@ -5265,10 +5437,28 @@ class DownloadManagerApp:
                     headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
                 )
                 fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "GoodAV"
-                page_title = _clean_goodav_title(_extract_html_title(resp.text, fallback_title))
+                page_title = _goodav_title_for_display(_extract_html_title(resp.text, fallback_title))
                 self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="goodav17")
             except Exception as exc:
                 write_error_log("goodav17 parse failure", exc, url=new_url)
+                self._final_add_download(new_url, is_mp3=is_mp3)
+
+        def fetch_javfilms_single():
+            try:
+                c_req = get_curl_cffi_requests()
+                parsed_new_url = urllib.parse.urlsplit(new_url)
+                site_root = f"{parsed_new_url.scheme}://{parsed_new_url.netloc}"
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome120",
+                    timeout=15,
+                    headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+                )
+                fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "JAV Films"
+                page_title = _clean_javfilms_title(_extract_html_title(resp.text, fallback_title))
+                self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="javfilms")
+            except Exception as exc:
+                write_error_log("javfilms parse failure", exc, url=new_url)
                 self._final_add_download(new_url, is_mp3=is_mp3)
 
         lowered = new_url.lower()
@@ -5319,6 +5509,9 @@ class DownloadManagerApp:
             return
         if "goodav17.com" in lowered and "/vr_html/" in lowered:
             self._start_background_parse(fetch_goodav_single)
+            return
+        if "javfilms.com" in lowered and "/video/" in lowered:
+            self._start_background_parse(fetch_javfilms_single)
             return
         self._final_add_download(new_url, is_mp3=is_mp3)
         return
@@ -6373,6 +6566,29 @@ class DownloadManagerApp:
             max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0
             or max(int(progress_info.get("bytes", 0) or 0), 0) > 0
         )
+
+    def _is_resume_download_active(self, task, save_dir=None, is_mp3=False, include_cached_resolved=False):
+        if not task:
+            return False
+        if _task_resume_requested(task):
+            return True
+        if include_cached_resolved and _task_resolved_url(task):
+            return True
+        return self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3)
+
+    def _select_manifest_download_route(self, target_url, task, save_dir, is_mp3=False, default_route="generic", force_ffmpeg=False):
+        if force_ffmpeg:
+            return "ffmpeg"
+        resume_active = self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
+        if resume_active and _should_resume_manifest_with_ffmpeg(target_url, task):
+            return "ffmpeg"
+        if _should_prefer_native_hls(target_url, task):
+            return "native"
+        if resume_active:
+            return "generic"
+        if default_route == "ffmpeg":
+            return "ffmpeg"
+        return "generic"
 
     def _can_accept_existing_output(self, task, item_id, output_path, temp=False):
         if not self._has_nonempty_file(output_path):
@@ -7723,6 +7939,64 @@ class DownloadManagerApp:
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
         req_headers = dict(headers or {})
         req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
+        disable_ssl_verify = _should_disable_ssl_verify_for_url(url)
+        if disable_ssl_verify:
+            c_req = get_curl_cffi_requests()
+            last_exc = None
+            candidate_sessions = []
+            owned_sessions = []
+            for browser in ("chrome120", "chrome110"):
+                try:
+                    candidate_session = c_req.Session(impersonate=browser)
+                    candidate_sessions.append(candidate_session)
+                    owned_sessions.append(candidate_session)
+                except Exception:
+                    continue
+            response = None
+            try:
+                for candidate_session in candidate_sessions:
+                    try:
+                        candidate_response = candidate_session.get(
+                            url,
+                            headers=req_headers,
+                            timeout=30,
+                            stream=True,
+                            verify=False,
+                        )
+                        status = getattr(candidate_response, "status_code", 0)
+                        if status >= 400:
+                            try:
+                                candidate_response.close()
+                            except Exception:
+                                pass
+                            raise Exception(f"HTTP {status}")
+                        response = candidate_response
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                if response is None and last_exc is not None:
+                    raise last_exc
+                with open(part_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=1048576):
+                        if stop_event.is_set() or self._shutdown_started:
+                            break
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        progress_box["bytes"] = progress_box["bytes"] + len(chunk)
+            finally:
+                try:
+                    if response is not None:
+                        response.close()
+                except Exception:
+                    pass
+                for candidate_session in owned_sessions:
+                    try:
+                        candidate_session.close()
+                    except Exception:
+                        pass
+            return
         req = urllib.request.Request(url, headers=req_headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             with open(part_path, "wb") as f:
@@ -8639,7 +8913,7 @@ class DownloadManagerApp:
         )
         info = None
         with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if source_site in ("99itv", "777tv", "movieffm", "gimy", "missav", "nnyy", "xiaoyakankan", "jable", "18jav", "18av", "hohoj") and _looks_like_manifest_url(url):
+            if _should_use_direct_manifest_extract(url, task):
                 info = ydl.extract_info(url, download=True)
             elif _looks_like_manifest_url(url):
                 protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
@@ -10061,10 +10335,11 @@ class DownloadManagerApp:
                         continue
 
     def _prepare_resume_low_speed_watch(self, task, source_url, save_dir, is_mp3=False):
-        watching_resume = (
-            _task_resume_requested(task)
-            or bool(_task_resolved_url(task))
-            or self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3)
+        watching_resume = self._is_resume_download_active(
+            task,
+            save_dir=save_dir,
+            is_mp3=is_mp3,
+            include_cached_resolved=True,
         )
         source_page = self._get_task_source_page(task, fallback_url=source_url)
         if watching_resume and source_page:
@@ -10198,9 +10473,7 @@ class DownloadManagerApp:
         cached_resolved_url = _task_resolved_url(task)
         if not cached_resolved_url:
             return False
-        if _task_resume_requested(task):
-            return True
-        if _task_state_value(task) in PAUSED_TASK_STATES:
+        if self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3, include_cached_resolved=True):
             return True
         ext = "mp3" if is_mp3 else "mp4"
         temp_out_path, _, _ = self._resolve_resume_artifact_base(
@@ -10424,10 +10697,17 @@ class DownloadManagerApp:
             force_ffmpeg=False,
         ):
             # Keep manifest resume behavior consistent across supported sites:
-            # resumed/incomplete HLS tasks always go through the shared ffmpeg resume path,
-            # while fresh downloads can still choose native or generic yt-dlp per site.
-            resume_requested = _task_resume_requested(task) or self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3)
-            if resume_requested and _should_resume_manifest_with_ffmpeg(target_url, task):
+            # every supported site first resolves through one shared route selector,
+            # then dispatches to ffmpeg/native/generic from the same decision point.
+            selected_route = self._select_manifest_download_route(
+                target_url,
+                task,
+                save_dir,
+                is_mp3=is_mp3,
+                default_route=default_route,
+                force_ffmpeg=force_ffmpeg,
+            )
+            if selected_route == "ffmpeg":
                 self._download_m3u8_with_ffmpeg(
                     item_id,
                     target_url,
@@ -10437,41 +10717,8 @@ class DownloadManagerApp:
                     origin=origin,
                 )
                 return
-            if resume_requested:
-                if _should_prefer_native_hls(target_url, task):
-                    self._download_m3u8_with_ytdlp_native(
-                        item_id,
-                        target_url,
-                        save_dir,
-                        is_mp3=is_mp3,
-                        referer=referer,
-                        origin=origin,
-                    )
-                    return
-                _download_manifest_with_generic_ytdlp(target_url, referer=referer, origin=origin)
-                return
-            if force_ffmpeg:
-                self._download_m3u8_with_ffmpeg(
-                    item_id,
-                    target_url,
-                    save_dir,
-                    is_mp3=is_mp3,
-                    referer=referer,
-                    origin=origin,
-                )
-                return
-            if _should_prefer_native_hls(target_url, task):
+            if selected_route == "native":
                 self._download_m3u8_with_ytdlp_native(
-                    item_id,
-                    target_url,
-                    save_dir,
-                    is_mp3=is_mp3,
-                    referer=referer,
-                    origin=origin,
-                )
-                return
-            if default_route == "ffmpeg":
-                self._download_m3u8_with_ffmpeg(
                     item_id,
                     target_url,
                     save_dir,
@@ -11343,7 +11590,7 @@ class DownloadManagerApp:
                 local_error = None
                 local_title = ""
                 try:
-                    local_player_data = _extract_player_js_object(page_text, "player_data", "player_aaaa", "player")
+                    local_player_data = _safe_extract_player_js_object(page_text, "player_data", "player_aaaa", "player")
                 except Exception as inner_exc:
                     local_error = inner_exc
                 if local_player_data:
@@ -11370,7 +11617,7 @@ class DownloadManagerApp:
                     except Exception as inner_exc:
                         local_error = inner_exc
                         continue
-                    iframe_player_data = _extract_player_js_object(iframe_text, "player_data", "player_aaaa", "player")
+                    iframe_player_data = _safe_extract_player_js_object(iframe_text, "player_data", "player_aaaa", "player")
                     if iframe_player_data:
                         iframe_direct_url = _normalize_download_url(iframe_player_data.get("url"))
                         if iframe_direct_url:
@@ -11390,11 +11637,7 @@ class DownloadManagerApp:
                         parse_api = urllib.parse.urljoin(iframe_url, f"parse.php?url={urllib.parse.quote(parse_source, safe='')}")
                         try:
                             parse_text = gimy_fetch_text(parse_api, iframe_url, impersonate_name)
-                            parse_data = json.loads(parse_text)
-                            for key in ("url", "video", "playurl"):
-                                parsed_candidate = _normalize_download_url(parse_data.get(key))
-                                if not parsed_candidate:
-                                    continue
+                            for parsed_candidate in _extract_gimy_parse_candidates(parse_text, base_url=parse_api):
                                 candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(parsed_candidate)
                                 if candidate_kind == "manifest":
                                     if normalized_candidate not in local_candidates:
@@ -11698,7 +11941,7 @@ class DownloadManagerApp:
                     unreachable.append(candidate)
             ordered_candidates = reachable + [candidate for candidate in unreachable if candidate not in reachable]
             stream_url = ordered_candidates[0]
-            page_title = _extract_html_title(resp_text, short_name)
+            page_title = _clean_gimy_title(_extract_html_title(resp_text, short_name))
             deferred_fallback_urls = [
                 candidate
                 for candidate in (deferred_episode_urls + external_source_urls)
@@ -11724,7 +11967,7 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
-            player_data = _extract_player_js_object(resp.text, "player_data", "player_aaaa")
+            player_data = _safe_extract_player_js_object(resp.text, "player_data", "player_aaaa")
             direct_fallback_candidates = []
             external_source_urls = []
             if player_data:
@@ -11750,7 +11993,7 @@ class DownloadManagerApp:
                     iframe_text = iframe_resp.text
                 except Exception:
                     continue
-                iframe_player_data = _extract_player_js_object(iframe_text, "player_data", "player_aaaa", "player")
+                iframe_player_data = _safe_extract_player_js_object(iframe_text, "player_data", "player_aaaa", "player")
                 if iframe_player_data:
                     iframe_direct_url = _normalize_download_url(iframe_player_data.get("url"))
                     if iframe_direct_url:
@@ -11770,7 +12013,13 @@ class DownloadManagerApp:
                     parse_api = urllib.parse.urljoin(iframe_url, f"parse.php?url={urllib.parse.quote(parse_source, safe='')}")
                     try:
                         parse_resp = c_req.get(parse_api, impersonate="chrome110", timeout=12, headers={"Referer": iframe_url})
-                        parse_data = json.loads(parse_resp.text)
+                        parse_data = None
+                        for parsed_candidate in _extract_gimy_parse_candidates(parse_resp.text, base_url=parse_api):
+                            candidate_kind, normalized_candidate = _classify_gimy_stream_candidate(parsed_candidate)
+                            if candidate_kind == "manifest" and normalized_candidate and normalized_candidate not in candidates:
+                                candidates.append(normalized_candidate)
+                            elif candidate_kind == "external" and normalized_candidate and normalized_candidate not in external_source_urls:
+                                external_source_urls.append(normalized_candidate)
                     except Exception:
                         parse_data = None
                     if isinstance(parse_data, dict):
@@ -11843,7 +12092,7 @@ class DownloadManagerApp:
                     self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
                     return
                 raise Exception("Gimy stream URL missing")
-            page_title = _extract_html_title(resp.text, short_name)
+            page_title = _clean_gimy_title(_extract_html_title(resp.text, short_name))
             fallback_urls = (candidates[1:] if len(candidates) > 1 else []) + [
                 candidate for candidate in direct_fallback_candidates
                 if candidate and candidate != stream_url and candidate not in candidates
@@ -11890,7 +12139,7 @@ class DownloadManagerApp:
             c_req = get_curl_cffi_requests()
             site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": site_root + "/"})
-            player_data = _extract_player_js_object(resp.text, "player_data", "player_aaaa", "player")
+            player_data = _safe_extract_player_js_object(resp.text, "player_data", "player_aaaa", "player")
             stream_url = ""
             if player_data:
                 stream_url = _decode_maccms_player_url(player_data.get("url"), player_data.get("encrypt"))
@@ -12074,7 +12323,7 @@ class DownloadManagerApp:
                 timeout=20,
                 headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
             )
-            page_title = _clean_goodav_title(_extract_html_title(resp.text, short_name or "GoodAV"))
+            page_title = _goodav_title_for_display(_extract_html_title(resp.text, short_name or "GoodAV"))
             candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
             manifest_candidates = [
                 candidate for candidate in candidate_urls
@@ -12116,6 +12365,130 @@ class DownloadManagerApp:
                     )
                 return
             raise Exception("GoodAV media URL missing")
+
+        if "javfilms.com" in parsed_url.netloc and "/video/" in parsed_url.path:
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
+            )
+            page_title = _clean_javfilms_title(_extract_html_title(resp.text, short_name or "JAV Films"))
+            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            manifest_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
+            ]
+            direct_media_candidates = [
+                candidate for candidate in candidate_urls
+                if _looks_like_http_media_url(candidate)
+                and "cc3001.dmm.co.jp" in candidate.lower()
+                and candidate.lower().endswith(".mp4")
+            ]
+            dmm_video_id = _extract_javfilms_dmm_video_id(url, resp.text)
+            stream_url = manifest_candidates[0] if manifest_candidates else ""
+            media_url = direct_media_candidates[0] if direct_media_candidates else ""
+            fallback_urls = []
+            if stream_url:
+                fallback_urls = [candidate for candidate in manifest_candidates[1:] if candidate != stream_url]
+                _set_task_identity(name=page_title, source_site="javfilms", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="javfilms", fallback_urls=fallback_urls)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=url,
+                    origin=site_root,
+                    default_route="generic",
+                )
+                return
+            if media_url:
+                fallback_urls = [candidate for candidate in direct_media_candidates[1:] if candidate != media_url]
+                _set_task_identity(name=page_title, source_site="javfilms", source_page=url, fallback_urls=fallback_urls)
+                direct_headers = {"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT}
+                direct_session = None
+                if _is_javfilms_dmm_preview_url(media_url):
+                    if not dmm_video_id:
+                        raise Exception("JAV Films protected DMM preview unavailable")
+                    dmm_content_url = _build_javfilms_dmm_content_url(dmm_video_id)
+                    declared_url = _build_javfilms_dmm_declared_url(dmm_video_id)
+                    if not dmm_content_url or not declared_url:
+                        raise Exception("JAV Films protected DMM preview unavailable")
+                    direct_session = c_req.Session(impersonate="chrome120")
+                    try:
+                        direct_session.get(
+                            declared_url,
+                            headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": "https://www.dmm.co.jp/"},
+                            allow_redirects=True,
+                            timeout=30,
+                        )
+                        probe_resp = direct_session.get(
+                            media_url,
+                            headers={
+                                "User-Agent": DEFAULT_USER_AGENT,
+                                "Referer": dmm_content_url,
+                                "Origin": "https://video.dmm.co.jp",
+                            },
+                            allow_redirects=True,
+                            timeout=20,
+                            stream=True,
+                        )
+                        probe_status = getattr(probe_resp, "status_code", 0)
+                        probe_content_type = (getattr(probe_resp, "headers", {}) or {}).get("Content-Type", "") or ""
+                        try:
+                            probe_resp.close()
+                        except Exception:
+                            pass
+                        if probe_status >= 400 or "text/html" in probe_content_type.lower():
+                            raise Exception("JAV Films protected DMM preview unavailable")
+                    except Exception:
+                        try:
+                            direct_session.close()
+                        except Exception:
+                            pass
+                        direct_session = None
+                        raise
+                    direct_headers = {
+                        "User-Agent": DEFAULT_USER_AGENT,
+                        "Referer": dmm_content_url,
+                        "Origin": "https://video.dmm.co.jp",
+                    }
+                if is_mp3:
+                    try:
+                        self._download_direct_media_audio_with_ffmpeg(
+                            item_id,
+                            media_url,
+                            save_dir,
+                            referer=direct_headers.get("Referer", url),
+                            origin=direct_headers.get("Origin", site_root),
+                        )
+                    finally:
+                        if direct_session is not None:
+                            try:
+                                direct_session.close()
+                            except Exception:
+                                pass
+                else:
+                    ext = os.path.splitext(urllib.parse.urlparse(media_url).path)[1] or ".mp4"
+                    out_name = re.sub(r'[\\/:*?"<>|]+', "_", page_title).strip() or "video"
+                    out_path = os.path.join(save_dir, out_name + ext)
+                    try:
+                        self._download_http_media(
+                            item_id,
+                            media_url,
+                            out_path,
+                            headers=direct_headers,
+                            session=direct_session,
+                        )
+                    finally:
+                        if direct_session is not None:
+                            try:
+                                direct_session.close()
+                            except Exception:
+                                pass
+                return
+            raise Exception("JAV Films media URL missing")
 
         if "18jav.tv" in parsed_url.netloc and "/videos/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
@@ -12914,8 +13287,7 @@ def main():
         lock_acquired, recovered_after_retry = wait_for_single_instance_lock()
         if not lock_acquired:
             try:
-                with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock denied build={APP_BUILD} app_dir={_APP_DIR}\n")
+                _append_trace_log_line(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock denied build={APP_BUILD} app_dir={_APP_DIR}")
             except Exception:
                 pass
             warning_root = tk.Tk()
@@ -12928,14 +13300,12 @@ def main():
             return
         if recovered_after_retry:
             try:
-                with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock recovered after retry build={APP_BUILD} app_dir={_APP_DIR}\n")
+                _append_trace_log_line(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock recovered after retry build={APP_BUILD} app_dir={_APP_DIR}")
             except Exception:
                 pass
 
         try:
-            with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app start build={APP_BUILD} frozen={getattr(sys, 'frozen', False)} app_dir={_APP_DIR}\n")
+            _append_trace_log_line(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app start build={APP_BUILD} frozen={getattr(sys, 'frozen', False)} app_dir={_APP_DIR}")
         except Exception:
             pass
 
