@@ -148,12 +148,17 @@ if ($BuildId) {
     } else {
         git -c safe.directory=$repoRoot add -u
     }
-    $hasTrackedChanges = $true
-    try {
-        git -c safe.directory=$repoRoot diff --cached --quiet
-        $hasTrackedChanges = $false
-    } catch {
+    $hasTrackedChanges = $false
+    if ($DryRun) {
         $hasTrackedChanges = $true
+    } else {
+        git -c safe.directory=$repoRoot diff --cached --quiet
+        $diffExitCode = $LASTEXITCODE
+        if ($diffExitCode -eq 1) {
+            $hasTrackedChanges = $true
+        } elseif ($diffExitCode -ne 0) {
+            throw "git diff --cached --quiet failed with exit code $diffExitCode"
+        }
     }
     if ($hasTrackedChanges) {
         $commitLabel = if ($TagName) { $TagName } else { $BuildId }
@@ -162,11 +167,11 @@ if ($BuildId) {
 }
 
 $originExists = $false
-try {
-    git -c safe.directory=$repoRoot remote get-url origin | Out-Null
+git -c safe.directory=$repoRoot remote get-url origin | Out-Null
+if ($LASTEXITCODE -eq 0) {
     $originExists = $true
-} catch {
-    $originExists = $false
+} elseif ($LASTEXITCODE -ne 2 -and $LASTEXITCODE -ne 128) {
+    throw "git remote get-url origin failed with exit code $LASTEXITCODE"
 }
 
 if (-not $originExists) {
