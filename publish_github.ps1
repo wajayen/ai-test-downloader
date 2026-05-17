@@ -3,10 +3,14 @@ param(
     [string]$Visibility = "public",
     [string]$BuildId = "",
     [string]$VersionedExe = "",
-    [string]$TagName = ""
+    [string]$TagName = "",
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
+if ($null -ne (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue)) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $gh = "C:\Program Files\GitHub CLI\gh.exe"
 if (!(Test-Path -LiteralPath $gh)) {
@@ -20,28 +24,60 @@ function Invoke-CheckedCommand {
     param(
         [Parameter(Mandatory = $true)]
         [string]$FilePath,
-        [string[]]$Arguments = @(),
-        [switch]$Quiet
+        [string[]]$Arguments = @()
     )
-    if ($Quiet) {
-        & $FilePath @Arguments 2>$null
-    } else {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
         & $FilePath @Arguments
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
         $commandText = ($Arguments | ForEach-Object { if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ } }) -join ' '
-        throw "Command failed with exit code $exitCode: $FilePath $commandText"
+        throw "Command failed with exit code ${exitCode}: $FilePath $commandText"
     }
 }
 
-function Test-GhReleaseExists {
+function Invoke-LoggedCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+    $commandText = (($Arguments | ForEach-Object { if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ } }) -join ' ').Trim()
+    if ($DryRun) {
+        Write-Host ("[DryRun] {0} {1}" -f $FilePath, $commandText).Trim()
+        return
+    }
+    Invoke-CheckedCommand -FilePath $FilePath -Arguments $Arguments
+}
+
+function Get-OriginRepoSlug {
+    $originUrl = git -c safe.directory=$repoRoot remote get-url origin 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $originUrl) {
+        return $null
+    }
+    $originUrl = "$originUrl".Trim()
+    if ($originUrl -match 'github\.com[:/](.+?)(?:\.git)?$') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Test-GitHubReleaseExists {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ReleaseTag
     )
+    $repoSlug = Get-OriginRepoSlug
+    if (-not $repoSlug) {
+        return $false
+    }
+    $apiUrl = "https://api.github.com/repos/$repoSlug/releases/tags/$ReleaseTag"
     try {
-        Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "view", $ReleaseTag) -Quiet
+        Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "ai-test-downloader-publisher" } | Out-Null
         return $true
     } catch {
         return $false
@@ -76,7 +112,7 @@ function Ensure-GhRelease {
         [string]$ReleaseNotes,
         [int]$MaxAttempts = 5
     )
-    if (Test-GhReleaseExists -ReleaseTag $ReleaseTag) {
+    if (Test-GitHubReleaseExists -ReleaseTag $ReleaseTag) {
         Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "upload", $ReleaseTag, $AssetPath, "--clobber")
         Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "edit", $ReleaseTag, "--title", $ReleaseTag, "--notes", $ReleaseNotes)
         return
@@ -90,7 +126,7 @@ function Ensure-GhRelease {
                 throw
             }
             Start-Sleep -Seconds 2
-            if (Test-GhReleaseExists -ReleaseTag $ReleaseTag) {
+            if (Test-GitHubReleaseExists -ReleaseTag $ReleaseTag) {
                 Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "upload", $ReleaseTag, $AssetPath, "--clobber")
                 Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "edit", $ReleaseTag, "--title", $ReleaseTag, "--notes", $ReleaseNotes)
                 return
@@ -98,8 +134,6 @@ function Ensure-GhRelease {
         }
     }
 }
-
-Invoke-CheckedCommand -FilePath $gh -Arguments @("auth", "status") -Quiet
 
 if (-not $TagName -and $BuildId -match '-(\d+)$') {
     $TagName = "v$($Matches[1])"
@@ -109,7 +143,11 @@ if (-not $VersionedExe -and $BuildId) {
 }
 
 if ($BuildId) {
-    git -c safe.directory=$repoRoot add -u
+    if ($DryRun) {
+        Write-Host "[DryRun] git -c safe.directory=$repoRoot add -u"
+    } else {
+        git -c safe.directory=$repoRoot add -u
+    }
     $hasTrackedChanges = $true
     try {
         git -c safe.directory=$repoRoot diff --cached --quiet
@@ -119,7 +157,7 @@ if ($BuildId) {
     }
     if ($hasTrackedChanges) {
         $commitLabel = if ($TagName) { $TagName } else { $BuildId }
-        Invoke-CheckedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "commit", "-m", ("Release {0}" -f $commitLabel))
+        Invoke-LoggedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "commit", "-m", ("Release {0}" -f $commitLabel))
     }
 }
 
@@ -132,15 +170,19 @@ try {
 }
 
 if (-not $originExists) {
-    Invoke-CheckedCommand -FilePath $gh -Arguments @("repo", "create", $RepoName, "--$Visibility", "--source", ".", "--remote", "origin", "--push")
+    Invoke-LoggedCommand -FilePath $gh -Arguments @("repo", "create", $RepoName, "--$Visibility", "--source", ".", "--remote", "origin", "--push")
 } else {
-    Invoke-CheckedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "push", "-u", "origin", "HEAD")
+    Invoke-LoggedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "push", "-u", "origin", "HEAD")
 }
 
 if ($TagName) {
-    Invoke-CheckedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "tag", "-f", $TagName)
-    Invoke-CheckedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "push", "origin", ("refs/tags/{0}" -f $TagName), "--force")
-    Wait-RemoteTagVisibility -ReleaseTag $TagName
+    Invoke-LoggedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "tag", "-f", $TagName)
+    Invoke-LoggedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "push", "origin", ("refs/tags/{0}" -f $TagName), "--force")
+    if ($DryRun) {
+        Write-Host ("[DryRun] wait for remote tag visibility: {0}" -f $TagName)
+    } else {
+        Wait-RemoteTagVisibility -ReleaseTag $TagName
+    }
 }
 
 if ($TagName -and $VersionedExe) {
@@ -148,5 +190,14 @@ if ($TagName -and $VersionedExe) {
         throw "Versioned executable not found: $VersionedExe"
     }
     $releaseNotes = if ($BuildId) { "Automated release for build $BuildId" } else { "Automated release for $TagName" }
-    Ensure-GhRelease -ReleaseTag $TagName -AssetPath $VersionedExe -ReleaseNotes $releaseNotes
+    if ($DryRun) {
+        if (Test-GitHubReleaseExists -ReleaseTag $TagName) {
+            Write-Host ("[DryRun] gh release upload {0} {1} --clobber" -f $TagName, $VersionedExe)
+            Write-Host ("[DryRun] gh release edit {0} --title {0} --notes ""{1}""" -f $TagName, $releaseNotes)
+        } else {
+            Write-Host ("[DryRun] gh release create {0} {1} --title {0} --notes ""{2}""" -f $TagName, $VersionedExe, $releaseNotes)
+        }
+    } else {
+        Ensure-GhRelease -ReleaseTag $TagName -AssetPath $VersionedExe -ReleaseNotes $releaseNotes
+    }
 }
