@@ -57,7 +57,7 @@ else:  # pragma: no cover - optional integration
 yt_dlp = None
 
 
-APP_BUILD = "20260515-2810"
+APP_BUILD = "20260517-2820"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -948,14 +948,6 @@ def _task_url_value(task, fallback_url=""):
     return _normalize_download_url(fallback_url)
 
 
-def _task_is_mp3_enabled(task, default=False):
-    return bool(_task_field_value(task, "is_mp3", default))
-
-
-def _task_resume_requested(task, default=False):
-    return bool(_task_field_value(task, "resume_requested", default))
-
-
 def _task_name_text(task, fallback_name=""):
     return str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or fallback_name or "").strip()
 
@@ -993,7 +985,7 @@ def _task_display_name(task, fallback_url="", fallback_name="", default_is_mp3=F
     if fallback_url:
         return default_short_name_for_url(
             fallback_url,
-            is_mp3=_task_is_mp3_enabled(task, default=default_is_mp3),
+            is_mp3=bool(_task_field_value(task, "is_mp3", default_is_mp3)),
         )
     return str(fallback_name or "").strip()
 
@@ -1035,14 +1027,6 @@ def _set_task_stop_fields(task, state=None, stop_reason=Ellipsis, resume_request
     if resume_requested is not None:
         extra_fields["resume_requested"] = bool(resume_requested)
     return _set_task_state_fields(task, state, **extra_fields)
-
-
-def _task_state_value(task, default=""):
-    return str(_task_field_value(task, "state", default) or default)
-
-
-def _task_process_handle(task, default=None):
-    return _task_field_value(task, "_proc", default)
 
 
 def _task_gimy_refresh_history(task):
@@ -1117,13 +1101,6 @@ def _filter_gimy_candidate_groups(task, *candidate_groups):
         _filter_gimy_failed_stream_candidates(task, candidates)
         for candidates in candidate_groups
     )
-
-
-def _task_resolved_url(task, fallback_url=""):
-    resolved_url = _normalize_download_url(_task_field_value(task, "resolved_url", ""))
-    if resolved_url:
-        return resolved_url
-    return _normalize_download_url(fallback_url)
 
 
 def _is_http_404_download_error(exc):
@@ -3366,28 +3343,6 @@ def load_state():
         return []
 
 
-def _match_forced_m3u8_site(url, task=None):
-    normalized_url = _normalize_download_url(url)
-    source_site = _task_source_site_name(task)
-    if source_site == "3kor" and normalized_url:
-        parsed = urllib.parse.urlsplit(normalized_url)
-        if "3kor.com" in parsed.netloc.lower() and "edit-down.php" in parsed.path.lower():
-            embedded_url = urllib.parse.parse_qs(parsed.query).get("url", [""])[0]
-            if _looks_like_manifest_url(embedded_url):
-                return "3kor"
-    if not _looks_like_manifest_url(normalized_url):
-        return None
-    if source_site in FORCED_M3U8_SITE_RULES:
-        return source_site
-    if _task_fallback_urls_list(task, primary_url=normalized_url):
-        return "movieffm"
-    hostname = urllib.parse.urlparse(normalized_url).netloc.lower().split(":", 1)[0]
-    for site_name, config in FORCED_M3U8_SITE_RULES.items():
-        if any(hostname.endswith(host_suffix) for host_suffix in config["hosts"]):
-            return site_name
-    return None
-
-
 def _should_prefer_native_hls(url, task=None):
     parsed = urllib.parse.urlparse(str(url or ""))
     host = str(parsed.netloc or "").strip().lower()
@@ -3402,49 +3357,6 @@ def _should_prefer_native_hls(url, task=None):
     if any(marker in host for marker in NATIVE_HLS_GLOBAL_HOST_MARKERS):
         return True
     return False
-
-
-def _should_resume_manifest_with_ffmpeg(url, task=None):
-    parsed = urllib.parse.urlparse(str(url or ""))
-    host = str(parsed.netloc or "").strip().lower()
-    source_site = _task_source_site_name(task)
-    if source_site == "18av" and "streamfastpro" in host:
-        return False
-    return True
-
-
-def _native_hls_socket_timeout(task=None):
-    source_site = _task_source_site_name(task)
-    return float(YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE.get(source_site, YTDLP_HLS_NATIVE_SOCKET_TIMEOUT))
-
-
-def _native_hls_concurrent_fragments(task=None):
-    source_site = _task_source_site_name(task)
-    return int(YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE.get(source_site, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS))
-
-
-def _ffmpeg_hls_input_options(headers, task=None):
-    options = [
-        "-protocol_whitelist",
-        "file,http,https,tcp,tls,crypto,data",
-        "-allowed_extensions",
-        "ALL",
-        "-allowed_segment_extensions",
-        "ALL",
-        "-rw_timeout",
-        FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS,
-        "-http_persistent",
-        "0",
-        "-headers",
-        headers,
-    ]
-    if _task_source_site_name(task) in ("missav", "njavtv", "movieffm"):
-        options += [
-            "-extension_picky",
-            "0",
-        ]
-    options += list(FFMPEG_HLS_RECONNECT_OPTIONS)
-    return options
 
 
 def add_to_state(url, name, is_mp3=False, source_site=None, extra_task_data=None):
@@ -3825,25 +3737,6 @@ def install_ffmpeg_to_app_dir(progress_callback=None):
 
 
 _FFMPEG_VERSION_SUMMARY_CACHE = {}
-
-
-def _ffmpeg_command_preview(cmd):
-    preview_parts = []
-    skip_next_header_value = False
-    for part in cmd:
-        if skip_next_header_value:
-            preview_parts.append("<headers>")
-            skip_next_header_value = False
-            continue
-        text = str(part)
-        if text == "-headers":
-            preview_parts.append(text)
-            skip_next_header_value = True
-            continue
-        preview_parts.append(text)
-    return " ".join(preview_parts)[:400]
-
-
 def _yt_dlp_retry_sleep_functions():
     def _retry_sleep_http(*args, **kwargs):
         count = kwargs.get("n")
@@ -4653,12 +4546,12 @@ class DownloadManagerApp:
                         fallback_url=url,
                         fallback_name=t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目",
                     ),
-                    _task_is_mp3_enabled(task),
+                    bool(_task_field_value(task, "is_mp3", False)),
                     _task_source_site_name(task),
                     {
                         "fallback_urls": _task_fallback_urls_list(task),
                         "source_page": self._get_task_source_page(task),
-                        "resolved_url": _task_resolved_url(task),
+                        "resolved_url": (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""),
                         "resolved_url_saved_at": float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                         "page_refresh_candidates": _task_gimy_page_refresh_candidates(task),
                         "filename": str(_task_field_value(task, "filename", "") or "").strip(),
@@ -5459,9 +5352,9 @@ class DownloadManagerApp:
             task_url = _task_url_value(task)
             if task_url != normalized_url:
                 continue
-            if _task_is_mp3_enabled(task) != bool(is_mp3):
+            if bool(_task_field_value(task, "is_mp3", False)) != bool(is_mp3):
                 continue
-            if self._is_deleted_state(_task_state_value(task)):
+            if self._is_deleted_state(str(_task_field_value(task, "state", "") or "")):
                 continue
             return item_id
         return None
@@ -5832,7 +5725,7 @@ class DownloadManagerApp:
                 if _looks_like_placeholder_page_title(title, txt):
                     return
                 title = "".join(c for c in title if c not in '\\/:*?"<>|')
-                if title and _task_state_value(self.tasks.get(item_id, {})) == "QUEUED":
+                if title and str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "QUEUED":
                     cleaned_title = str(title or "").strip()
                     if cleaned_title:
                         self.tasks[item_id]["short_name"] = cleaned_title
@@ -5855,12 +5748,12 @@ class DownloadManagerApp:
         }
         if extra_task_data:
             task_data.update(extra_task_data)
-        task_data["is_mp3"] = _task_is_mp3_enabled(task_data)
+        task_data["is_mp3"] = bool(_task_field_value(task_data, "is_mp3", False))
         task_data["source_site"] = _task_source_site_name(task_data)
         normalized_extra = self._build_extra_task_data(
             source_page=self._get_task_source_page(task_data),
             fallback_urls=_task_fallback_urls_list(task_data, primary_url=url),
-            resolved_url=_task_resolved_url(task_data),
+            resolved_url=(_normalize_download_url(_task_field_value(task_data, "resolved_url", "")) or ""),
             resolved_url_saved_at=float(_task_field_value(task_data, "resolved_url_saved_at", 0.0) or 0.0),
             page_refresh_candidates=_task_gimy_page_refresh_candidates(task_data),
         )
@@ -6040,7 +5933,7 @@ class DownloadManagerApp:
 
     def _handle_stopped_download(self, item_id):
         task = self.tasks.get(item_id, {})
-        state = _task_state_value(task)
+        state = str(_task_field_value(task, "state", "") or "")
         if state in ("DELETED", "DELETE_REQUESTED"):
             self._discard_task(item_id)
             return
@@ -6050,7 +5943,7 @@ class DownloadManagerApp:
             return
 
     def _is_live_task(self, task):
-        return _task_state_value(task) not in TERMINAL_TASK_STATES
+        return str(_task_field_value(task, "state", "") or "") not in TERMINAL_TASK_STATES
 
     def _iter_live_tasks(self):
         for task in self.tasks.values():
@@ -6060,13 +5953,13 @@ class DownloadManagerApp:
     def _collect_state_counts(self):
         counts = {"DOWNLOADING": 0, "QUEUED": 0, "PAUSED": 0, "ERROR": 0}
         for task in self.tasks.values():
-            if _task_state_value(task) == "DOWNLOADING":
+            if str(_task_field_value(task, "state", "") or "") == "DOWNLOADING":
                 counts["DOWNLOADING"] += 1
-            elif _task_state_value(task) == "QUEUED":
+            elif str(_task_field_value(task, "state", "") or "") == "QUEUED":
                 counts["QUEUED"] += 1
-            elif _task_state_value(task) in PAUSED_TASK_STATES:
+            elif str(_task_field_value(task, "state", "") or "") in PAUSED_TASK_STATES:
                 counts["PAUSED"] += 1
-            elif _task_state_value(task) == "ERROR":
+            elif str(_task_field_value(task, "state", "") or "") == "ERROR":
                 counts["ERROR"] += 1
         return counts
 
@@ -6294,7 +6187,20 @@ class DownloadManagerApp:
             "retry_count": retry_count,
         }
         if cmd is not None:
-            fields["cmd_preview"] = _ffmpeg_command_preview(cmd)
+            preview_parts = []
+            skip_next_header_value = False
+            for part in cmd:
+                if skip_next_header_value:
+                    preview_parts.append("<headers>")
+                    skip_next_header_value = False
+                    continue
+                text = str(part)
+                if text == "-headers":
+                    preview_parts.append(text)
+                    skip_next_header_value = True
+                    continue
+                preview_parts.append(text)
+            fields["cmd_preview"] = " ".join(preview_parts)[:400]
         fields.update(extra)
         return fields
 
@@ -6342,7 +6248,7 @@ class DownloadManagerApp:
             item_id,
             media_url,
             reason=reason,
-            state=_task_state_value(task),
+            state=str(_task_field_value(task, "state", "") or ""),
             stop_reason=_task_field_value(task, "_stop_reason", None),
             **extra,
         )
@@ -6389,7 +6295,7 @@ class DownloadManagerApp:
             url = _task_url_value(task)
             if not url:
                 continue
-            is_mp3 = _task_is_mp3_enabled(task)
+            is_mp3 = bool(_task_field_value(task, "is_mp3", False))
             name = _task_display_name(task, fallback_url=url, default_is_mp3=is_mp3)
             source_site = _task_source_site_name(task)
             fallback_urls = tuple(_task_fallback_urls_list(task, primary_url=url))
@@ -6399,18 +6305,18 @@ class DownloadManagerApp:
                     "url": url,
                     "name": name,
                     "is_mp3": is_mp3,
-                    "resume_requested": _task_resume_requested(task),
+                    "resume_requested": bool(_task_field_value(task, "resume_requested", False)),
                     "source_site": source_site or None,
                     "fallback_urls": list(fallback_urls),
                     "source_page": source_page,
-                    "resolved_url": _task_resolved_url(task),
+                    "resolved_url": (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""),
                     "resolved_url_saved_at": float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                     "page_refresh_candidates": list(_task_gimy_page_refresh_candidates(task)),
                     "filename": str(_task_field_value(task, "filename", "") or "").strip(),
                     "temp_filename": str(_task_field_value(task, "temp_filename", "") or "").strip(),
                 }
             )
-            signature_append((url, name, is_mp3, _task_resume_requested(task), source_site, fallback_urls, source_page, _task_resolved_url(task), float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0), tuple(_task_gimy_page_refresh_candidates(task)), str(_task_field_value(task, "filename", "") or "").strip(), str(_task_field_value(task, "temp_filename", "") or "").strip()))
+            signature_append((url, name, is_mp3, bool(_task_field_value(task, "resume_requested", False)), source_site, fallback_urls, source_page, (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""), float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0), tuple(_task_gimy_page_refresh_candidates(task)), str(_task_field_value(task, "filename", "") or "").strip(), str(_task_field_value(task, "temp_filename", "") or "").strip()))
         return entries, tuple(signature_parts)
 
     def _mark_existing_file_complete(self, item_id, message):
@@ -6429,9 +6335,9 @@ class DownloadManagerApp:
     def _has_resume_artifact_state(self, task, save_dir=None, is_mp3=None):
         if not task:
             return False
-        if _task_resume_requested(task):
+        if bool(_task_field_value(task, "resume_requested", False)):
             return True
-        if _task_state_value(task) in PAUSED_TASK_STATES:
+        if str(_task_field_value(task, "state", "") or "") in PAUSED_TASK_STATES:
             return True
         explicit_output_path = str(_task_field_value(task, "filename", "") or "").strip()
         explicit_temp_path = str(_task_field_value(task, "temp_filename", "") or "").strip()
@@ -6456,9 +6362,9 @@ class DownloadManagerApp:
             progress_info = self._load_resume_progress_info(f"{path}.progress.json")
             if max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0 or max(int(progress_info.get("bytes", 0) or 0), 0) > 0:
                 return True
-        effective_is_mp3 = _task_is_mp3_enabled(task) if is_mp3 is None else bool(is_mp3)
+        effective_is_mp3 = bool(_task_field_value(task, "is_mp3", False)) if is_mp3 is None else bool(is_mp3)
         effective_save_dir = save_dir or self.save_dir_var.get()
-        source_url = _task_resolved_url(task) or _task_url_value(task) or self._get_task_source_page(task)
+        source_url = (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or "") or _task_url_value(task) or self._get_task_source_page(task)
         if not source_url or not effective_save_dir:
             return False
         ext = "mp3" if effective_is_mp3 else "mp4"
@@ -6489,9 +6395,9 @@ class DownloadManagerApp:
     def _is_resume_download_active(self, task, save_dir=None, is_mp3=False, include_cached_resolved=False):
         if not task:
             return False
-        if _task_resume_requested(task):
+        if bool(_task_field_value(task, "resume_requested", False)):
             return True
-        if include_cached_resolved and _task_resolved_url(task):
+        if include_cached_resolved and (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""):
             return True
         return self._has_resume_artifact_state(task, save_dir=save_dir, is_mp3=is_mp3)
 
@@ -6499,8 +6405,12 @@ class DownloadManagerApp:
         if force_ffmpeg:
             return "ffmpeg"
         resume_active = self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
-        if resume_active and _should_resume_manifest_with_ffmpeg(target_url, task):
-            return "ffmpeg"
+        if resume_active:
+            parsed = urllib.parse.urlparse(str(target_url or ""))
+            host = str(parsed.netloc or "").strip().lower()
+            source_site = _task_source_site_name(task)
+            if not (source_site == "18av" and "streamfastpro" in host):
+                return "ffmpeg"
         if _should_prefer_native_hls(target_url, task):
             return "native"
         if resume_active:
@@ -7989,7 +7899,7 @@ class DownloadManagerApp:
         try:
             assert proc.stdout is not None
             for raw_line in proc.stdout:
-                state = _task_state_value(self.tasks.get(item_id, {}))
+                state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                 if self._is_pause_requested_state(state):
                     self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, url, "pause_requested")
                     _set_task_state_fields(self.tasks[item_id], "PAUSED")
@@ -8023,7 +7933,7 @@ class DownloadManagerApp:
             if proc.stdout is not None:
                 proc.stdout.close()
             current_task = self.tasks.get(item_id)
-            if current_task is not None and _task_process_handle(current_task) is proc:
+            if current_task is not None and _task_field_value(current_task, "_proc", None) is proc:
                 _set_task_process_handle(current_task, None)
 
         if return_code != 0:
@@ -8164,7 +8074,7 @@ class DownloadManagerApp:
     def _effective_domain_download_limit(self):
         active_tasks = []
         for task in self.tasks.values():
-            if self._is_downloading_state(_task_state_value(task)):
+            if self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
                 active_tasks.append(task)
         if not active_tasks:
             return MAX_DOWNLOADS_PER_DOMAIN
@@ -8185,7 +8095,7 @@ class DownloadManagerApp:
 
         def progress_hook(d):
             nonlocal last_ui_update, last_ui_bytes
-            task_state = _task_state_value(self.tasks.get(item_id, {}))
+            task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if self._is_pause_requested_state(task_state):
                 raise StopDownloadException("pause requested")
             if self._is_delete_requested_state(task_state):
@@ -8227,7 +8137,7 @@ class DownloadManagerApp:
                     _task_url_value(task),
                     save_dir,
                     speed,
-                    is_mp3=_task_is_mp3_enabled(task),
+                    is_mp3=bool(_task_field_value(task, "is_mp3", False)),
                     now=now,
                 ):
                     raise ResumeLowSpeedReanalysisException("resume transfer stayed below the low-speed threshold")
@@ -8273,7 +8183,7 @@ class DownloadManagerApp:
         last_time = time.time()
         try:
             while proc.poll() is None:
-                state = _task_state_value(self.tasks.get(item_id, {}))
+                state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                 if self._is_pause_requested_state(state):
                     try:
                         proc.terminate()
@@ -8567,7 +8477,7 @@ class DownloadManagerApp:
         try:
             with open(out_path, mode) as f:
                 while True:
-                    state = _task_state_value(self.tasks.get(item_id, {}))
+                    state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                     if state == "PAUSE_REQUESTED":
                         _set_task_state_fields(self.tasks[item_id], "PAUSED")
                         self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
@@ -8691,7 +8601,7 @@ class DownloadManagerApp:
                             for future in futures:
                                 future.cancel()
                             return
-                        current_task_state = _task_state_value(self.tasks.get(item_id, {}))
+                        current_task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                         if current_task_state in {"PAUSE_REQUESTED", "DELETE_REQUESTED"}:
                             stop_event.set()
                             for future in futures:
@@ -8798,8 +8708,18 @@ class DownloadManagerApp:
         )
         source_site = _task_source_site_name(task)
         native_options = {
-            "socket_timeout": _native_hls_socket_timeout(task),
-            "concurrent_fragment_downloads": _native_hls_concurrent_fragments(task),
+            "socket_timeout": float(
+                YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE.get(
+                    source_site,
+                    YTDLP_HLS_NATIVE_SOCKET_TIMEOUT,
+                )
+            ),
+            "concurrent_fragment_downloads": int(
+                YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE.get(
+                    source_site,
+                    YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS,
+                )
+            ),
             "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(source_site, True)),
         }
         safe_name = _task_output_basename(task, "Video")
@@ -9428,7 +9348,26 @@ class DownloadManagerApp:
                 "-progress",
                 "pipe:1",
             ]
-            cmd += _ffmpeg_hls_input_options(headers, task=task)
+            cmd += [
+                "-protocol_whitelist",
+                "file,http,https,tcp,tls,crypto,data",
+                "-allowed_extensions",
+                "ALL",
+                "-allowed_segment_extensions",
+                "ALL",
+                "-rw_timeout",
+                FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS,
+                "-http_persistent",
+                "0",
+                "-headers",
+                headers,
+            ]
+            if _task_source_site_name(task) in ("missav", "njavtv", "movieffm"):
+                cmd += [
+                    "-extension_picky",
+                    "0",
+                ]
+            cmd += list(FFMPEG_HLS_RECONNECT_OPTIONS)
             if resume_seek_seconds > 0:
                 cmd += ["-ss", f"{resume_seek_seconds:.3f}"]
             cmd += ["-i", candidate_url]
@@ -9492,7 +9431,7 @@ class DownloadManagerApp:
             try:
                 assert proc.stdout is not None
                 for raw_line in proc.stdout:
-                    state = _task_state_value(self.tasks.get(item_id, {}))
+                    state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                     if state == "PAUSE_REQUESTED":
                         self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, candidate_url, "pause_requested")
                         _set_task_state_fields(self.tasks[item_id], "PAUSED")
@@ -9684,7 +9623,7 @@ class DownloadManagerApp:
                 if proc.stdout is not None:
                     proc.stdout.close()
                 current_task = self.tasks.get(item_id)
-                if current_task is not None and _task_process_handle(current_task) is proc:
+                if current_task is not None and _task_field_value(current_task, "_proc", None) is proc:
                     _set_task_process_handle(current_task, None)
 
             if return_code == 0:
@@ -9789,7 +9728,7 @@ class DownloadManagerApp:
                 return
 
             current_task = self.tasks.get(item_id, {})
-            current_state = _task_state_value(current_task)
+            current_state = str(_task_field_value(current_task, "state", "") or "")
             stop_reason = _task_field_value(current_task, "_stop_reason", None)
             if return_code != 0 and (self._is_stop_requested_state(current_state) or stop_reason in STOP_REASONS):
                 if self._is_pause_requested_state(current_state) or stop_reason == STOP_REASON_PAUSE:
@@ -9883,11 +9822,11 @@ class DownloadManagerApp:
         for item_id in self._selected_task_ids():
             if item_id not in self.tasks:
                 continue
-            state = _task_state_value(self.tasks.get(item_id, {}))
+            state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if state == "DOWNLOADING" or self._is_pause_requested_state(state):
                 _set_task_stop_fields(self.tasks[item_id], "PAUSE_REQUESTED", stop_reason=STOP_REASON_PAUSE)
                 self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
-                proc = _task_process_handle(self.tasks[item_id])
+                proc = _task_field_value(self.tasks[item_id], "_proc", None)
                 if proc is not None:
                     try:
                         proc.terminate()
@@ -9903,9 +9842,9 @@ class DownloadManagerApp:
         for item_id in self._selected_task_ids():
             if item_id not in self.tasks:
                 continue
-            state = _task_state_value(self.tasks.get(item_id, {}))
+            state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if self._is_pause_requested_state(state):
-                proc = _task_process_handle(self.tasks[item_id])
+                proc = _task_field_value(self.tasks[item_id], "_proc", None)
                 if proc is not None:
                     try:
                         if proc.poll() is None:
@@ -9913,13 +9852,13 @@ class DownloadManagerApp:
                     except Exception:
                         continue
                 _set_task_state_fields(self.tasks[item_id], "PAUSED")
-            if _task_state_value(self.tasks.get(item_id, {})) not in RESUMABLE_TASK_STATES:
+            if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") not in RESUMABLE_TASK_STATES:
                 continue
             _set_task_aux_fields(self.tasks[item_id], _stop_reason=None)
             if not self._check_resume_disk_space(item_id):
                 continue
             task = self.tasks[item_id]
-            is_mp3 = _task_is_mp3_enabled(task)
+            is_mp3 = bool(_task_field_value(task, "is_mp3", False))
             source_site = _task_source_site_name(task)
             self._start_download_thread(
                 _task_url_value(task),
@@ -9930,7 +9869,7 @@ class DownloadManagerApp:
                 extra_task_data=self._build_extra_task_data(
                     source_page=self._get_task_source_page(task),
                     fallback_urls=_task_fallback_urls_list(task),
-                    resolved_url=_task_resolved_url(task),
+                    resolved_url=(_normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""),
                     resolved_url_saved_at=float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                     page_refresh_candidates=_task_gimy_page_refresh_candidates(task),
                 ),
@@ -9941,7 +9880,7 @@ class DownloadManagerApp:
         for item_id in self._selected_task_ids():
             if item_id not in self.tasks:
                 continue
-            state = _task_state_value(self.tasks.get(item_id, {}))
+            state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             remove_from_state(_task_url_value(self.tasks[item_id]))
             if state in DELETE_REQUEST_TASK_STATES:
                 self._request_task_deletion(item_id, state)
@@ -9956,7 +9895,7 @@ class DownloadManagerApp:
         for item_id in list(self.tree.get_children()):
             if item_id not in self.tasks:
                 continue
-            if _task_state_value(self.tasks.get(item_id, {})) != "FINISHED":
+            if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") != "FINISHED":
                 continue
             self._delete_finished_task(item_id)
         self.persist_unfinished_state(force=True)
@@ -10017,7 +9956,7 @@ class DownloadManagerApp:
         while time.time() < deadline:
             active_found = False
             for task in self.tasks.values():
-                proc = _task_process_handle(task)
+                proc = _task_field_value(task, "_proc", None)
                 if proc is None:
                     continue
                 try:
@@ -10072,7 +10011,7 @@ class DownloadManagerApp:
     def _iter_active_process_handles(self):
         seen = set()
         for item_id, task in self.tasks.items():
-            proc = _task_process_handle(task)
+            proc = _task_field_value(task, "_proc", None)
             if proc is None:
                 continue
             proc_id = id(proc)
@@ -10114,7 +10053,7 @@ class DownloadManagerApp:
 
     def _request_shutdown_stop_for_active_tasks(self):
         for item_id, task in self.tasks.items():
-            state = _task_state_value(task)
+            state = str(_task_field_value(task, "state", "") or "")
             if state == "DOWNLOADING":
                 _set_task_stop_fields(task, "PAUSE_REQUESTED", stop_reason=STOP_REASON_PAUSE, resume_requested=True)
                 self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
@@ -10174,7 +10113,7 @@ class DownloadManagerApp:
                 self._terminate_process_handle(proc, timeout_seconds=0.1)
             finally:
                 try:
-                    if _task_process_handle(task) is proc:
+                    if _task_field_value(task, "_proc", None) is proc:
                         _set_task_process_handle(task, None)
                 except Exception:
                     pass
@@ -10210,7 +10149,7 @@ class DownloadManagerApp:
         source_site_counts = {}
         queued_items = []
         for item_id, task in self.tasks.items():
-            if self._is_downloading_state(_task_state_value(task)):
+            if self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
                 domain, source_page = (
                     self._extract_domain(_task_url_value(task)),
                     self._get_task_source_page(task),
@@ -10221,7 +10160,7 @@ class DownloadManagerApp:
                     source_page_counts[source_page] = source_page_counts.get(source_page, 0) + 1
                 if source_site:
                     source_site_counts[source_site] = source_site_counts.get(source_site, 0) + 1
-            elif self._is_queued_state(_task_state_value(task)):
+            elif self._is_queued_state(str(_task_field_value(task, "state", "") or "")):
                 queued_items.append(item_id)
         for item_id in queued_items:
             task = self.tasks[item_id]
@@ -10256,7 +10195,7 @@ class DownloadManagerApp:
                 item_id,
                 self.save_dir_var.get(),
                 self._should_use_impersonation(_task_url_value(task), _task_source_site_name(task)),
-                _task_is_mp3_enabled(task),
+                bool(_task_field_value(task, "is_mp3", False)),
             )
 
     def _cleanup_temp_files(self, item_id):
@@ -10415,7 +10354,7 @@ class DownloadManagerApp:
             return True
 
     def _should_resume_with_cached_resolved_link(self, task, source_url, save_dir, is_mp3=False):
-        cached_resolved_url = _task_resolved_url(task)
+        cached_resolved_url = _normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""
         if not cached_resolved_url:
             return False
         if self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3, include_cached_resolved=True):
@@ -10446,7 +10385,7 @@ class DownloadManagerApp:
         has_anime1_lock = False
         try:
             task = self.tasks.get(item_id, {})
-            cached_resolved_url = _task_resolved_url(task)
+            cached_resolved_url = _normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""
             self._prepare_resume_low_speed_watch(task, url, save_dir, is_mp3=is_mp3)
             url_lower = url.lower()
             if ("//anime1.me/" in url_lower or "//anime1.pw/" in url_lower) and use_impersonate:
@@ -10530,7 +10469,7 @@ class DownloadManagerApp:
             return
 
         def progress_hook(d):
-            task_state = _task_state_value(self.tasks.get(item_id, {}))
+            task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if self._is_pause_requested_state(task_state):
                 raise StopDownloadException("pause requested")
             if self._is_delete_requested_state(task_state):
@@ -10635,7 +10574,7 @@ class DownloadManagerApp:
             ydl_opts["http_headers"] = headers
             ydl_opts["outtmpl"] = {"default": f"{safe_name}.%(ext)s"}
             _run_yt_dlp(target_url)
-            if _task_state_value(self.tasks.get(item_id, {})) == "DELETED":
+            if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "DELETED":
                 raise KeyboardInterrupt()
             self._mark_task_finished(item_id)
 
@@ -10788,7 +10727,26 @@ class DownloadManagerApp:
             ydl_opts["noplaylist"] = True
             _set_task_identity(source_site="youtube")
 
-        forced_m3u8_site = _match_forced_m3u8_site(url, task)
+        normalized_url = _normalize_download_url(url)
+        source_site = _task_source_site_name(task)
+        forced_m3u8_site = None
+        if source_site == "3kor" and normalized_url:
+            parsed_forced = urllib.parse.urlsplit(normalized_url)
+            if "3kor.com" in parsed_forced.netloc.lower() and "edit-down.php" in parsed_forced.path.lower():
+                embedded_url = urllib.parse.parse_qs(parsed_forced.query).get("url", [""])[0]
+                if _looks_like_manifest_url(embedded_url):
+                    forced_m3u8_site = "3kor"
+        if forced_m3u8_site is None and _looks_like_manifest_url(normalized_url):
+            if source_site in FORCED_M3U8_SITE_RULES:
+                forced_m3u8_site = source_site
+            elif _task_fallback_urls_list(task, primary_url=normalized_url):
+                forced_m3u8_site = "movieffm"
+            else:
+                hostname = urllib.parse.urlparse(normalized_url).netloc.lower().split(":", 1)[0]
+                for site_name, config in FORCED_M3U8_SITE_RULES.items():
+                    if any(hostname.endswith(host_suffix) for host_suffix in config["hosts"]):
+                        forced_m3u8_site = site_name
+                        break
         if forced_m3u8_site:
             site_config = FORCED_M3U8_SITE_RULES[forced_m3u8_site]
             referer = site_config["referer"]
@@ -13175,7 +13133,7 @@ class DownloadManagerApp:
 
         try:
             _run_yt_dlp(url)
-            if _task_state_value(self.tasks.get(item_id, {})) == "DELETED":
+            if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "DELETED":
                 raise KeyboardInterrupt()
             self._mark_task_finished(item_id)
         except (StopDownloadException, KeyboardInterrupt):
@@ -13188,14 +13146,14 @@ class DownloadManagerApp:
                 e,
                 url=url,
                 item_id=item_id,
-                state=_task_state_value(task),
+                state=str(_task_field_value(task, "state", "") or ""),
                 use_impersonate=use_impersonate,
                 is_mp3=is_mp3,
             )
-            if _task_state_value(task) in ("DELETED", "DELETE_REQUESTED"):
+            if str(_task_field_value(task, "state", "") or "") in ("DELETED", "DELETE_REQUESTED"):
                 self._discard_task(item_id)
                 return
-            if _task_state_value(task) in PAUSED_TASK_STATES:
+            if str(_task_field_value(task, "state", "") or "") in PAUSED_TASK_STATES:
                 return
             self._set_task_status_mode_ui(item_id, t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤", summarize_error_message(e, "err_net", 120))
             _set_task_state_fields(task, "ERROR")
