@@ -16,7 +16,90 @@ if (!(Test-Path -LiteralPath $gh)) {
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $repoRoot
 
-& $gh auth status | Out-Null
+function Invoke-CheckedCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @(),
+        [switch]$Quiet
+    )
+    if ($Quiet) {
+        & $FilePath @Arguments 2>$null
+    } else {
+        & $FilePath @Arguments
+    }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $commandText = ($Arguments | ForEach-Object { if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ } }) -join ' '
+        throw "Command failed with exit code $exitCode: $FilePath $commandText"
+    }
+}
+
+function Test-GhReleaseExists {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ReleaseTag
+    )
+    try {
+        Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "view", $ReleaseTag) -Quiet
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Wait-RemoteTagVisibility {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ReleaseTag,
+        [int]$MaxAttempts = 10
+    )
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $remoteRefs = git -c safe.directory=$repoRoot ls-remote --tags origin $ReleaseTag 2>$null
+        if ($LASTEXITCODE -eq 0 -and $remoteRefs) {
+            return
+        }
+        if ($attempt -lt $MaxAttempts) {
+            Start-Sleep -Seconds 2
+        }
+    }
+    throw "Remote tag did not become visible in time: $ReleaseTag"
+}
+
+function Ensure-GhRelease {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ReleaseTag,
+        [Parameter(Mandatory = $true)]
+        [string]$AssetPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ReleaseNotes,
+        [int]$MaxAttempts = 5
+    )
+    if (Test-GhReleaseExists -ReleaseTag $ReleaseTag) {
+        Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "upload", $ReleaseTag, $AssetPath, "--clobber")
+        Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "edit", $ReleaseTag, "--title", $ReleaseTag, "--notes", $ReleaseNotes)
+        return
+    }
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "create", $ReleaseTag, $AssetPath, "--title", $ReleaseTag, "--notes", $ReleaseNotes)
+            return
+        } catch {
+            if ($attempt -ge $MaxAttempts) {
+                throw
+            }
+            Start-Sleep -Seconds 2
+            if (Test-GhReleaseExists -ReleaseTag $ReleaseTag) {
+                Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "upload", $ReleaseTag, $AssetPath, "--clobber")
+                Invoke-CheckedCommand -FilePath $gh -Arguments @("release", "edit", $ReleaseTag, "--title", $ReleaseTag, "--notes", $ReleaseNotes)
+                return
+            }
+        }
+    }
+}
+
+Invoke-CheckedCommand -FilePath $gh -Arguments @("auth", "status") -Quiet
 
 if (-not $TagName -and $BuildId -match '-(\d+)$') {
     $TagName = "v$($Matches[1])"
@@ -36,7 +119,7 @@ if ($BuildId) {
     }
     if ($hasTrackedChanges) {
         $commitLabel = if ($TagName) { $TagName } else { $BuildId }
-        git -c safe.directory=$repoRoot commit -m ("Release {0}" -f $commitLabel)
+        Invoke-CheckedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "commit", "-m", ("Release {0}" -f $commitLabel))
     }
 }
 
@@ -49,14 +132,15 @@ try {
 }
 
 if (-not $originExists) {
-    & $gh repo create $RepoName "--$Visibility" --source . --remote origin --push
+    Invoke-CheckedCommand -FilePath $gh -Arguments @("repo", "create", $RepoName, "--$Visibility", "--source", ".", "--remote", "origin", "--push")
 } else {
-    git -c safe.directory=$repoRoot push -u origin HEAD
+    Invoke-CheckedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "push", "-u", "origin", "HEAD")
 }
 
 if ($TagName) {
-    git -c safe.directory=$repoRoot tag -f $TagName
-    git -c safe.directory=$repoRoot push origin ("refs/tags/{0}" -f $TagName) --force
+    Invoke-CheckedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "tag", "-f", $TagName)
+    Invoke-CheckedCommand -FilePath "git" -Arguments @("-c", "safe.directory=$repoRoot", "push", "origin", ("refs/tags/{0}" -f $TagName), "--force")
+    Wait-RemoteTagVisibility -ReleaseTag $TagName
 }
 
 if ($TagName -and $VersionedExe) {
@@ -64,16 +148,5 @@ if ($TagName -and $VersionedExe) {
         throw "Versioned executable not found: $VersionedExe"
     }
     $releaseNotes = if ($BuildId) { "Automated release for build $BuildId" } else { "Automated release for $TagName" }
-    $releaseExists = $true
-    try {
-        & $gh release view $TagName | Out-Null
-    } catch {
-        $releaseExists = $false
-    }
-    if ($releaseExists) {
-        & $gh release upload $TagName $VersionedExe --clobber
-        & $gh release edit $TagName --title $TagName --notes $releaseNotes
-    } else {
-        & $gh release create $TagName $VersionedExe --title $TagName --notes $releaseNotes
-    }
+    Ensure-GhRelease -ReleaseTag $TagName -AssetPath $VersionedExe -ReleaseNotes $releaseNotes
 }
