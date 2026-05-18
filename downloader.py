@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260518-2860"
+APP_BUILD = "20260518-2870"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -713,65 +713,12 @@ def t(key, **kwargs):
     return text
 
 
-def _contains_suspicious_text(text):
-    if text is None:
-        return False
-    text = str(text)
-    stripped = text.strip()
-    if not stripped:
-        return True
-    question_ratio = stripped.count("?") / max(len(stripped), 1)
-    return question_ratio > 0.4 or stripped in {"???", "??????"} or "�" in stripped
-
-
-def _derive_task_name_from_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return ""
-    parsed = urllib.parse.urlparse(normalized)
-    if _is_anime1_category_url(normalized):
-        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        cat = query.get("cat", [""])[0]
-        return f"{parsed.netloc} cat={cat}" if cat else parsed.netloc
-    slug = parsed.path.rstrip("/").split("/")[-1]
-    return slug or parsed.netloc
-
-
-def _is_anime1_category_url(url):
-    if not isinstance(url, str) or not url.strip():
-        return False
-    parsed = urllib.parse.urlparse(url.strip())
-    host = parsed.netloc.lower()
-    if "anime1.me" not in host and "anime1.pw" not in host:
-        return False
-    if "/category/" in parsed.path.lower():
-        return True
-    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-    return "cat" in query
-
-
-def _is_anime1_episode_url(url):
-    if not isinstance(url, str) or not url.strip():
-        return False
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    return bool(re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized))
-
-
-def _is_anime1_media_url(url_or_header):
-    if not isinstance(url_or_header, str) or not url_or_header.strip():
-        return False
-    lowered = url_or_header.lower()
-    return "anime1.me" in lowered or "anime1.pw" in lowered or ".v.anime1.me" in lowered
-
-
 def _extract_anime1_category_links(page_url, page_html):
     html_text = str(page_html or "")
     candidates = []
     for href, title in re.findall(r'<h2[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
         normalized_link = _normalize_download_url(urllib.parse.urljoin(page_url, html.unescape(href)))
-        if not _is_anime1_episode_url(normalized_link):
+        if not normalized_link or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized_link):
             continue
         clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
         if not clean_title:
@@ -780,7 +727,7 @@ def _extract_anime1_category_links(page_url, page_html):
     if not candidates:
         for href, title in re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
             normalized_link = _normalize_download_url(urllib.parse.urljoin(page_url, html.unescape(href)))
-            if not _is_anime1_episode_url(normalized_link):
+            if not normalized_link or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized_link):
                 continue
             clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
             if not clean_title or not re.search(r"\[\d+\]", clean_title):
@@ -800,14 +747,35 @@ def _normalize_state_entry(entry):
     normalized = dict(entry) if isinstance(entry, dict) else {}
     url = _normalize_download_url(normalized.get("url", ""))
     name = str(normalized.get("name", "")).strip()
-    if _is_anime1_category_url(url):
-        parsed = urllib.parse.urlparse(url)
-        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        cat = query.get("cat", [""])[0]
-        if cat:
-            url = f"https://anime1.pw/?cat={cat}"
-    if not name or _contains_suspicious_text(name):
-        name = _derive_task_name_from_url(url)
+    if isinstance(url, str) and url.strip():
+        parsed = urllib.parse.urlparse(url.strip())
+        host = parsed.netloc.lower()
+        if ("anime1.me" in host or "anime1.pw" in host) and ("/category/" in parsed.path.lower() or "cat" in urllib.parse.parse_qs(parsed.query, keep_blank_values=True)):
+            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            cat = query.get("cat", [""])[0]
+            if cat:
+                url = f"https://anime1.pw/?cat={cat}"
+    name_text = "" if name is None else str(name)
+    stripped_name = name_text.strip()
+    suspicious_name = (
+        not stripped_name
+        or (stripped_name.count("?") / max(len(stripped_name), 1)) > 0.4
+        or stripped_name in {"???", "??????"}
+        or "�" in stripped_name
+    )
+    if suspicious_name:
+        normalized_name_url = _normalize_download_url(url)
+        if normalized_name_url:
+            parsed_name_url = urllib.parse.urlparse(normalized_name_url)
+            if ("anime1.me" in parsed_name_url.netloc.lower() or "anime1.pw" in parsed_name_url.netloc.lower()) and ("/category/" in parsed_name_url.path.lower() or "cat" in urllib.parse.parse_qs(parsed_name_url.query, keep_blank_values=True)):
+                query = urllib.parse.parse_qs(parsed_name_url.query, keep_blank_values=True)
+                cat = query.get("cat", [""])[0]
+                name = f"{parsed_name_url.netloc} cat={cat}" if cat else parsed_name_url.netloc
+            else:
+                slug = parsed_name_url.path.rstrip("/").split("/")[-1]
+                name = slug or parsed_name_url.netloc
+        else:
+            name = ""
     normalized["url"] = url
     normalized["name"] = name
     normalized["is_mp3"] = bool(normalized.get("is_mp3", False))
@@ -854,15 +822,6 @@ def _normalize_download_url(url):
         query = [(key, value) for key, value in query if key not in ("list", "index", "start_radio", "pp", "feature")]
     normalized_query = urllib.parse.urlencode(query, doseq=True)
     return urllib.parse.urlunsplit((scheme, netloc, parsed.path, normalized_query, ""))
-
-
-def _is_mega_folder_url(url):
-    normalized = str(url or "").strip().lower()
-    if not normalized:
-        return False
-    parsed = urllib.parse.urlparse(normalized)
-    fragment = str(parsed.fragment or "").strip().lower()
-    return "/folder/" in parsed.path.lower() or fragment.startswith("f!") or fragment.startswith("folder/")
 
 
 def _parse_mega_public_file_parts(mega_client, url):
@@ -2009,7 +1968,19 @@ def _collect_movieffm_drama_episodes(page_html, page_url, fallback_title="MovieF
         add_episode(ep_url, name, allow_direct_m3u8=ep_url.lower().endswith(".m3u8"))
     for ep_url in re.findall(r'https://www\.movieffm\.net/[^"\']+', text):
         if "/play/" in ep_url or "/vodplay/" in ep_url or "/episode/" in ep_url:
-            add_episode(ep_url, _derive_task_name_from_url(ep_url))
+            normalized_episode_url = _normalize_download_url(ep_url)
+            if normalized_episode_url:
+                parsed_episode_url = urllib.parse.urlparse(normalized_episode_url)
+                if ("anime1.me" in parsed_episode_url.netloc.lower() or "anime1.pw" in parsed_episode_url.netloc.lower()) and ("/category/" in parsed_episode_url.path.lower() or "cat" in urllib.parse.parse_qs(parsed_episode_url.query, keep_blank_values=True)):
+                    query = urllib.parse.parse_qs(parsed_episode_url.query, keep_blank_values=True)
+                    cat = query.get("cat", [""])[0]
+                    episode_name = f"{parsed_episode_url.netloc} cat={cat}" if cat else parsed_episode_url.netloc
+                else:
+                    slug = parsed_episode_url.path.rstrip("/").split("/")[-1]
+                    episode_name = slug or parsed_episode_url.netloc
+            else:
+                episode_name = ""
+            add_episode(ep_url, episode_name)
     return drama_title, episodes, episode_fallbacks
 
 
@@ -2294,15 +2265,6 @@ def _decrypt_3kor_stream_url(encrypted_text, key="my-to-newhan-2025"):
     return _normalize_download_url(stream_url)
 
 
-def _trim_site_suffix_from_title(raw_title):
-    raw_title = re.sub(r"\s+", " ", str(raw_title or "")).strip()
-    for splitter in (" - ", " | ", " – ", " — "):
-        if splitter in raw_title:
-            raw_title = raw_title.split(splitter)[0].strip()
-            break
-    return raw_title
-
-
 def _clean_99itv_title(raw_title):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
@@ -2311,28 +2273,6 @@ def _clean_99itv_title(raw_title):
     cleaned = re.sub(r"\s*-99i影城.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*線上看\s*$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/") or str(raw_title or "").strip()
-
-
-def _looks_like_placeholder_page_title(title_text, page_text=""):
-    normalized_title = re.sub(r"\s+", " ", str(title_text or "")).strip().lower()
-    normalized_page = str(page_text or "").lower()
-    title_markers = (
-        "just a moment",
-        "attention required",
-        "checking your browser",
-        "please wait",
-    )
-    if any(marker in normalized_title for marker in title_markers):
-        return True
-    page_markers = (
-        "cf-browser-verification",
-        "cf-challenge",
-        "__cf_chl_",
-        "checking your browser before accessing",
-    )
-    if any(marker in normalized_page for marker in page_markers):
-        return True
-    return False
 
 
 def _clean_ppp_porn_title(raw_title):
@@ -2829,8 +2769,17 @@ def _extract_html_title(page_text, fallback_name):
     title_m = re.search(r"<title>(.*?)</title>", str(page_text or ""), re.IGNORECASE | re.DOTALL)
     if not title_m:
         return fallback_name
-    raw_title = _trim_site_suffix_from_title(html.unescape(title_m.group(1)))
-    if _looks_like_placeholder_page_title(raw_title, page_text):
+    raw_title = re.sub(r"\s+", " ", str(html.unescape(title_m.group(1)) or "")).strip()
+    for splitter in (" - ", " | ", " – ", " — "):
+        if splitter in raw_title:
+            raw_title = raw_title.split(splitter)[0].strip()
+            break
+    normalized_title = re.sub(r"\s+", " ", str(raw_title or "")).strip().lower()
+    normalized_page = str(page_text or "").lower()
+    if (
+        any(marker in normalized_title for marker in ("just a moment", "attention required", "checking your browser", "please wait"))
+        or any(marker in normalized_page for marker in ("cf-browser-verification", "cf-challenge", "__cf_chl_", "checking your browser before accessing"))
+    ):
         return fallback_name
     return raw_title or fallback_name
 
@@ -2947,13 +2896,6 @@ def _collect_gimy_detail_page_urls(*page_urls):
     return urls
 
 
-def _is_gimy_episode_page_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    return "/eps/" in urllib.parse.urlsplit(normalized).path.lower()
-
-
 def _looks_like_direct_media_url(url):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -3011,34 +2953,28 @@ def _classify_gimy_stream_candidate(url):
     return "", normalized
 
 
-def _is_supported_download_page_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    netloc = urllib.parse.urlsplit(normalized).netloc.lower()
-    supported_markers = (
-        "gimy",
-        "movieffm",
-        "missav",
-        "avjoy",
-        "hanime1.me",
-        "hanimeone.me",
-        "anime1",
-        "instagram.com",
-        "facebook.com",
-        "threads.net",
-        "twitter.com",
-        "x.com",
-        "fxtwitter.com",
-        "vxtwitter.com",
-        "youtube.com",
-        "youtu.be",
-        "jable",
-        "njavtv",
-        "xiaoyakankan",
-        "tiktok.com",
-    )
-    return any(marker in netloc for marker in supported_markers)
+SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
+    "gimy",
+    "movieffm",
+    "missav",
+    "avjoy",
+    "hanime1.me",
+    "hanimeone.me",
+    "anime1",
+    "instagram.com",
+    "facebook.com",
+    "threads.net",
+    "twitter.com",
+    "x.com",
+    "fxtwitter.com",
+    "vxtwitter.com",
+    "youtube.com",
+    "youtu.be",
+    "jable",
+    "njavtv",
+    "xiaoyakankan",
+    "tiktok.com",
+)
 
 
 def save_state_entries(entries):
@@ -5143,7 +5079,18 @@ class DownloadManagerApp:
         def fetch_mega_single():
             try:
                 display_name = default_short_name_for_url(new_url, is_mp3=is_mp3) or "MEGA"
-                if MegaClient is not None and not _is_mega_folder_url(new_url):
+                normalized_mega_url = str(new_url or "").strip().lower()
+                parsed_mega_url = urllib.parse.urlparse(normalized_mega_url) if normalized_mega_url else None
+                mega_fragment = str(parsed_mega_url.fragment or "").strip().lower() if parsed_mega_url else ""
+                is_mega_folder_link = bool(
+                    parsed_mega_url
+                    and (
+                        "/folder/" in parsed_mega_url.path.lower()
+                        or mega_fragment.startswith("f!")
+                        or mega_fragment.startswith("folder/")
+                    )
+                )
+                if MegaClient is not None and not is_mega_folder_link:
                     mega_client = MegaClient()
                     file_handle, file_key = _parse_mega_public_file_parts(mega_client, new_url)
                     public_info = mega_client.get_public_file_info(file_handle, file_key) or {}
@@ -5156,7 +5103,13 @@ class DownloadManagerApp:
                 self._final_add_download(new_url, is_mp3=is_mp3, source_site="mega")
 
         lowered = new_url.lower()
-        if _is_anime1_category_url(new_url):
+        if isinstance(new_url, str) and new_url.strip():
+            parsed_new_url = urllib.parse.urlparse(new_url.strip())
+            new_url_query = urllib.parse.parse_qs(parsed_new_url.query, keep_blank_values=True)
+        else:
+            parsed_new_url = None
+            new_url_query = {}
+        if parsed_new_url and ("anime1.me" in parsed_new_url.netloc.lower() or "anime1.pw" in parsed_new_url.netloc.lower()) and ("/category/" in parsed_new_url.path.lower() or "cat" in new_url_query):
             self._start_background_parse(fetch_anime1)
             return
         if "gimy" in lowered and ("/detail/" in lowered or "/voddetail/" in lowered or "/voddetail2/" in lowered or "/vod/" in lowered):
@@ -5607,7 +5560,12 @@ class DownloadManagerApp:
                 if not m:
                     return
                 title = _extract_html_title(txt, short_name)
-                if _looks_like_placeholder_page_title(title, txt):
+                normalized_title = re.sub(r"\s+", " ", str(title or "")).strip().lower()
+                normalized_page = str(txt or "").lower()
+                if (
+                    any(marker in normalized_title for marker in ("just a moment", "attention required", "checking your browser", "please wait"))
+                    or any(marker in normalized_page for marker in ("cf-browser-verification", "cf-challenge", "__cf_chl_", "checking your browser before accessing"))
+                ):
                     return
                 title = "".join(c for c in title if c not in '\\/:*?"<>|')
                 if title and str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "QUEUED":
@@ -7541,11 +7499,16 @@ class DownloadManagerApp:
         range_supported = False
         content_type = ""
         disable_ssl_verify = _should_disable_ssl_verify_for_url(url)
-        prefer_curl = (
-            _is_anime1_media_url(url)
-            or _is_anime1_media_url(headers.get("Referer", ""))
-            or _is_anime1_media_url(headers.get("Origin", ""))
-            or disable_ssl_verify
+        anime1_header_candidates = [url, headers.get("Referer", ""), headers.get("Origin", "")]
+        prefer_curl = disable_ssl_verify or any(
+            isinstance(candidate, str)
+            and candidate.strip()
+            and (
+                "anime1.me" in candidate.lower()
+                or "anime1.pw" in candidate.lower()
+                or ".v.anime1.me" in candidate.lower()
+            )
+            for candidate in anime1_header_candidates
         )
         if prefer_curl:
             transient_sessions = []
@@ -8165,7 +8128,17 @@ class DownloadManagerApp:
 
     def _download_mega_public_file(self, item_id, url, save_dir, is_mp3=False):
         task = self.tasks.get(item_id, {})
-        is_folder_link = _is_mega_folder_url(url)
+        normalized_mega_url = str(url or "").strip().lower()
+        parsed_mega_url = urllib.parse.urlparse(normalized_mega_url) if normalized_mega_url else None
+        mega_fragment = str(parsed_mega_url.fragment or "").strip().lower() if parsed_mega_url else ""
+        is_folder_link = bool(
+            parsed_mega_url
+            and (
+                "/folder/" in parsed_mega_url.path.lower()
+                or mega_fragment.startswith("f!")
+                or mega_fragment.startswith("folder/")
+            )
+        )
         if is_folder_link and is_mp3:
             raise RuntimeError("MEGA folder links do not support MP3 mode yet")
         mega_client = MegaClient() if MegaClient is not None else None
@@ -8315,11 +8288,16 @@ class DownloadManagerApp:
         if "User-Agent" not in headers:
             headers["User-Agent"] = DEFAULT_USER_AGENT
         disable_ssl_verify = _should_disable_ssl_verify_for_url(url)
-        prefer_curl_stream = (
-            _is_anime1_media_url(url)
-            or _is_anime1_media_url(headers.get("Referer", ""))
-            or _is_anime1_media_url(headers.get("Origin", ""))
-            or disable_ssl_verify
+        anime1_header_candidates = [url, headers.get("Referer", ""), headers.get("Origin", "")]
+        prefer_curl_stream = disable_ssl_verify or any(
+            isinstance(candidate, str)
+            and candidate.strip()
+            and (
+                "anime1.me" in candidate.lower()
+                or "anime1.pw" in candidate.lower()
+                or ".v.anime1.me" in candidate.lower()
+            )
+            for candidate in anime1_header_candidates
         )
         if headers.get("Referer"):
             try:
@@ -9043,7 +9021,11 @@ class DownloadManagerApp:
 
             if refresh_url and refresh_url != _normalize_download_url(url) and len(refresh_history) < GIMY_SOURCE_PAGE_REFRESH_LIMIT:
                 gimy_parse_history = _task_gimy_refresh_history(task)
-                if _is_gimy_episode_page_url(refresh_url) and refresh_url not in gimy_parse_history:
+                if (
+                    refresh_url
+                    and "/eps/" in urllib.parse.urlsplit(_normalize_download_url(refresh_url)).path.lower()
+                    and refresh_url not in gimy_parse_history
+                ):
                     gimy_parse_history = gimy_parse_history + [refresh_url]
                 _set_task_aux_fields(
                     task,
@@ -11679,7 +11661,10 @@ class DownloadManagerApp:
                 return
             supported_external_pages = [
                 candidate for candidate in external_source_urls
-                if _is_supported_download_page_url(candidate)
+                if any(
+                    marker in urllib.parse.urlsplit(_normalize_download_url(candidate)).netloc.lower()
+                    for marker in SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS
+                )
             ]
             if not ordered_direct_candidates and supported_external_pages:
                 external_url = supported_external_pages[0]
@@ -11699,9 +11684,9 @@ class DownloadManagerApp:
                         refresh_history.append(normalized_current_candidate)
                 episode_refresh_attempts = sum(
                     1 for candidate in refresh_history
-                    if _is_gimy_episode_page_url(candidate)
+                    if "/eps/" in urllib.parse.urlsplit(_normalize_download_url(candidate)).path.lower()
                 )
-                if _is_gimy_episode_page_url(current_page_url or url):
+                if "/eps/" in urllib.parse.urlsplit(_normalize_download_url(current_page_url or url)).path.lower():
                     episode_refresh_attempts = max(episode_refresh_attempts - 1, 0)
                 available_episode_page_candidates = []
                 for candidate in deferred_episode_urls:
@@ -11841,7 +11826,10 @@ class DownloadManagerApp:
                         return
                     supported_external_pages = [
                         candidate for candidate in external_source_urls
-                        if _is_supported_download_page_url(candidate)
+                        if any(
+                            marker in urllib.parse.urlsplit(_normalize_download_url(candidate)).netloc.lower()
+                            for marker in SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS
+                        )
                     ]
                     if not ordered_direct_candidates and supported_external_pages:
                         external_url = supported_external_pages[0]
@@ -11995,7 +11983,10 @@ class DownloadManagerApp:
             if not stream_url:
                 supported_external_pages = [
                     candidate for candidate in external_source_urls
-                    if _is_supported_download_page_url(candidate)
+                    if any(
+                        marker in urllib.parse.urlsplit(_normalize_download_url(candidate)).netloc.lower()
+                        for marker in SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS
+                    )
                 ]
                 if supported_external_pages:
                     external_url = supported_external_pages[0]
@@ -12009,7 +12000,7 @@ class DownloadManagerApp:
                 fallback_episode_candidates = [
                     candidate
                     for candidate in _dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=url)
-                    if _is_gimy_episode_page_url(candidate)
+                    if "/eps/" in urllib.parse.urlsplit(_normalize_download_url(candidate)).path.lower()
                 ]
                 next_episode_candidates = _filter_gimy_untried_page_candidates(
                     task,
@@ -13063,7 +13054,7 @@ class DownloadManagerApp:
         page_url = url
         if "anime1" in parsed_url.netloc and use_impersonate:
             try:
-                if not _is_anime1_episode_url(page_url):
+                if not page_url or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", _normalize_download_url(page_url) or ""):
                     raise Exception(f"Anime1 task URL is not a valid episode page: {page_url}")
                 c_req = get_curl_cffi_requests()
                 anime1_session = self._track_network_session(c_req.Session(impersonate="chrome110"))
@@ -13155,7 +13146,7 @@ class DownloadManagerApp:
                 raise
             except Exception as e:
                 write_error_log("anime1 custom parser fallback", e, page_url=page_url, item_id=item_id, use_impersonate=use_impersonate)
-                if not _is_anime1_episode_url(page_url):
+                if not page_url or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", _normalize_download_url(page_url) or ""):
                     raise
                 url = page_url
                 self._set_task_parse_ui(item_id, error=e)
