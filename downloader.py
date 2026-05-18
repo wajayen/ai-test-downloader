@@ -2166,14 +2166,6 @@ def _clean_99itv_title(raw_title):
     return cleaned.strip(" -|/") or str(raw_title or "").strip()
 
 
-def _clean_18jav_title(raw_title):
-    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
-    if not cleaned:
-        return cleaned
-    cleaned = re.sub(r"\s*[-|]\s*18JAV.*$", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/") or str(raw_title or "").strip()
-
-
 def _clean_18av_title(raw_title):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
@@ -11566,35 +11558,35 @@ class DownloadManagerApp:
                 )
                 return self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
             if not bool(_task_field_value(task, "_gimy_detail_refresh_done", False)):
-                    detail_page_candidates = []
-                    for page_url in (
-                        self._get_task_source_page(task, fallback_url=url) or url,
-                        current_page_url,
-                        source_page_url,
-                        url,
-                    ):
-                        normalized_page_url = _normalize_download_url(page_url)
-                        if not normalized_page_url:
+                detail_page_candidates = []
+                for page_url in (
+                    self._get_task_source_page(task, fallback_url=url) or url,
+                    current_page_url,
+                    source_page_url,
+                    url,
+                ):
+                    normalized_page_url = _normalize_download_url(page_url)
+                    if not normalized_page_url:
+                        continue
+                    parsed = urllib.parse.urlsplit(normalized_page_url)
+                    base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'gimy01.tv'}"
+                    path = parsed.path or ""
+                    for pattern in (r"/eps/(\d+)-\d+(?:-\d+)?\.html", r"/(?:play|vodplay|video)/(\d+)-\d+(?:-\d+)?\.html"):
+                        match = re.search(pattern, path)
+                        if not match:
                             continue
-                        parsed = urllib.parse.urlsplit(normalized_page_url)
-                        base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'gimy01.tv'}"
-                        path = parsed.path or ""
-                        for pattern in (r"/eps/(\d+)-\d+(?:-\d+)?\.html", r"/(?:play|vodplay|video)/(\d+)-\d+(?:-\d+)?\.html"):
-                            match = re.search(pattern, path)
-                            if not match:
-                                continue
-                            vod_id = match.group(1)
-                            for relative_path in (f"/vod/{vod_id}.html", f"/detail/{vod_id}.html", f"/voddetail/{vod_id}.html"):
-                                normalized_candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
-                                if normalized_candidate and normalized_candidate not in detail_page_candidates:
-                                    detail_page_candidates.append(normalized_candidate)
-                    if detail_page_candidates:
-                        detail_refresh_url = detail_page_candidates[0]
-                        normalized_detail_refresh_url = _normalize_download_url(detail_refresh_url)
-                        detail_refresh_history = list(refresh_history)
-                        if normalized_detail_refresh_url and normalized_detail_refresh_url not in detail_refresh_history:
-                            detail_refresh_history.append(normalized_detail_refresh_url)
-                        _set_task_aux_fields(
+                        vod_id = match.group(1)
+                        for relative_path in (f"/vod/{vod_id}.html", f"/detail/{vod_id}.html", f"/voddetail/{vod_id}.html"):
+                            normalized_candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
+                            if normalized_candidate and normalized_candidate not in detail_page_candidates:
+                                detail_page_candidates.append(normalized_candidate)
+                if detail_page_candidates:
+                    detail_refresh_url = detail_page_candidates[0]
+                    normalized_detail_refresh_url = _normalize_download_url(detail_refresh_url)
+                    detail_refresh_history = list(refresh_history)
+                    if normalized_detail_refresh_url and normalized_detail_refresh_url not in detail_refresh_history:
+                        detail_refresh_history.append(normalized_detail_refresh_url)
+                    _set_task_aux_fields(
                         task,
                         _gimy_detail_refresh_done=True,
                         _gimy_refresh_history=detail_refresh_history,
@@ -11602,16 +11594,16 @@ class DownloadManagerApp:
                         _gimy_failed_stream_urls=[],
                         _gimy_failed_stream_hosts=[],
                     )
-                        self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在重建 Gimy 播放線...")
-                        write_error_log(
-                            "gimy detail page rebuild",
-                            Exception("rebuilding gimy episode sources after parse-stage source mismatch"),
-                            item_id=item_id,
-                            page_url=url,
-                            refresh_url=detail_refresh_url,
-                            deferred_count=len(deferred_episode_urls),
-                        )
-                        return self._download_task_internal(detail_refresh_url, item_id, save_dir, use_impersonate, is_mp3)
+                    self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="甇??遣 Gimy ?剜蝺?..")
+                    write_error_log(
+                        "gimy detail page rebuild",
+                        Exception("rebuilding gimy episode sources after parse-stage source mismatch"),
+                        item_id=item_id,
+                        page_url=url,
+                        refresh_url=detail_refresh_url,
+                        deferred_count=len(deferred_episode_urls),
+                    )
+                    return self._download_task_internal(detail_refresh_url, item_id, save_dir, use_impersonate, is_mp3)
                 if available_episode_page_candidates:
                     for alternate_episode_url in available_episode_page_candidates[:18]:
                         try:
@@ -12351,7 +12343,10 @@ class DownloadManagerApp:
                 timeout=20,
                 headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
             )
-            page_title = _clean_18jav_title(_extract_html_title(resp.text, short_name or "18JAV"))
+            page_title = re.sub(r"\s+", " ", str(_extract_html_title(resp.text, short_name or "18JAV") or "")).strip()
+            if page_title:
+                page_title = re.sub(r"\s*[-|]\s*18JAV.*$", "", page_title, flags=re.IGNORECASE)
+                page_title = page_title.strip(" -|/") or str(_extract_html_title(resp.text, short_name or "18JAV") or "").strip()
             candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
             manifest_candidates = [
                 candidate for candidate in candidate_urls
