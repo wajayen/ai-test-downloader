@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260518-2870"
+APP_BUILD = "20260518-2880"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -713,36 +713,6 @@ def t(key, **kwargs):
     return text
 
 
-def _extract_anime1_category_links(page_url, page_html):
-    html_text = str(page_html or "")
-    candidates = []
-    for href, title in re.findall(r'<h2[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
-        normalized_link = _normalize_download_url(urllib.parse.urljoin(page_url, html.unescape(href)))
-        if not normalized_link or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized_link):
-            continue
-        clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
-        if not clean_title:
-            continue
-        candidates.append((normalized_link.rstrip("/"), clean_title))
-    if not candidates:
-        for href, title in re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
-            normalized_link = _normalize_download_url(urllib.parse.urljoin(page_url, html.unescape(href)))
-            if not normalized_link or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized_link):
-                continue
-            clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
-            if not clean_title or not re.search(r"\[\d+\]", clean_title):
-                continue
-            candidates.append((normalized_link.rstrip("/"), clean_title))
-    deduped = []
-    seen = set()
-    for link, title in candidates:
-        if link in seen:
-            continue
-        seen.add(link)
-        deduped.append((link, title))
-    return deduped
-
-
 def _normalize_state_entry(entry):
     normalized = dict(entry) if isinstance(entry, dict) else {}
     url = _normalize_download_url(normalized.get("url", ""))
@@ -1012,45 +982,6 @@ def _event_transfer_metrics(info, default_path="", default_downloaded=0, default
     )
 
 
-def _detect_browser_cookie_sources():
-    user_profiles = []
-    env_user = os.environ.get("USERPROFILE", "")
-    if env_user:
-        user_profiles.append(env_user)
-    try:
-        users_root = Path("C:/Users")
-        if users_root.is_dir():
-            for child in users_root.iterdir():
-                if child.is_dir():
-                    user_profiles.append(str(child))
-    except Exception:
-        pass
-    seen_profiles = []
-    for profile in user_profiles:
-        if profile and profile not in seen_profiles:
-            seen_profiles.append(profile)
-    candidates = []
-    for profile in seen_profiles:
-        candidates.extend(
-            [
-                ("firefox", os.path.join(profile, "AppData", "Roaming", "Mozilla", "Firefox", "Profiles")),
-                ("edge", os.path.join(profile, "AppData", "Local", "Microsoft", "Edge", "User Data")),
-                ("chrome", os.path.join(profile, "AppData", "Local", "Google", "Chrome", "User Data")),
-            ]
-        )
-    results = []
-    seen = set()
-    for browser, path in candidates:
-        try:
-            key = (browser,)
-            if path and os.path.isdir(path) and key not in seen:
-                seen.add(key)
-                results.append(key)
-        except Exception:
-            continue
-    return results
-
-
 def _extract_candidate_media_urls(text, allowed_exts=(".mp4", ".m3u8", ".mpd")):
     if not isinstance(text, str) or not text:
         return []
@@ -1080,17 +1011,6 @@ def _extract_json_script_blocks(text):
     if not isinstance(text, str) or not text:
         return []
     return re.findall(r"<script[^>]+type=[\"']application/json[\"'][^>]*>(.*?)</script>", text, re.IGNORECASE | re.DOTALL)
-
-
-def _extract_inline_script_blocks(text):
-    if not isinstance(text, str) or not text:
-        return []
-    blocks = []
-    for match in re.finditer(r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script>", text, re.IGNORECASE | re.DOTALL):
-        block = str(match.group(1) or "").strip()
-        if block:
-            blocks.append(block)
-    return blocks
 
 
 def _walk_media_urls(value, results):
@@ -1273,7 +1193,13 @@ def _extract_twitter_media_candidates(payload):
                 continue
             candidate = variant.get("url")
             content_type = str(variant.get("content_type") or "").lower()
-            if candidate and ("mp4" in content_type or _looks_like_direct_media_url(candidate)):
+            if candidate and (
+                "mp4" in content_type
+                or any(
+                    token in _normalize_download_url(candidate).lower()
+                    for token in (".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".mp3", ".m4a")
+                )
+            ):
                 _append_candidate(candidate)
         direct_url = media_extended.get("url")
         media_type = str(media_extended.get("type") or "").lower()
@@ -1400,7 +1326,13 @@ def _extract_missav_media_candidates(page_html):
     direct_candidates = []
     page_text = str(page_html or "")
     generic_candidates = _extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
-    script_blobs = _extract_json_script_blocks(page_text) + _extract_inline_script_blocks(page_text)
+    inline_script_blobs = []
+    if isinstance(page_text, str) and page_text:
+        for match in re.finditer(r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script>", page_text, re.IGNORECASE | re.DOTALL):
+            block = str(match.group(1) or "").strip()
+            if block:
+                inline_script_blobs.append(block)
+    script_blobs = _extract_json_script_blocks(page_text) + inline_script_blobs
     for blob in script_blobs:
         generic_candidates.extend(_extract_candidate_media_urls(blob, allowed_exts=(".mp4", ".m3u8", ".mpd")))
         try:
@@ -2275,14 +2207,6 @@ def _clean_99itv_title(raw_title):
     return cleaned.strip(" -|/") or str(raw_title or "").strip()
 
 
-def _clean_ppp_porn_title(raw_title):
-    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
-    if not cleaned:
-        return cleaned
-    cleaned = re.sub(r"\s*-\s*PPP\.Porn\s*\|.*$", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/") or str(raw_title or "").strip()
-
-
 def _clean_18jav_title(raw_title):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
@@ -2431,41 +2355,9 @@ def _extract_javfilms_dmm_video_id(url, html_text=""):
     return ""
 
 
-def _build_javfilms_dmm_content_url(video_id):
-    video_id_value = str(video_id or "").strip()
-    if not video_id_value:
-        return ""
-    return f"https://video.dmm.co.jp/av/content/?id={video_id_value}"
-
-
-def _build_javfilms_dmm_declared_url(video_id):
-    content_url = _build_javfilms_dmm_content_url(video_id)
-    if not content_url:
-        return ""
-    return "https://www.dmm.co.jp/age_check/=/declared=yes/?rurl=" + urllib.parse.quote(content_url, safe="")
-
-
-def _clean_goodav_title(raw_title):
-    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
-    if not cleaned:
-        return cleaned
-    cleaned = re.sub(r"\s*-\s*正妹AV.*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^\s*VR線上成人影片，亞洲第一所線上VR成人網\s*-\s*", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
-
-
 def _should_disable_ssl_verify_for_url(url):
     host = urllib.parse.urlparse(str(url or "")).netloc.lower()
     return "vr.goodav17.com" in host or "ggjav.com" in host
-
-
-def _normalize_goodav_title(raw_title):
-    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
-    if not cleaned:
-        return cleaned
-    cleaned = re.sub(r"\s*-\s*正妹AV.*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^\s*VR線上成人影片.*?-\s*", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
 
 
 def _goodav_title_for_display(raw_title):
@@ -2626,15 +2518,6 @@ def _resolve_18av_protected_player_media(page_url, page_html):
         if direct_media_candidates:
             return "", direct_media_candidates[0], probe_url, protected_player
     return "", "", last_probe_url, protected_player
-
-
-def _clean_pikpak_title(raw_title):
-    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
-    if not cleaned:
-        return cleaned
-    cleaned = re.sub(r"\s+Shared by\s+.*?\|\s*PikPak.*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*\|\s*PikPak.*$", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/") or str(raw_title or "").strip()
 
 
 def _extract_pikpak_nuxt_payload(page_text):
@@ -2840,27 +2723,6 @@ def _extract_gimy_inline_iframe_urls(page_html, page_url):
     return urls
 
 
-def _extract_gimy_episode_page_urls(page_html, page_url, current_url=None):
-    parsed_page = urllib.parse.urlsplit(str(page_url or ""))
-    page_base = f"{parsed_page.scheme or 'https'}://{parsed_page.netloc or 'gimy01.tv'}"
-    current_nid = None
-    current_match = re.search(r"/eps/\d+-(\d+)(?:-(\d+))?\.html", str(current_url or page_url or ""))
-    if current_match:
-        current_nid = current_match.group(2) or current_match.group(1)
-    urls = []
-    for match in re.finditer(r'href=["\'](/eps/\d+-(\d+)(?:-(\d+))?\.html)["\']', str(page_html or ""), re.IGNORECASE):
-        relative_url = match.group(1)
-        nid = match.group(3) or match.group(2)
-        if current_nid and nid != current_nid:
-            continue
-        full_url = _normalize_download_url(urllib.parse.urljoin(page_base, relative_url))
-        if not full_url or full_url == _normalize_download_url(current_url):
-            continue
-        if full_url not in urls:
-            urls.append(full_url)
-    return urls
-
-
 def _derive_gimy_detail_page_urls(page_url):
     normalized = _normalize_download_url(page_url)
     if not normalized:
@@ -2894,14 +2756,6 @@ def _collect_gimy_detail_page_urls(*page_urls):
             if normalized_candidate and normalized_candidate not in urls:
                 urls.append(normalized_candidate)
     return urls
-
-
-def _looks_like_direct_media_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    lower = normalized.lower()
-    return any(token in lower for token in (".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".mp3", ".m4a"))
 
 
 def _looks_like_manifest_url(url):
@@ -4423,7 +4277,33 @@ class DownloadManagerApp:
             try:
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(new_url, impersonate="chrome110", timeout=15)
-                links_info = _extract_anime1_category_links(new_url, resp.text)
+                html_text = str(resp.text or "")
+                links_info = []
+                for href, title in re.findall(r'<h2[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
+                    normalized_link = _normalize_download_url(urllib.parse.urljoin(new_url, html.unescape(href)))
+                    if not normalized_link or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized_link):
+                        continue
+                    clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
+                    if not clean_title:
+                        continue
+                    links_info.append((normalized_link.rstrip("/"), clean_title))
+                if not links_info:
+                    for href, title in re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
+                        normalized_link = _normalize_download_url(urllib.parse.urljoin(new_url, html.unescape(href)))
+                        if not normalized_link or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized_link):
+                            continue
+                        clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
+                        if not clean_title or not re.search(r"\[\d+\]", clean_title):
+                            continue
+                        links_info.append((normalized_link.rstrip("/"), clean_title))
+                deduped_links_info = []
+                seen_links = set()
+                for link, title in links_info:
+                    if link in seen_links:
+                        continue
+                    seen_links.add(link)
+                    deduped_links_info.append((link, title))
+                links_info = deduped_links_info
                 if not links_info:
                     self._schedule_warning(t("msg_fetch_anime1_empty"))
                     return
@@ -8881,7 +8761,14 @@ class DownloadManagerApp:
                 _FFMPEG_VERSION_SUMMARY_CACHE[clean_ffmpeg_path] = ffmpeg_version
 
         raw_fallback_urls = _dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=url)
-        direct_fallback_urls = [candidate for candidate in raw_fallback_urls if _looks_like_direct_media_url(candidate)]
+        direct_fallback_urls = [
+            candidate
+            for candidate in raw_fallback_urls
+            if any(
+                token in _normalize_download_url(candidate).lower()
+                for token in (".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".mp3", ".m4a")
+            )
+        ]
         page_refresh_candidates = _task_gimy_page_refresh_candidates(task) if source_site == "gimy" else [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls]
         gimy_failed_stream_urls = _task_gimy_failed_stream_urls(task) if source_site == "gimy" else []
         gimy_failed_stream_hosts = _task_gimy_failed_stream_hosts(task) if source_site == "gimy" else []
@@ -11570,7 +11457,23 @@ class DownloadManagerApp:
                 for candidate_url in current_result["external_urls"]:
                     if candidate_url not in external_source_urls:
                         external_source_urls.append(candidate_url)
-                alternate_episode_urls = _extract_gimy_episode_page_urls(resp_text, url, current_url=url)
+                parsed_page = urllib.parse.urlsplit(str(url or ""))
+                page_base = f"{parsed_page.scheme or 'https'}://{parsed_page.netloc or 'gimy01.tv'}"
+                current_nid = None
+                current_match = re.search(r"/eps/\d+-(\d+)(?:-(\d+))?\.html", str(url or ""))
+                if current_match:
+                    current_nid = current_match.group(2) or current_match.group(1)
+                alternate_episode_urls = []
+                for match in re.finditer(r'href=["\'](/eps/\d+-(\d+)(?:-(\d+))?\.html)["\']', str(resp_text or ""), re.IGNORECASE):
+                    relative_url = match.group(1)
+                    nid = match.group(3) or match.group(2)
+                    if current_nid and nid != current_nid:
+                        continue
+                    full_url = _normalize_download_url(urllib.parse.urljoin(page_base, relative_url))
+                    if not full_url or full_url == _normalize_download_url(url):
+                        continue
+                    if full_url not in alternate_episode_urls:
+                        alternate_episode_urls.append(full_url)
                 for alternate_episode_url in alternate_episode_urls:
                     if alternate_episode_url not in deferred_episode_urls:
                         deferred_episode_urls.append(alternate_episode_url)
@@ -12151,7 +12054,10 @@ class DownloadManagerApp:
                 timeout=20,
                 headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
             )
-            page_title = _clean_ppp_porn_title(_extract_html_title(resp.text, short_name or "PPP.Porn"))
+            page_title = re.sub(r"\s+", " ", str(_extract_html_title(resp.text, short_name or "PPP.Porn") or "")).strip()
+            if page_title:
+                page_title = re.sub(r"\s*-\s*PPP\.Porn\s*\|.*$", "", page_title, flags=re.IGNORECASE)
+                page_title = page_title.strip(" -|/") or str(_extract_html_title(resp.text, short_name or "PPP.Porn") or "").strip()
             candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
             manifest_candidates = [
                 candidate for candidate in candidate_urls
@@ -12376,8 +12282,15 @@ class DownloadManagerApp:
                 if _is_javfilms_dmm_preview_url(media_url):
                     if not dmm_video_id:
                         raise Exception("JAV Films protected DMM preview unavailable")
-                    dmm_content_url = _build_javfilms_dmm_content_url(dmm_video_id)
-                    declared_url = _build_javfilms_dmm_declared_url(dmm_video_id)
+                    dmm_content_url = (
+                        f"https://video.dmm.co.jp/av/content/?id={str(dmm_video_id or '').strip()}"
+                        if str(dmm_video_id or "").strip()
+                        else ""
+                    )
+                    declared_url = (
+                        "https://www.dmm.co.jp/age_check/=/declared=yes/?rurl="
+                        + urllib.parse.quote(dmm_content_url, safe="")
+                    ) if dmm_content_url else ""
                     if not dmm_content_url or not declared_url:
                         raise Exception("JAV Films protected DMM preview unavailable")
                     direct_session = c_req.Session(impersonate="chrome120")
@@ -12623,7 +12536,11 @@ class DownloadManagerApp:
                 timeout=20,
                 headers={"Referer": site_root + "/", "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT},
             )
-            page_title = _clean_pikpak_title(_extract_html_title(resp.text, short_name or "PikPak"))
+            page_title = re.sub(r"\s+", " ", str(_extract_html_title(resp.text, short_name or "PikPak") or "")).strip()
+            if page_title:
+                page_title = re.sub(r"\s+Shared by\s+.*?\|\s*PikPak.*$", "", page_title, flags=re.IGNORECASE)
+                page_title = re.sub(r"\s*\|\s*PikPak.*$", "", page_title, flags=re.IGNORECASE)
+                page_title = page_title.strip(" -|/") or str(_extract_html_title(resp.text, short_name or "PikPak") or "").strip()
             share_entries = _extract_pikpak_share_entries(resp.text)
             primary_entry = _pick_pikpak_primary_video_entry(share_entries)
             display_name = _pikpak_display_name(primary_entry, page_title) if primary_entry else page_title
