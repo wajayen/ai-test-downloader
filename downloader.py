@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260518-2890"
+APP_BUILD = "20260518-2900"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -183,7 +183,7 @@ NATIVE_HLS_NEVER_SITES = frozenset(("njavtv", "3kor"))
 NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "18av": ("streamfastpro",),
     "18jav": ("hshdkshd", "cdnlab.live"),
-    "gimy": ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd"),
+    "gimy": ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd", "phimgood", "ryiplay"),
     "hohoj": ("ggjav", "cdnlab.live"),
     "jable": ("mushroomtrack", "hls.sb-cd.com", "cdn77.org"),
     "movieffm": ("xluuss", "lzcdn", "letvoss", "subokk", "bdzybf", "ukubf", "ijycnd", "qsstvw", "gsuus", "hhuus", "huyall", "bfllvip"),
@@ -480,6 +480,16 @@ I18N_PATCH = {
         "status_processing": "整理中",
         "msg_error": "错误",
         "msg_warning": "警告",
+        "err_ffmpeg": "FFmpeg 下载失败",
+        "eta_site_anime1": "正在解析 Anime1 页面...",
+        "menu_open_folder": "打开目标文件夹",
+        "msg_dnd_warn1": "目前环境无法使用拖放功能。\n\n若要在原生 Python 环境启用，请安装 tkinterdnd2。",
+        "msg_dnd_warn2": "启用拖放功能失败：\n{e}",
+        "msg_ffmpeg_install_failed": "FFmpeg 安装失败：\n{error}",
+        "msg_ffmpeg_installed": "FFmpeg 已安装完成。",
+        "msg_ffmpeg_progress_extract": "下载完成，正在解压缩...",
+        "msg_ffmpeg_terminal_failed": "无法自动打开 Terminal。\n\n请手动执行 `brew install ffmpeg`。",
+        "msg_ffmpeg_terminal_opened": "已打开 Terminal 执行 `brew install ffmpeg`。\n\n安装完成后，请重新加入 MP3 任务。",
         "msg_already_running": "已有执行中的下载者，请先关闭旧窗口。",
         "msg_close_warn": "目前仍有下载任务进行中，确定要关闭程序吗？",
         "msg_ffmpeg_required_title": "需要 FFmpeg",
@@ -531,6 +541,7 @@ I18N_PATCH = {
         "eta_site_threads": "正在解析 Threads...",
         "eta_site_instagram": "正在解析 Instagram...",
         "eta_site_twitter": "正在解析 Twitter/X...",
+        "eta_site_mega": "正在解析 MEGA...",
         "eta_found_stream": "已取得串流网址，准备下载",
         "eta_found_media": "已取得媒体网址，准备下载",
         "overview_idle": "待命中",
@@ -581,6 +592,8 @@ I18N_PATCH = {
         "msg_close_warn": "Downloads are still in progress. Are you sure you want to close the app?",
         "msg_file_exists": "File already exists",
         "err_site_parse": "Parse failed",
+        "eta_site_nnyy": "Resolving Nunu page...",
+        "eta_site_mega": "Resolving MEGA page...",
         "eta_found_stream": "Stream URL acquired",
         "eta_found_media": "Media URL acquired",
         "overview_idle": "Idle",
@@ -631,6 +644,8 @@ I18N_PATCH = {
         "msg_close_warn": "ダウンロード中のタスクがあります。終了してもよろしいですか？",
         "msg_file_exists": "ファイルは既に存在します",
         "err_site_parse": "解析失敗",
+        "eta_site_nnyy": "Nunu ページを解析中...",
+        "eta_site_mega": "MEGA ページを解析中...",
         "eta_found_stream": "ストリーム URL を取得しました",
         "eta_found_media": "メディア URL を取得しました",
         "overview_idle": "待機中",
@@ -1634,18 +1649,6 @@ def _collect_movieffm_tvshow_detail_pages(page_html, page_url, fallback_title="M
     return show_title, detail_pages
 
 
-def _looks_like_parked_domain_html(page_html):
-    page_text = str(page_html or "")
-    lowered = page_text.lower()
-    return any(marker in lowered for marker in (
-        "assets.abovedomains.com",
-        "forsale.min.js",
-        "domain may be for sale",
-        "this domain is for sale",
-        "buy this domain",
-    ))
-
-
 def _should_use_ffmpeg_for_movieffm_manifest(stream_url):
     host = urllib.parse.urlsplit(_normalize_download_url(stream_url)).netloc.lower()
     return any(marker in host for marker in (
@@ -1688,19 +1691,13 @@ def _movieffm_manifest_candidate_is_dead(stream_url, referer="https://www.movief
     return False
 
 
-def _decode_js_escaped_text(value):
-    text = str(value or "").strip()
-    if "\\u" not in text and "\\x" not in text:
-        return text
-    try:
-        return bytes(text, "utf-8").decode("unicode_escape")
-    except Exception:
-        return text
-
-
 def _normalize_movieffm_episode_name(name_text):
     cleaned = re.sub(r"<[^>]+>", "", html.unescape(str(name_text or "")).strip())
-    cleaned = _decode_js_escaped_text(cleaned)
+    if "\\u" in cleaned or "\\x" in cleaned:
+        try:
+            cleaned = bytes(cleaned, "utf-8").decode("unicode_escape")
+        except Exception:
+            pass
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
@@ -1876,8 +1873,12 @@ def _collect_movieffm_drama_episodes(page_html, page_url, fallback_title="MovieF
 
 
 @lru_cache(maxsize=256)
-def _hostname_resolves(hostname):
-    host = str(hostname or "").strip().lower()
+def _url_host_resolves(url):
+    try:
+        host = urllib.parse.urlsplit(str(url or "")).netloc
+    except Exception:
+        return False
+    host = str(host or "").strip().lower()
     if not host:
         return False
     if host.startswith("[") and "]" in host:
@@ -1889,14 +1890,6 @@ def _hostname_resolves(hostname):
         return True
     except OSError:
         return False
-
-
-def _url_host_resolves(url):
-    try:
-        hostname = urllib.parse.urlsplit(str(url or "")).netloc
-    except Exception:
-        return False
-    return _hostname_resolves(hostname)
 
 
 def _movieffm_stream_priority(url):
@@ -2256,8 +2249,10 @@ def _gimy_stream_priority(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or "")).netloc.lower()
     priority_markers = (
         "xluuss",
+        "phimgood",
         "ppqrrs",
         "ryplay",
+        "ryiplay",
         "yzzy",
         "hhiklm",
         "jisuziyuanbf",
@@ -2276,8 +2271,10 @@ def _gimy_manifest_default_route(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or "")).netloc.lower()
     generic_markers = (
         "xluuss",
+        "phimgood",
         "ppqrrs",
         "ryplay",
+        "ryiplay",
         "yzzy",
         "hhiklm",
         "jisuziyuanbf",
@@ -2517,21 +2514,20 @@ def _extract_pikpak_share_entries(page_text):
     return entries
 
 
-def _is_pikpak_video_entry(entry):
-    if not isinstance(entry, dict):
-        return False
-    file_category = str(entry.get("file_category") or "").strip().upper()
-    mime_type = str(entry.get("mime_type") or "").strip().lower()
-    file_name = str(entry.get("name") or "").strip().lower()
-    return (
-        file_category == "VIDEO"
-        or mime_type.startswith("video/")
-        or file_name.endswith((".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"))
-    )
-
-
 def _pick_pikpak_primary_video_entry(entries):
-    videos = [entry for entry in entries if _is_pikpak_video_entry(entry)]
+    videos = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        file_category = str(entry.get("file_category") or "").strip().upper()
+        mime_type = str(entry.get("mime_type") or "").strip().lower()
+        file_name = str(entry.get("name") or "").strip().lower()
+        if (
+            file_category == "VIDEO"
+            or mime_type.startswith("video/")
+            or file_name.endswith((".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v"))
+        ):
+            videos.append(entry)
     if not videos:
         return None
 
@@ -2761,6 +2757,101 @@ def get_yt_dlp_module():
             raise RuntimeError("yt-dlp is unavailable in this environment") from exc
         yt_dlp = yt_dlp_module
     return yt_dlp
+
+
+def _ytdlp_retry_sleep_http(*args, **kwargs):
+    count = kwargs.get("n")
+    if count is None and args:
+        count = args[0]
+    count = max(int(count or 0), 0)
+    return min(float(2 ** max(count - 1, 0)), 10.0)
+
+
+def _ytdlp_retry_sleep_fragment(*args, **kwargs):
+    count = kwargs.get("n")
+    if count is None and args:
+        count = args[0]
+    count = max(int(count or 0), 0)
+    return min(float(1.5 * (2 ** max(count - 1, 0))), 12.0)
+
+
+def _ytdlp_retry_sleep_file_access(*args, **kwargs):
+    count = kwargs.get("n")
+    if count is None and args:
+        count = args[0]
+    count = max(int(count or 0), 0)
+    return min(float(max(count, 1)), 5.0)
+
+
+def _make_ytdlp_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_AGENT):
+    headers = {"User-Agent": user_agent}
+    if referer:
+        headers["Referer"] = referer
+    if origin:
+        headers["Origin"] = origin
+    return headers
+
+
+def _apply_ytdlp_audio_postprocessing(ydl_opts):
+    ydl_opts["format"] = "bestaudio/best"
+    ydl_opts["postprocessors"] = [
+        {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
+    ]
+    return ydl_opts
+
+
+def _build_ytdlp_download_opts(
+    *,
+    progress_hook,
+    home_dir,
+    temp_dir,
+    outtmpl,
+    concurrent_fragment_downloads,
+    http_headers=None,
+    format_selector="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    merge_output_format="mp4",
+    extractor_args=None,
+    hls_prefer_native=False,
+    hls_use_mpegts=None,
+    socket_timeout=None,
+):
+    opts = {
+        "color": "never",
+        "nopart": False,
+        "continuedl": True,
+        "nocheckcertificate": True,
+        "retries": 20,
+        "fragment_retries": 20,
+        "extractor_retries": 5,
+        "file_access_retries": 3,
+        "skip_unavailable_fragments": False,
+        "concurrent_fragment_downloads": int(concurrent_fragment_downloads),
+        "paths": {"home": home_dir, "temp": temp_dir},
+        "outtmpl": {"default": outtmpl},
+        "format": format_selector,
+        "merge_output_format": merge_output_format,
+        "progress_hooks": [progress_hook],
+        "ignoreerrors": False,
+        "no_warnings": False,
+        "quiet": True,
+        "http_headers": dict(http_headers or _make_ytdlp_http_headers()),
+        "retry_sleep_functions": {
+            "http": _ytdlp_retry_sleep_http,
+            "fragment": _ytdlp_retry_sleep_fragment,
+            "file_access": _ytdlp_retry_sleep_file_access,
+            "extractor": _ytdlp_retry_sleep_http,
+        },
+        "ffmpeg_location": _APP_DIR,
+    }
+    if extractor_args:
+        opts["extractor_args"] = extractor_args
+    if hls_prefer_native:
+        opts["hls_prefer_native"] = True
+    if hls_use_mpegts is not None:
+        opts["hls_use_mpegts"] = bool(hls_use_mpegts)
+    if socket_timeout is not None:
+        opts["socket_timeout"] = float(socket_timeout)
+    return opts
 
 
 class UIThrottler:
@@ -3159,7 +3250,8 @@ def _append_trace_log_line(message):
 def write_error_log(context, exc, **extra):
     try:
         now = time.time()
-        log_path = TRACE_LOG_FILE if context in TRACE_LOG_CONTEXTS else ERROR_LOG_FILE
+        trace_only = context in TRACE_LOG_CONTEXTS
+        log_path = TRACE_LOG_FILE if trace_only else ERROR_LOG_FILE
         signature = (
             log_path,
             context,
@@ -3179,12 +3271,16 @@ def write_error_log(context, exc, **extra):
         lines = [
             f"[{timestamp}] {context}",
             f"build: {APP_BUILD}",
-            f"exception: {type(exc).__name__}: {exc}",
         ]
+        if trace_only:
+            lines.append(f"message: {exc}")
+        else:
+            lines.append(f"exception: {type(exc).__name__}: {exc}")
         for key, value in extra.items():
             lines.append(f"{key}: {value}")
-        lines.append("traceback:")
-        lines.append("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip())
+        if not trace_only:
+            lines.append("traceback:")
+            lines.append("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip())
         lines.append("--------------------------------------------------------------------------------")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -8423,63 +8519,20 @@ class DownloadManagerApp:
         progress_hook = self._make_yt_dlp_progress_hook(task, item_id, save_dir)
 
         native_work_dir = tempfile.gettempdir()
-        def _retry_sleep_http(*args, **kwargs):
-            count = kwargs.get("n")
-            if count is None and args:
-                count = args[0]
-            count = max(int(count or 0), 0)
-            return min(float(2 ** max(count - 1, 0)), 10.0)
-
-        def _retry_sleep_fragment(*args, **kwargs):
-            count = kwargs.get("n")
-            if count is None and args:
-                count = args[0]
-            count = max(int(count or 0), 0)
-            return min(float(1.5 * (2 ** max(count - 1, 0))), 12.0)
-
-        def _retry_sleep_file_access(*args, **kwargs):
-            count = kwargs.get("n")
-            if count is None and args:
-                count = args[0]
-            count = max(int(count or 0), 0)
-            return min(float(max(count, 1)), 5.0)
-
-        ydl_opts = {
-            "color": "never",
-            "nopart": False,
-            "nocheckcertificate": True,
-            "retries": 20,
-            "fragment_retries": 20,
-            "file_access_retries": 3,
-            "skip_unavailable_fragments": False,
-            "concurrent_fragment_downloads": native_options["concurrent_fragment_downloads"],
-            "continuedl": True,
-            "paths": {"home": native_work_dir, "temp": native_work_dir},
-            "outtmpl": {"default": f"{os.path.splitext(temp_out_path)[0]}.%(ext)s"},
-            "format": "best",
-            "merge_output_format": "mp4",
-            "progress_hooks": [progress_hook],
-            "ignoreerrors": False,
-            "no_warnings": False,
-            "quiet": True,
-            "hls_prefer_native": True,
-            "hls_use_mpegts": native_options["hls_use_mpegts"],
-            "socket_timeout": native_options["socket_timeout"],
-            "retry_sleep_functions": {
-                "http": _retry_sleep_http,
-                "fragment": _retry_sleep_fragment,
-                "file_access": _retry_sleep_file_access,
-            },
-            "http_headers": {
-                "User-Agent": DEFAULT_USER_AGENT,
-                "Referer": referer,
-                "Origin": origin,
-            },
-            "ffmpeg_location": _APP_DIR,
-        }
+        ydl_opts = _build_ytdlp_download_opts(
+            progress_hook=progress_hook,
+            home_dir=native_work_dir,
+            temp_dir=native_work_dir,
+            outtmpl=f"{os.path.splitext(temp_out_path)[0]}.%(ext)s",
+            concurrent_fragment_downloads=native_options["concurrent_fragment_downloads"],
+            format_selector="best",
+            http_headers=_make_ytdlp_http_headers(referer=referer, origin=origin),
+            hls_prefer_native=True,
+            hls_use_mpegts=native_options["hls_use_mpegts"],
+            socket_timeout=native_options["socket_timeout"],
+        )
         if is_mp3:
-            ydl_opts["format"] = "bestaudio/best"
-            ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
+            _apply_ytdlp_audio_postprocessing(ydl_opts)
         write_error_log(
             "yt-dlp native hls fallback started",
             Exception("yt-dlp native hls fallback started"),
@@ -10264,37 +10317,20 @@ class DownloadManagerApp:
                 eta_seconds=eta,
             )
 
-        ydl_opts = {
-            "color": "never",
-            "nopart": False,
-            "nocheckcertificate": True,
-            "retries": 20,
-            "fragment_retries": 20,
-            "file_access_retries": 3,
-            "skip_unavailable_fragments": False,
-            "concurrent_fragment_downloads": int(
-                YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE.get(
-                    _task_source_site_name(task),
-                    YTDLP_GENERIC_CONCURRENT_FRAGMENTS,
-                )
+        ydl_opts = _build_ytdlp_download_opts(
+            progress_hook=progress_hook,
+            home_dir=save_dir,
+            temp_dir=tempfile.gettempdir(),
+            outtmpl="%(title)s.%(ext)s",
+            concurrent_fragment_downloads=YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE.get(
+                _task_source_site_name(task),
+                YTDLP_GENERIC_CONCURRENT_FRAGMENTS,
             ),
-            "paths": {"home": save_dir, "temp": tempfile.gettempdir()},
-            "outtmpl": {"default": "%(title)s.%(ext)s"},
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
-            "merge_output_format": "mp4",
-            "progress_hooks": [progress_hook],
-            "ignoreerrors": False,
-            "no_warnings": False,
-            "quiet": True,
-            "http_headers": {
-                "User-Agent": DEFAULT_USER_AGENT,
-            },
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-            "ffmpeg_location": _APP_DIR,
-        }
+            http_headers=_make_ytdlp_http_headers(),
+            extractor_args={"youtube": {"player_client": ["android", "web"]}},
+        )
         if is_mp3:
-            ydl_opts["format"] = "bestaudio/best"
-            ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
+            _apply_ytdlp_audio_postprocessing(ydl_opts)
 
         social_cookie_sources = []
         yt_dlp_module = None
@@ -10329,17 +10365,7 @@ class DownloadManagerApp:
                 raise last_exc
 
         def _download_manifest_with_generic_ytdlp(target_url, referer=None, origin=None):
-            headers = dict(ydl_opts.get("http_headers") or {})
-            headers["User-Agent"] = DEFAULT_USER_AGENT
-            if referer:
-                headers["Referer"] = referer
-            else:
-                headers.pop("Referer", None)
-            if origin:
-                headers["Origin"] = origin
-            else:
-                headers.pop("Origin", None)
-            ydl_opts["http_headers"] = headers
+            ydl_opts["http_headers"] = _make_ytdlp_http_headers(referer=referer, origin=origin)
             ydl_opts["outtmpl"] = {"default": f"{safe_name}.%(ext)s"}
             _run_yt_dlp(target_url)
             if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "DELETED":
@@ -10526,8 +10552,7 @@ class DownloadManagerApp:
                 parsed_ref = urllib.parse.urlparse(referer)
                 if parsed_ref.scheme and parsed_ref.netloc:
                     origin = f"{parsed_ref.scheme}://{parsed_ref.netloc}"
-            ydl_opts["http_headers"]["Referer"] = referer
-            ydl_opts["http_headers"]["Origin"] = origin
+            ydl_opts["http_headers"] = _make_ytdlp_http_headers(referer=referer, origin=origin)
             self._log_m3u8_route_selected(task, item_id, url, source_site=forced_m3u8_site)
             _download_manifest_with_site_strategy(
                 url,
@@ -11557,7 +11582,7 @@ class DownloadManagerApp:
                         deferred_count=len(available_episode_page_candidates),
                 )
                 return self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
-            if not bool(_task_field_value(task, "_gimy_detail_refresh_done", False)):
+            if not ordered_direct_candidates and not bool(_task_field_value(task, "_gimy_detail_refresh_done", False)):
                 detail_page_candidates = []
                 for page_url in (
                     self._get_task_source_page(task, fallback_url=url) or url,
@@ -11594,7 +11619,7 @@ class DownloadManagerApp:
                         _gimy_failed_stream_urls=[],
                         _gimy_failed_stream_hosts=[],
                     )
-                    self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="甇??遣 Gimy ?剜蝺?..")
+                    self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在解析 Gimy...")
                     write_error_log(
                         "gimy detail page rebuild",
                         Exception("rebuilding gimy episode sources after parse-stage source mismatch"),
@@ -11696,6 +11721,10 @@ class DownloadManagerApp:
                         self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                         self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                         return
+                if last_gimy_error:
+                    raise last_gimy_error
+                raise Exception("Gimy iframe stream URL missing")
+            if not ordered_direct_candidates:
                 if last_gimy_error:
                     raise last_gimy_error
                 raise Exception("Gimy iframe stream URL missing")
@@ -12646,7 +12675,17 @@ class DownloadManagerApp:
             media_url = next((candidate for candidate in media_candidates if _looks_like_manifest_url(candidate)), None)
             if not media_url:
                 media_url = next((candidate for candidate in media_candidates if _looks_like_http_media_url(candidate)), None)
-            if not media_url and any(_looks_like_parked_domain_html(page_text) for page_text in page_variants):
+            parked_domain_markers = (
+                "assets.abovedomains.com",
+                "forsale.min.js",
+                "domain may be for sale",
+                "this domain is for sale",
+                "buy this domain",
+            )
+            if not media_url and any(
+                any(marker in str(page_text or "").lower() for marker in parked_domain_markers)
+                for page_text in page_variants
+            ):
                 raise Exception("EvoLoad source unavailable")
             if not media_url:
                 raise Exception("EvoLoad media URL missing")

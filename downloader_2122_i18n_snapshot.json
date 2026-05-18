@@ -98,7 +98,7 @@
     "err_site_parse": "頁面解析失敗"
   },
   "en_US": {
-    "app_title": "ダウンローダー",
+    "app_title": "Downloader",
     "subtitle": "Supports pause, delete, resume, and drag-and-drop downloads.",
     "basic_settings": "Basic Settings",
     "save_dir": "Default Save Path:",
@@ -196,7 +196,7 @@
     "err_site_parse": "Failed to parse the page"
   },
   "ja_JP": {
-    "app_title": "Downloader",
+    "app_title": "ダウンローダー",
     "subtitle": "一時停止、削除、再開、ドラッグ&ドロップに対応しています。",
     "basic_settings": "基本設定",
     "save_dir": "既定の保存先:",

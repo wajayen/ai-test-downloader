@@ -9,6 +9,7 @@ $sourceFile = Join-Path $projectRoot 'downloader.py'
 $safeSourceFile = Join-Path $projectRoot 'downloader_safe.py'
 $ffmpegSource = Join-Path $projectRoot 'ffmpeg.exe'
 $ffprobeSource = Join-Path $projectRoot 'ffprobe.exe'
+$runtimeLogCheckScript = Join-Path $projectRoot 'check_runtime_logs.ps1'
 $buildInfo = Get-Content -LiteralPath $sourceFile | Select-String 'APP_BUILD = "([^"]+)"' | Select-Object -First 1
 if (-not $buildInfo) {
     throw 'APP_BUILD not found in downloader.py'
@@ -40,6 +41,10 @@ function Sync-BundledBinary {
     } catch {
         Write-Warning ("Skipped copying '{0}' to '{1}': {2}" -f $SourcePath, $DestinationPath, $_.Exception.Message)
     }
+}
+
+if (Test-Path -LiteralPath $runtimeLogCheckScript) {
+    & $runtimeLogCheckScript -ProjectRoot $projectRoot
 }
 
 & $pythonExe -m py_compile $sourceFile $safeSourceFile

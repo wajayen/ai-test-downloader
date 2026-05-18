@@ -1,5 +1,19 @@
 # 抓抓抓 Downloader - Development Guidelines
 
+## Runtime Log Requirement
+**CRITICAL RULE:** Before making any code fix, read the executable runtime logs from the execution directory:
+
+- `C:\antigravity\ai_test\dist\error.log`
+- `C:\antigravity\ai_test\dist\activity.log`
+
+If the previous executed build produced new runtime errors, those errors must be inspected and fixed in the same change whenever they are related to the current codebase. Use this command as the standard pre-fix checkpoint:
+
+```powershell
+C:\antigravity\ai_test\check_runtime_logs.ps1
+```
+
+When reporting a fix, include whether the runtime logs contained new errors for the previous executed build and what was done about them.
+
 ## Internationalization (I18N) Requirement
 **CRITICAL RULE:** This application supports a dynamic multi-language engine (currently Traditional Chinese, English, and Japanese). 
 Any future UI changes, notifications, error messages, context menus, and statuses MUST use the dictionary variables (the `t(key)` function and `I18N_DICT` configuration) and must NOT be hardcoded as raw Chinese or English strings.
