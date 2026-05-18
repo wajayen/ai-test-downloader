@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260518-2880"
+APP_BUILD = "20260518-2890"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1399,40 +1399,6 @@ def _is_mixdrop_direct_media(url, source_page=""):
     )
 
 
-def _derive_mixdrop_watch_url_from_task(task, fallback_url=""):
-    task = task or {}
-    candidates = [
-        _normalize_download_url(_task_field_value(task, "source_page", "")),
-        _normalize_download_url(fallback_url),
-        _normalize_download_url(_task_field_value(task, "url", "")),
-    ]
-    candidates.extend(_dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=_task_field_value(task, "url", "")))
-    for candidate in candidates:
-        if not candidate:
-            continue
-        normalized = _normalize_mixdrop_watch_url(candidate)
-        host = urllib.parse.urlsplit(normalized).netloc.lower() if normalized else ""
-        if normalized and any(mix_host in host for mix_host in ("mixdrop.ag", "m1xdrop.click")):
-            return normalized
-    return ""
-
-
-def _derive_mixdrop_watch_url_from_media_url(media_url, preferred_host="mixdrop.ag"):
-    normalized_media_url = _normalize_download_url(media_url)
-    if not normalized_media_url:
-        return ""
-    parsed = urllib.parse.urlsplit(normalized_media_url)
-    media_host = parsed.netloc.lower()
-    if "mxcontent.net" not in media_host:
-        return ""
-    ref_match = re.search(r"/([A-Za-z0-9]+)\.(?:mp4|mkv|webm|m4a|mp3)(?:$|\?)", parsed.path, re.IGNORECASE)
-    if not ref_match:
-        return ""
-    ref = ref_match.group(1)
-    target_host = preferred_host or "mixdrop.ag"
-    return f"https://{target_host}/e/{ref}"
-
-
 def _is_expired_signed_media_url(url, now_ts=None):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -1638,13 +1604,6 @@ def _extract_movieffm_playback_candidates(page_html, fallback_title="MovieFFM"):
         _dedupe_download_urls(external_source_urls),
         player_data,
     )
-
-
-def _extract_movieffm_post_id(page_html):
-    match = re.search(r"\bpostid\s*:\s*(\d+)", str(page_html or ""), re.IGNORECASE)
-    if match:
-        return str(match.group(1) or "").strip()
-    return ""
 
 
 def _extract_movieffm_detail_page_urls(page_html, current_url=None):
@@ -2337,29 +2296,6 @@ def _gimy_manifest_default_route(url):
     return "ffmpeg"
 
 
-def _is_javfilms_dmm_preview_url(url):
-    parsed = urllib.parse.urlparse(str(url or ""))
-    host = parsed.netloc.lower()
-    path = parsed.path.lower()
-    return "cc3001.dmm.co.jp" in host and "/litevideo/freepv/" in path and path.endswith(".mp4")
-
-
-def _extract_javfilms_dmm_video_id(url, html_text=""):
-    match = re.search(r"/get/video/([A-Za-z0-9_-]+)", str(html_text or ""), flags=re.IGNORECASE)
-    if match:
-        return str(match.group(1) or "").strip()
-    parsed = urllib.parse.urlparse(str(url or ""))
-    segments = [segment for segment in parsed.path.split("/") if segment]
-    if segments:
-        return str(segments[-1] or "").strip()
-    return ""
-
-
-def _should_disable_ssl_verify_for_url(url):
-    host = urllib.parse.urlparse(str(url or "")).netloc.lower()
-    return "vr.goodav17.com" in host or "ggjav.com" in host
-
-
 def _goodav_title_for_display(raw_title):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
@@ -2520,21 +2456,6 @@ def _resolve_18av_protected_player_media(page_url, page_html):
     return "", "", last_probe_url, protected_player
 
 
-def _extract_pikpak_nuxt_payload(page_text):
-    script_match = re.search(
-        r'<script[^>]+id=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>',
-        str(page_text or ""),
-        re.IGNORECASE | re.DOTALL,
-    )
-    if not script_match:
-        return []
-    try:
-        payload = json.loads(html.unescape(script_match.group(1)))
-    except Exception:
-        return []
-    return payload if isinstance(payload, list) else []
-
-
 def _resolve_pikpak_nuxt_value(payload, value, seen=None, depth=0):
     if depth > 12:
         return value
@@ -2557,7 +2478,19 @@ def _resolve_pikpak_nuxt_value(payload, value, seen=None, depth=0):
 
 
 def _extract_pikpak_share_entries(page_text):
-    payload = _extract_pikpak_nuxt_payload(page_text)
+    script_match = re.search(
+        r'<script[^>]+id=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>',
+        str(page_text or ""),
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not script_match:
+        return []
+    try:
+        payload = json.loads(html.unescape(script_match.group(1)))
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
     if not payload:
         return []
     entries = []
@@ -2638,16 +2571,6 @@ def _extract_pikpak_media_candidates(entries):
     return candidates
 
 
-def _pikpak_display_name(entry, fallback_name):
-    raw_name = str((entry or {}).get("name") or "").strip()
-    if raw_name:
-        stem = os.path.splitext(raw_name)[0].strip()
-        if stem:
-            return stem
-        return raw_name
-    return str(fallback_name or "").strip()
-
-
 def _extract_html_title(page_text, fallback_name):
     title_m = re.search(r"<title>(.*?)</title>", str(page_text or ""), re.IGNORECASE | re.DOTALL)
     if not title_m:
@@ -2720,41 +2643,6 @@ def _extract_gimy_inline_iframe_urls(page_html, page_url):
         full_url = _normalize_download_url(urllib.parse.urljoin(base, iframe_src))
         if full_url and full_url not in urls:
             urls.append(full_url)
-    return urls
-
-
-def _derive_gimy_detail_page_urls(page_url):
-    normalized = _normalize_download_url(page_url)
-    if not normalized:
-        return []
-    parsed = urllib.parse.urlsplit(normalized)
-    base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'gimy01.tv'}"
-    path = parsed.path or ""
-    urls = []
-    match = re.search(r"/eps/(\d+)-\d+(?:-\d+)?\.html", path)
-    if match:
-        vod_id = match.group(1)
-        for relative_path in (f"/vod/{vod_id}.html", f"/detail/{vod_id}.html", f"/voddetail/{vod_id}.html"):
-            candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
-            if candidate and candidate not in urls:
-                urls.append(candidate)
-    play_match = re.search(r"/(?:play|vodplay|video)/(\d+)-\d+(?:-\d+)?\.html", path)
-    if play_match:
-        vod_id = play_match.group(1)
-        for relative_path in (f"/vod/{vod_id}.html", f"/detail/{vod_id}.html", f"/voddetail/{vod_id}.html"):
-            candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
-            if candidate and candidate not in urls:
-                urls.append(candidate)
-    return urls
-
-
-def _collect_gimy_detail_page_urls(*page_urls):
-    urls = []
-    for page_url in page_urls:
-        for candidate in _derive_gimy_detail_page_urls(page_url):
-            normalized_candidate = _normalize_download_url(candidate)
-            if normalized_candidate and normalized_candidate not in urls:
-                urls.append(normalized_candidate)
     return urls
 
 
@@ -7378,7 +7266,10 @@ class DownloadManagerApp:
         total_size = 0
         range_supported = False
         content_type = ""
-        disable_ssl_verify = _should_disable_ssl_verify_for_url(url)
+        disable_ssl_verify = (
+            "vr.goodav17.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
+            or "ggjav.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
+        )
         anime1_header_candidates = [url, headers.get("Referer", ""), headers.get("Origin", "")]
         prefer_curl = disable_ssl_verify or any(
             isinstance(candidate, str)
@@ -7522,7 +7413,10 @@ class DownloadManagerApp:
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
         req_headers = dict(headers or {})
         req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
-        disable_ssl_verify = _should_disable_ssl_verify_for_url(url)
+        disable_ssl_verify = (
+            "vr.goodav17.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
+            or "ggjav.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
+        )
         if disable_ssl_verify:
             c_req = get_curl_cffi_requests()
             last_exc = None
@@ -8167,7 +8061,10 @@ class DownloadManagerApp:
             return
         if "User-Agent" not in headers:
             headers["User-Agent"] = DEFAULT_USER_AGENT
-        disable_ssl_verify = _should_disable_ssl_verify_for_url(url)
+        disable_ssl_verify = (
+            "vr.goodav17.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
+            or "ggjav.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
+        )
         anime1_header_candidates = [url, headers.get("Referer", ""), headers.get("Origin", "")]
         prefer_curl_stream = disable_ssl_verify or any(
             isinstance(candidate, str)
@@ -8808,11 +8705,27 @@ class DownloadManagerApp:
         def _gimy_detail_rebuild_after_stream_failure(refresh_history, source_page_url, exc_obj):
             if source_site != "gimy" or detail_refresh_done:
                 return None
-            detail_page_candidates = _collect_gimy_detail_page_urls(
+            detail_page_candidates = []
+            for page_url in (
                 source_page_url,
                 _normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url),
                 url,
-            )
+            ):
+                normalized_page_url = _normalize_download_url(page_url)
+                if not normalized_page_url:
+                    continue
+                parsed = urllib.parse.urlsplit(normalized_page_url)
+                base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'gimy01.tv'}"
+                path = parsed.path or ""
+                for pattern in (r"/eps/(\d+)-\d+(?:-\d+)?\.html", r"/(?:play|vodplay|video)/(\d+)-\d+(?:-\d+)?\.html"):
+                    match = re.search(pattern, path)
+                    if not match:
+                        continue
+                    vod_id = match.group(1)
+                    for relative_path in (f"/vod/{vod_id}.html", f"/detail/{vod_id}.html", f"/voddetail/{vod_id}.html"):
+                        normalized_candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
+                        if normalized_candidate and normalized_candidate not in detail_page_candidates:
+                            detail_page_candidates.append(normalized_candidate)
             if not detail_page_candidates:
                 return None
             detail_refresh_url = detail_page_candidates[0]
@@ -10674,7 +10587,26 @@ class DownloadManagerApp:
             direct_referer = self._get_task_source_page(task)
             derived_mixdrop_watch_url = ""
             if "mxcontent.net" in parsed_url.netloc.lower():
-                derived_mixdrop_watch_url = _derive_mixdrop_watch_url_from_task(task, fallback_url=url)
+                task = task or {}
+                candidate_urls = [
+                    _normalize_download_url(_task_field_value(task, "source_page", "")),
+                    _normalize_download_url(url),
+                    _normalize_download_url(_task_field_value(task, "url", "")),
+                ]
+                candidate_urls.extend(
+                    _dedupe_download_urls(
+                        _task_field_value(task, "fallback_urls", []),
+                        primary_url=_task_field_value(task, "url", ""),
+                    )
+                )
+                for candidate in candidate_urls:
+                    if not candidate:
+                        continue
+                    normalized_candidate = _normalize_mixdrop_watch_url(candidate)
+                    candidate_host = urllib.parse.urlsplit(normalized_candidate).netloc.lower() if normalized_candidate else ""
+                    if normalized_candidate and any(mix_host in candidate_host for mix_host in ("mixdrop.ag", "m1xdrop.click")):
+                        derived_mixdrop_watch_url = normalized_candidate
+                        break
                 if not derived_mixdrop_watch_url:
                     preferred_mixdrop_host = ""
                     for candidate in (
@@ -10688,7 +10620,19 @@ class DownloadManagerApp:
                         if "mixdrop.ag" in candidate_host:
                             preferred_mixdrop_host = "mixdrop.ag"
                             break
-                    derived_mixdrop_watch_url = _derive_mixdrop_watch_url_from_media_url(url, preferred_host=preferred_mixdrop_host or "mixdrop.ag")
+                    normalized_media_url = _normalize_download_url(url)
+                    if normalized_media_url:
+                        parsed_media_url = urllib.parse.urlsplit(normalized_media_url)
+                        media_host = parsed_media_url.netloc.lower()
+                        if "mxcontent.net" in media_host:
+                            ref_match = re.search(
+                                r"/([A-Za-z0-9]+)\.(?:mp4|mkv|webm|m4a|mp3)(?:$|\?)",
+                                parsed_media_url.path,
+                                re.IGNORECASE,
+                            )
+                            if ref_match:
+                                target_host = preferred_mixdrop_host or "mixdrop.ag"
+                                derived_mixdrop_watch_url = f"https://{target_host}/e/{ref_match.group(1)}"
                 if derived_mixdrop_watch_url:
                     direct_referer = derived_mixdrop_watch_url
             direct_session = None
@@ -11035,7 +10979,8 @@ class DownloadManagerApp:
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://www.movieffm.net/"})
             def _movieffm_api_fallback_candidates(page_text, page_link):
-                post_id = _extract_movieffm_post_id(page_text)
+                post_id_match = re.search(r"\bpostid\s*:\s*(\d+)", str(page_text or ""), re.IGNORECASE)
+                post_id = str(post_id_match.group(1) or "").strip() if post_id_match else ""
                 if not post_id:
                     return [], []
                 api_base = f"https://www.movieffm.net/wp-json/dooplayer/v1/post/{post_id}"
@@ -11149,7 +11094,8 @@ class DownloadManagerApp:
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
             def _movieffm_api_fallback_candidates(page_text, page_link):
-                post_id = _extract_movieffm_post_id(page_text)
+                post_id_match = re.search(r"\bpostid\s*:\s*(\d+)", str(page_text or ""), re.IGNORECASE)
+                post_id = str(post_id_match.group(1) or "").strip() if post_id_match else ""
                 if not post_id:
                     return [], []
                 api_base = f"https://www.movieffm.net/wp-json/dooplayer/v1/post/{post_id}"
@@ -11617,15 +11563,31 @@ class DownloadManagerApp:
                         refresh_url=refresh_url,
                         refresh_attempts=episode_refresh_attempts + 1,
                         deferred_count=len(available_episode_page_candidates),
-                    )
-                    return self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
-                if not bool(_task_field_value(task, "_gimy_detail_refresh_done", False)):
-                    detail_page_candidates = _collect_gimy_detail_page_urls(
+                )
+                return self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
+            if not bool(_task_field_value(task, "_gimy_detail_refresh_done", False)):
+                    detail_page_candidates = []
+                    for page_url in (
                         self._get_task_source_page(task, fallback_url=url) or url,
                         current_page_url,
                         source_page_url,
                         url,
-                    )
+                    ):
+                        normalized_page_url = _normalize_download_url(page_url)
+                        if not normalized_page_url:
+                            continue
+                        parsed = urllib.parse.urlsplit(normalized_page_url)
+                        base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'gimy01.tv'}"
+                        path = parsed.path or ""
+                        for pattern in (r"/eps/(\d+)-\d+(?:-\d+)?\.html", r"/(?:play|vodplay|video)/(\d+)-\d+(?:-\d+)?\.html"):
+                            match = re.search(pattern, path)
+                            if not match:
+                                continue
+                            vod_id = match.group(1)
+                            for relative_path in (f"/vod/{vod_id}.html", f"/detail/{vod_id}.html", f"/voddetail/{vod_id}.html"):
+                                normalized_candidate = _normalize_download_url(urllib.parse.urljoin(base, relative_path))
+                                if normalized_candidate and normalized_candidate not in detail_page_candidates:
+                                    detail_page_candidates.append(normalized_candidate)
                     if detail_page_candidates:
                         detail_refresh_url = detail_page_candidates[0]
                         normalized_detail_refresh_url = _normalize_download_url(detail_refresh_url)
@@ -12259,7 +12221,13 @@ class DownloadManagerApp:
                 and "cc3001.dmm.co.jp" in candidate.lower()
                 and candidate.lower().endswith(".mp4")
             ]
-            dmm_video_id = _extract_javfilms_dmm_video_id(url, resp.text)
+            dmm_video_id_match = re.search(r"/get/video/([A-Za-z0-9_-]+)", str(resp.text or ""), flags=re.IGNORECASE)
+            if dmm_video_id_match:
+                dmm_video_id = str(dmm_video_id_match.group(1) or "").strip()
+            else:
+                parsed_javfilms_url = urllib.parse.urlparse(str(url or ""))
+                dmm_video_segments = [segment for segment in parsed_javfilms_url.path.split("/") if segment]
+                dmm_video_id = str(dmm_video_segments[-1] or "").strip() if dmm_video_segments else ""
             stream_url = manifest_candidates[0] if manifest_candidates else ""
             media_url = direct_media_candidates[0] if direct_media_candidates else ""
             fallback_urls = []
@@ -12279,7 +12247,12 @@ class DownloadManagerApp:
                 _set_task_identity(name=page_title, source_site="javfilms", source_page=url, fallback_urls=fallback_urls)
                 direct_headers = {"Referer": url, "Origin": site_root, "User-Agent": DEFAULT_USER_AGENT}
                 direct_session = None
-                if _is_javfilms_dmm_preview_url(media_url):
+                parsed_media_url = urllib.parse.urlparse(str(media_url or ""))
+                if (
+                    "cc3001.dmm.co.jp" in parsed_media_url.netloc.lower()
+                    and "/litevideo/freepv/" in parsed_media_url.path.lower()
+                    and parsed_media_url.path.lower().endswith(".mp4")
+                ):
                     if not dmm_video_id:
                         raise Exception("JAV Films protected DMM preview unavailable")
                     dmm_content_url = (
@@ -12543,7 +12516,15 @@ class DownloadManagerApp:
                 page_title = page_title.strip(" -|/") or str(_extract_html_title(resp.text, short_name or "PikPak") or "").strip()
             share_entries = _extract_pikpak_share_entries(resp.text)
             primary_entry = _pick_pikpak_primary_video_entry(share_entries)
-            display_name = _pikpak_display_name(primary_entry, page_title) if primary_entry else page_title
+            if primary_entry:
+                raw_name = str((primary_entry or {}).get("name") or "").strip()
+                if raw_name:
+                    stem = os.path.splitext(raw_name)[0].strip()
+                    display_name = stem or raw_name
+                else:
+                    display_name = str(page_title or "").strip()
+            else:
+                display_name = page_title
             candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
             candidate_urls.extend(_extract_pikpak_media_candidates(share_entries))
             candidate_urls = _dedupe_download_urls(candidate_urls)
