@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260519-2920"
+APP_BUILD = "20260519-2930"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -238,6 +238,7 @@ TRACE_LOG_MAX_ENTRIES = 10
 TRACE_LOG_CONTEXTS = frozenset((
     "app start",
     "single instance lock denied",
+    "single instance lock recovered after retry",
     "m3u8 route selected",
     "preferred native hls route selected",
     "ffmpeg download started",
@@ -1371,7 +1372,8 @@ def _extract_missav_media_candidates(page_html):
 
 
 def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=None):
-    headers = _make_browser_page_headers(referer=url, origin=site_root)
+    headers = _make_site_root_headers(site_root)
+    headers["Accept-Language"] = "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=headers)
     media_candidates = _extract_missav_media_candidates(resp.text)
     candidates = media_candidates.get("manifests") or []
@@ -1381,7 +1383,8 @@ def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=Non
 
     original_html = resp.text or ""
     retry_headers = [
-        _make_browser_page_headers(referer=site_root + "/", origin=site_root),
+        _make_site_root_headers(site_root),
+        _make_ytdlp_http_headers(referer=site_root + "/"),
         _make_browser_page_headers(referer=url, origin=site_root),
     ]
     for retry_header in retry_headers:
@@ -1401,6 +1404,9 @@ def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=Non
                     item_id=item_id,
                     url=url,
                     retry_index=retry_index,
+                    initial_status=getattr(resp, "status_code", None),
+                    retry_status=getattr(retry_resp, "status_code", None),
+                    retry_final_url=str(getattr(retry_resp, "url", "") or ""),
                     original_html_size=len(original_html),
                     retry_html_size=len(retry_text),
                     manifest_count=len(retry_manifests),
@@ -1415,6 +1421,8 @@ def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=Non
             retry_error,
             item_id=item_id,
             url=url,
+            initial_status=getattr(resp, "status_code", None),
+            initial_final_url=str(getattr(resp, "url", "") or ""),
             original_html_size=len(original_html),
         )
     return resp, media_candidates, candidates, direct_media_candidates
@@ -3353,19 +3361,22 @@ def create_taiwan_map_icon():
     return None
 
 
-def _append_trace_log_line(message):
+def _trim_delimited_log_entries(log_path, max_entries):
+    if max_entries <= 0:
+        return
     try:
-        with open(TRACE_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(str(message or "").rstrip() + "\n")
-        if TRACE_LOG_MAX_ENTRIES > 0:
-            try:
-                with open(TRACE_LOG_FILE, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                if len(lines) > TRACE_LOG_MAX_ENTRIES:
-                    with open(TRACE_LOG_FILE, "w", encoding="utf-8") as f:
-                        f.writelines(lines[-TRACE_LOG_MAX_ENTRIES:])
-            except Exception:
-                pass
+        delimiter_line = "--------------------------------------------------------------------------------"
+        with open(log_path, "r", encoding="utf-8") as f:
+            log_text = f.read()
+        raw_entries = [chunk.strip() for chunk in log_text.split(delimiter_line) if chunk.strip()]
+        if len(raw_entries) <= max_entries:
+            return
+        kept_entries = raw_entries[-max_entries:]
+        normalized_text = ""
+        for entry in kept_entries:
+            normalized_text += entry.rstrip() + f"\n{delimiter_line}\n"
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(normalized_text)
     except Exception:
         pass
 
@@ -3407,22 +3418,8 @@ def write_error_log(context, exc, **extra):
         lines.append("--------------------------------------------------------------------------------")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
-        if log_path == ERROR_LOG_FILE and ERROR_LOG_MAX_ENTRIES > 0:
-            if ERROR_LOG_MAX_ENTRIES > 0:
-                try:
-                    delimiter_line = "--------------------------------------------------------------------------------"
-                    with open(log_path, "r", encoding="utf-8") as f:
-                        log_text = f.read()
-                    raw_entries = [chunk.strip() for chunk in log_text.split(delimiter_line) if chunk.strip()]
-                    if len(raw_entries) > ERROR_LOG_MAX_ENTRIES:
-                        kept_entries = raw_entries[-ERROR_LOG_MAX_ENTRIES:]
-                        normalized_text = ""
-                        for entry in kept_entries:
-                            normalized_text += entry.rstrip() + f"\n{delimiter_line}\n"
-                        with open(log_path, "w", encoding="utf-8") as f:
-                            f.write(normalized_text)
-                except Exception:
-                    pass
+        max_entries = TRACE_LOG_MAX_ENTRIES if log_path == TRACE_LOG_FILE else ERROR_LOG_MAX_ENTRIES
+        _trim_delimited_log_entries(log_path, max_entries)
     except Exception:
         return
 
@@ -6330,8 +6327,7 @@ class DownloadManagerApp:
         secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
         explicit_output = primary_value or secondary_value or ""
         if self._can_accept_existing_output(task, item_id, explicit_output):
-            _set_task_aux_fields(task, filename=explicit_output)
-            self._set_task_named_column_text(item_id, "name", os.path.basename(str(explicit_output or "").strip()) or "")
+            self._set_task_output_file(task, item_id, explicit_output)
             self._mark_existing_file_complete(item_id, self._ui_text("msg_file_exists", "檔案已存在"))
             return True
         short_name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
@@ -6344,18 +6340,38 @@ class DownloadManagerApp:
         for ext in possible_exts:
             candidate_output = os.path.join(save_dir, f"{safe_name}{ext}")
             if self._can_accept_existing_output(task, item_id, candidate_output):
-                _set_task_aux_fields(task, filename=candidate_output)
-                self._set_task_named_column_text(item_id, "name", os.path.basename(str(candidate_output or "").strip()) or "")
+                self._set_task_output_file(task, item_id, candidate_output)
                 self._mark_existing_file_complete(item_id, message)
                 return True
         return False
+
+    def _set_task_output_file(self, task, item_id, output_path):
+        _set_task_aux_fields(task, filename=output_path)
+        self._set_task_named_column_text(item_id, "name", os.path.basename(str(output_path or "").strip()) or "")
+
+    def _task_output_path_or_default(self, task, default_path=""):
+        primary_value = str(_task_field_value(task, "filename") or "").strip()
+        secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
+        fallback_value = str(default_path or "").strip()
+        return primary_value or secondary_value or fallback_value
+
+    def _log_ytdlp_native_hls_finished(self, task, item_id, url, output_path=None):
+        final_output_path = self._task_output_path_or_default(task, output_path)
+        write_error_log(
+            "yt-dlp native hls fallback finished",
+            Exception("yt-dlp native hls fallback finished"),
+            url=url,
+            item_id=item_id,
+            source_site=_task_source_site_name(task) or None,
+            output=final_output_path,
+            bytes=self._get_existing_file_size(final_output_path),
+        )
 
     def _set_output_path_and_complete_if_exists(self, task, item_id, output_path, message=None, temp=False):
         if temp:
             _set_task_aux_fields(task, temp_filename=output_path)
         else:
-            _set_task_aux_fields(task, filename=output_path)
-            self._set_task_named_column_text(item_id, "name", os.path.basename(str(output_path or "").strip()) or "")
+            self._set_task_output_file(task, item_id, output_path)
         if self._can_accept_existing_output(task, item_id, output_path, temp=temp):
             self._mark_existing_file_complete(item_id, message or self._ui_text("eta_file_exists", "檔案已存在"))
             return True
@@ -8746,9 +8762,7 @@ class DownloadManagerApp:
                     pass
             _set_task_aux_fields(task, filename=actual_output)
             self._set_task_named_column_text(item_id, "name", os.path.basename(str(actual_output or "").strip()) or "")
-        primary_value = str(_task_field_value(task, "filename") or "").strip()
-        secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
-        final_output_path = primary_value or secondary_value or str(out_path or "").strip() or out_path
+        final_output_path = self._task_output_path_or_default(task, out_path)
         if self._has_nonempty_file(final_output_path) and not is_mp3:
             final_info = self._probe_media_info(final_output_path)
             final_size = int(final_info.get("size", 0) or 0)
@@ -8781,26 +8795,10 @@ class DownloadManagerApp:
                 raise artifact_exc
         if self._has_nonempty_file(final_output_path):
             self._mark_task_finished(item_id)
-            write_error_log(
-                "yt-dlp native hls fallback finished",
-                Exception("yt-dlp native hls fallback finished"),
-                url=url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                output=final_output_path,
-                bytes=self._get_existing_file_size(final_output_path),
-            )
+            self._log_ytdlp_native_hls_finished(task, item_id, url, final_output_path)
             return
         if self._complete_if_output_exists(item_id):
-            write_error_log(
-                "yt-dlp native hls fallback finished",
-                Exception("yt-dlp native hls fallback finished"),
-                url=url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                output=(str(_task_field_value(task, "filename") or "").strip() or str(_task_field_value(task, "temp_filename") or "").strip() or str(out_path or "").strip() or out_path),
-                bytes=self._get_existing_file_size(str(_task_field_value(task, "filename") or "").strip() or str(_task_field_value(task, "temp_filename") or "").strip() or str(out_path or "").strip() or out_path),
-            )
+            self._log_ytdlp_native_hls_finished(task, item_id, url, out_path)
             return
         write_error_log(
             "yt-dlp native hls fallback output missing",
@@ -12146,6 +12144,8 @@ class DownloadManagerApp:
                     Exception("MissAV parser found no usable media candidates"),
                     item_id=item_id,
                     url=url,
+                    status_code=getattr(resp, "status_code", None),
+                    final_url=str(getattr(resp, "url", "") or ""),
                     html_size=len(resp.text or ""),
                     has_next_data="__NEXT_DATA__" in (resp.text or ""),
                     has_playlist_token="playlist" in (resp.text or "").lower(),
@@ -13212,7 +13212,11 @@ def main():
         lock_acquired, recovered_after_retry = wait_for_single_instance_lock()
         if not lock_acquired:
             try:
-                _append_trace_log_line(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock denied build={APP_BUILD} app_dir={_APP_DIR}")
+                write_error_log(
+                    "single instance lock denied",
+                    Exception("single instance lock denied"),
+                    app_dir=_APP_DIR,
+                )
             except Exception:
                 pass
             warning_root = tk.Tk()
@@ -13225,12 +13229,21 @@ def main():
             return
         if recovered_after_retry:
             try:
-                _append_trace_log_line(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] single instance lock recovered after retry build={APP_BUILD} app_dir={_APP_DIR}")
+                write_error_log(
+                    "single instance lock recovered after retry",
+                    Exception("single instance lock recovered after retry"),
+                    app_dir=_APP_DIR,
+                )
             except Exception:
                 pass
 
         try:
-            _append_trace_log_line(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app start build={APP_BUILD} frozen={getattr(sys, 'frozen', False)} app_dir={_APP_DIR}")
+            write_error_log(
+                "app start",
+                Exception("app start"),
+                frozen=getattr(sys, "frozen", False),
+                app_dir=_APP_DIR,
+            )
         except Exception:
             pass
 

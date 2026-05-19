@@ -24,35 +24,42 @@ function Get-CurrentBuildId {
     return ''
 }
 
-function Get-LogTail {
-    param(
-        [string]$Path,
-        [int]$LineCount = 40
-    )
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return @()
-    }
-    return Get-Content -LiteralPath $Path -Tail $LineCount
-}
-
 function Get-LatestStartedBuilds {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
         return @()
     }
     $builds = New-Object System.Collections.Generic.List[string]
+    $pendingAppStart = $false
     foreach ($line in Get-Content -LiteralPath $Path) {
         if ($line -match 'app start build=([0-9]{8}-[0-9]+)') {
             $build = $Matches[1]
             if (-not $builds.Contains($build)) {
                 $builds.Add($build)
             }
+            $pendingAppStart = $false
+            continue
+        }
+        if ($line -match '^\[[^\]]+\]\s+app start\s*$') {
+            $pendingAppStart = $true
+            continue
+        }
+        if ($pendingAppStart -and $line -match '^build:\s*([0-9]{8}-[0-9]+)\s*$') {
+            $build = $Matches[1]
+            if (-not $builds.Contains($build)) {
+                $builds.Add($build)
+            }
+            $pendingAppStart = $false
+            continue
+        }
+        if ($line -match '^-+\s*$') {
+            $pendingAppStart = $false
         }
     }
     return @($builds)
 }
 
-function Split-ErrorEntries {
+function Split-DelimitedLogEntries {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
         return @()
@@ -68,29 +75,56 @@ function Split-ErrorEntries {
     )
 }
 
-function Remove-InformationalErrorEntries {
-    param([object[]]$Entries)
-    $informationalContexts = @(
-        'm3u8 route selected',
-        'preferred native hls route selected',
-        'ffmpeg download started',
-        'ffmpeg download finished',
-        'ffmpeg direct audio started',
-        'ffmpeg direct audio finished',
-        'yt-dlp native hls fallback started',
-        'yt-dlp native hls fallback finished',
-        'missav parser retry recovered',
-        'xiaoyakankan parse start',
-        'xiaoyakankan parse success',
-        'instagram savereels fallback',
-        'instagram extractor fallback',
-        'facebook extractor fallback'
+function Write-LogEntryTail {
+    param(
+        [object[]]$Entries,
+        [int]$EntryCount = 3,
+        [string]$EmptyMessage = '<no log entries>'
     )
+    $tailEntries = @($Entries | Select-Object -Last $EntryCount)
+    if ($tailEntries.Count -eq 0) {
+        Write-Host $EmptyMessage
+        return
+    }
+    foreach ($entry in $tailEntries) {
+        Write-Host $entry
+        Write-Host '--------------------------------------------------------------------------------'
+    }
+}
+
+function Get-TraceLogContexts {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return @()
+    }
+    $source = Get-Content -LiteralPath $Path -Raw
+    $match = [regex]::Match($source, 'TRACE_LOG_CONTEXTS\s*=\s*frozenset\(\((?<body>.*?)\)\)', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    if (-not $match.Success) {
+        return @()
+    }
+    return @(
+        [regex]::Matches($match.Groups['body'].Value, '["''](?<context>[^"'']+)["'']') |
+            ForEach-Object { $_.Groups['context'].Value } |
+            Where-Object { $_ }
+    )
+}
+
+function Remove-InformationalErrorEntries {
+    param(
+        [object[]]$Entries,
+        [string[]]$InformationalContexts
+    )
+    $contextSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($context in @($InformationalContexts)) {
+        if ($context) {
+            [void]$contextSet.Add($context)
+        }
+    }
     return @(
         $Entries | Where-Object {
             $entry = [string]$_
             $isInformational = $false
-            foreach ($context in $informationalContexts) {
+            foreach ($context in $contextSet) {
                 if ($entry -match ('(?m)^\[[^\]]+\]\s+' + [regex]::Escape($context) + '\s*$')) {
                     $isInformational = $true
                     break
@@ -101,10 +135,28 @@ function Remove-InformationalErrorEntries {
     )
 }
 
+function Write-ErrorEntryTail {
+    param(
+        [object[]]$Entries,
+        [int]$EntryCount = 3
+    )
+    $tailEntries = @($Entries | Select-Object -Last $EntryCount)
+    if ($tailEntries.Count -eq 0) {
+        Write-Host '<no non-informational error entries>'
+        return
+    }
+    foreach ($entry in $tailEntries) {
+        Write-Host $entry
+        Write-Host '--------------------------------------------------------------------------------'
+    }
+}
+
 $currentBuildId = Get-CurrentBuildId -Path $sourceFile
 $startedBuilds = @(Get-LatestStartedBuilds -Path $activityLog)
 $latestStartedBuild = if ($startedBuilds.Count -gt 0) { $startedBuilds[$startedBuilds.Count - 1] } else { '' }
-$entries = Remove-InformationalErrorEntries -Entries (Split-ErrorEntries -Path $errorLog)
+$traceLogContexts = @(Get-TraceLogContexts -Path $sourceFile)
+$activityEntries = @(Split-DelimitedLogEntries -Path $activityLog)
+$entries = Remove-InformationalErrorEntries -Entries (Split-DelimitedLogEntries -Path $errorLog) -InformationalContexts $traceLogContexts
 $latestStartedErrors = @()
 if ($latestStartedBuild) {
     $latestStartedErrors = @($entries | Where-Object { $_ -match ("build:\s*" + [regex]::Escape($latestStartedBuild)) })
@@ -135,10 +187,16 @@ if ($latestStartedErrors.Count -gt 0) {
     Write-Host 'No error entry found for the latest started build.'
 }
 
-Write-Host '--- activity.log tail ---'
-Get-LogTail -Path $activityLog -LineCount 20 | ForEach-Object { Write-Host $_ }
-Write-Host '--- error.log tail ---'
-Get-LogTail -Path $errorLog -LineCount 60 | ForEach-Object { Write-Host $_ }
+Write-Host '--- activity.log entries tail ---'
+Write-LogEntryTail -Entries $activityEntries -EntryCount 3 -EmptyMessage '<no activity log entries>'
+Write-Host '--- relevant error entries tail (latest/current build, filtered) ---'
+$relevantErrors = @()
+if ($latestStartedErrors.Count -gt 0) {
+    $relevantErrors = @($latestStartedErrors)
+} elseif ($currentBuildErrors.Count -gt 0) {
+    $relevantErrors = @($currentBuildErrors)
+}
+Write-ErrorEntryTail -Entries $relevantErrors -EntryCount 3
 
 if ($FailOnCurrentBuildError -and $currentBuildErrors.Count -gt 0) {
     $entryWord = if ($currentBuildErrors.Count -eq 1) { 'entry' } else { 'entries' }
