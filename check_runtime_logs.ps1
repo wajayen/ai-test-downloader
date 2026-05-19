@@ -68,10 +68,43 @@ function Split-ErrorEntries {
     )
 }
 
+function Remove-InformationalErrorEntries {
+    param([object[]]$Entries)
+    $informationalContexts = @(
+        'm3u8 route selected',
+        'preferred native hls route selected',
+        'ffmpeg download started',
+        'ffmpeg download finished',
+        'ffmpeg direct audio started',
+        'ffmpeg direct audio finished',
+        'yt-dlp native hls fallback started',
+        'yt-dlp native hls fallback finished',
+        'missav parser retry recovered',
+        'xiaoyakankan parse start',
+        'xiaoyakankan parse success',
+        'instagram savereels fallback',
+        'instagram extractor fallback',
+        'facebook extractor fallback'
+    )
+    return @(
+        $Entries | Where-Object {
+            $entry = [string]$_
+            $isInformational = $false
+            foreach ($context in $informationalContexts) {
+                if ($entry -match ('(?m)^\[[^\]]+\]\s+' + [regex]::Escape($context) + '\s*$')) {
+                    $isInformational = $true
+                    break
+                }
+            }
+            -not $isInformational
+        }
+    )
+}
+
 $currentBuildId = Get-CurrentBuildId -Path $sourceFile
 $startedBuilds = @(Get-LatestStartedBuilds -Path $activityLog)
 $latestStartedBuild = if ($startedBuilds.Count -gt 0) { $startedBuilds[$startedBuilds.Count - 1] } else { '' }
-$entries = Split-ErrorEntries -Path $errorLog
+$entries = Remove-InformationalErrorEntries -Entries (Split-ErrorEntries -Path $errorLog)
 $latestStartedErrors = @()
 if ($latestStartedBuild) {
     $latestStartedErrors = @($entries | Where-Object { $_ -match ("build:\s*" + [regex]::Escape($latestStartedBuild)) })

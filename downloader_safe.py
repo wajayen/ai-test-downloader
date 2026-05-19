@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260519-2910"
+APP_BUILD = "20260519-2920"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -246,6 +246,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg direct audio finished",
     "yt-dlp native hls fallback started",
     "yt-dlp native hls fallback finished",
+    "missav parser retry recovered",
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
     "instagram savereels fallback",
@@ -1369,6 +1370,56 @@ def _extract_missav_media_candidates(page_html):
     }
 
 
+def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=None):
+    headers = _make_browser_page_headers(referer=url, origin=site_root)
+    resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=headers)
+    media_candidates = _extract_missav_media_candidates(resp.text)
+    candidates = media_candidates.get("manifests") or []
+    direct_media_candidates = media_candidates.get("direct_media") or []
+    if candidates or direct_media_candidates:
+        return resp, media_candidates, candidates, direct_media_candidates
+
+    original_html = resp.text or ""
+    retry_headers = [
+        _make_browser_page_headers(referer=site_root + "/", origin=site_root),
+        _make_browser_page_headers(referer=url, origin=site_root),
+    ]
+    for retry_header in retry_headers:
+        retry_header["Accept-Language"] = "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+    retry_error = None
+    for retry_index, retry_header in enumerate(retry_headers, start=1):
+        try:
+            retry_resp = c_req.get(url, impersonate="chrome120", timeout=25, headers=retry_header)
+            retry_text = retry_resp.text or ""
+            retry_candidates = _extract_missav_media_candidates(retry_text)
+            retry_manifests = retry_candidates.get("manifests") or []
+            retry_direct = retry_candidates.get("direct_media") or []
+            if retry_manifests or retry_direct:
+                write_error_log(
+                    "missav parser retry recovered",
+                    Exception("MissAV parser recovered after refetch"),
+                    item_id=item_id,
+                    url=url,
+                    retry_index=retry_index,
+                    original_html_size=len(original_html),
+                    retry_html_size=len(retry_text),
+                    manifest_count=len(retry_manifests),
+                    direct_count=len(retry_direct),
+                )
+                return retry_resp, retry_candidates, retry_manifests, retry_direct
+        except Exception as retry_exc:
+            retry_error = retry_exc
+    if retry_error is not None:
+        write_error_log(
+            "missav parser retry failed",
+            retry_error,
+            item_id=item_id,
+            url=url,
+            original_html_size=len(original_html),
+        )
+    return resp, media_candidates, candidates, direct_media_candidates
+
+
 def _extract_movieffm_m3u8_candidates(page_html):
     candidates = []
     for match in re.finditer(r"videourl\s*:\s*'([^']+)'", str(page_html or ""), re.IGNORECASE):
@@ -2409,11 +2460,7 @@ def _resolve_18av_protected_player_media(page_url, page_html):
     if not player_ids:
         player_ids.append("")
     c_req = get_curl_cffi_requests()
-    common_headers = {
-        "Referer": _normalize_download_url(page_url) or (site_root + "/"),
-        "Origin": site_root,
-        "User-Agent": DEFAULT_USER_AGENT,
-    }
+    common_headers = _make_site_root_headers(site_root, referer=_normalize_download_url(page_url) or (site_root + "/"))
     last_probe_url = player_base
     for player_id in player_ids:
         probe_url = player_base + urllib.parse.quote(player_id, safe="")
@@ -2843,6 +2890,29 @@ def _make_ytdlp_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_
 def _make_site_root_headers(site_root, referer=None, user_agent=DEFAULT_USER_AGENT):
     root = str(site_root or "").rstrip("/")
     return _make_ytdlp_http_headers(referer=referer or (root + "/" if root else None), origin=root or None, user_agent=user_agent)
+
+
+def _make_ajax_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_AGENT):
+    headers = _make_ytdlp_http_headers(referer=referer, origin=origin, user_agent=user_agent)
+    headers["X-Requested-With"] = "XMLHttpRequest"
+    return headers
+
+
+def _make_browser_page_headers(referer=None, origin=None, user_agent=DEFAULT_USER_AGENT):
+    headers = _make_ytdlp_http_headers(referer=referer, origin=origin, user_agent=user_agent)
+    headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    return headers
+
+
+def _format_ffmpeg_header_lines(headers):
+    return "".join(f"{key}: {value}\r\n" for key, value in (headers or {}).items() if value)
+
+
+def _make_range_http_headers(headers=None, range_value="bytes=0-0"):
+    range_headers = dict(headers or {})
+    if range_value:
+        range_headers["Range"] = range_value
+    return range_headers
 
 
 def _apply_ytdlp_audio_postprocessing(ydl_opts):
@@ -4705,7 +4775,7 @@ class DownloadManagerApp:
                         new_url,
                         impersonate="chrome110",
                         timeout=20,
-                        headers={"Referer": "https://nnyy.in/", "User-Agent": DEFAULT_USER_AGENT},
+                        headers=_make_ytdlp_http_headers(referer="https://nnyy.in/"),
                     )
                     page_title = _extract_html_title(resp.text, "努努影院")
                     page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or "努努影院"
@@ -4725,7 +4795,7 @@ class DownloadManagerApp:
                     new_url,
                     impersonate="chrome110",
                     timeout=20,
-                    headers={"Referer": "https://nnyy.in/", "User-Agent": DEFAULT_USER_AGENT},
+                    headers=_make_ytdlp_http_headers(referer="https://nnyy.in/"),
                 )
                 page_id = _extract_nnyy_page_id(new_url)
                 if not page_id:
@@ -4774,7 +4844,7 @@ class DownloadManagerApp:
                     new_url,
                     impersonate="chrome110",
                     timeout=20,
-                    headers={"Referer": "https://777tv.ai/", "User-Agent": DEFAULT_USER_AGENT},
+                    headers=_make_ytdlp_http_headers(referer="https://777tv.ai/"),
                 )
                 episode_entries = _extract_777tv_episode_entries(resp.text)
                 if not episode_entries:
@@ -4815,7 +4885,7 @@ class DownloadManagerApp:
                     new_url,
                     impersonate="chrome110",
                     timeout=20,
-                    headers={"Referer": "https://3kor.com/", "User-Agent": DEFAULT_USER_AGENT},
+                    headers=_make_ytdlp_http_headers(referer="https://3kor.com/"),
                 )
                 detail_entries = _extract_3kor_detail_entries(resp.text)
                 if not detail_entries:
@@ -4848,7 +4918,7 @@ class DownloadManagerApp:
                     new_url,
                     impersonate="chrome110",
                     timeout=20,
-                    headers={"Referer": "https://3kor.com/", "User-Agent": DEFAULT_USER_AGENT},
+                    headers=_make_ytdlp_http_headers(referer="https://3kor.com/"),
                 )
                 page_title = _extract_html_title(resp.text, "3KOR")
                 page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or "3KOR"
@@ -6541,7 +6611,7 @@ class DownloadManagerApp:
                     segment_url,
                     impersonate="chrome110",
                     timeout=20,
-                    headers={**headers, "Range": "bytes=0-0"},
+                    headers=_make_range_http_headers(headers),
                 )
                 if get_resp.status_code < 400:
                     content_range = get_resp.headers.get("Content-Range") or get_resp.headers.get("content-range")
@@ -7477,7 +7547,7 @@ class DownloadManagerApp:
                     except Exception:
                         pass
         try:
-            req = urllib.request.Request(url, headers={**headers, "Range": "bytes=0-0"})
+            req = urllib.request.Request(url, headers=_make_range_http_headers(headers))
             with urllib.request.urlopen(req, timeout=20) as resp:
                 status = getattr(resp, "status", resp.getcode())
                 resp_headers = resp.headers
@@ -7552,8 +7622,7 @@ class DownloadManagerApp:
             return {"total_size": total_size, "range_supported": range_supported, "content_type": content_type}
 
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
-        req_headers = dict(headers or {})
-        req_headers["Range"] = f"bytes={start_byte}-{end_byte}"
+        req_headers = _make_range_http_headers(headers, f"bytes={start_byte}-{end_byte}")
         disable_ssl_verify = (
             "vr.goodav17.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
             or "ggjav.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
@@ -8243,10 +8312,8 @@ class DownloadManagerApp:
         if total_size > 0 and resume_bytes >= total_size:
             self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
             return
-        dl_headers = dict(headers)
         mode = "ab" if resume_bytes > 0 else "wb"
-        if resume_bytes > 0:
-            dl_headers["Range"] = f"bytes={resume_bytes}-"
+        dl_headers = _make_range_http_headers(headers, f"bytes={resume_bytes}-") if resume_bytes > 0 else dict(headers)
         res = None
         stream_iter = None
         stream_response = None
@@ -9055,24 +9122,25 @@ class DownloadManagerApp:
         duration_box = {}
         media_bps_box = {}
         total_bytes_box = {}
+        manifest_headers = _make_ytdlp_http_headers(referer=referer, origin=origin)
 
         def probe_metadata():
             for candidate in candidate_urls:
                 try:
-                    duration = self._get_m3u8_duration(candidate, headers={"Referer": referer, "Origin": origin})
+                    duration = self._get_m3u8_duration(candidate, headers=manifest_headers)
                     if duration > 0:
                         duration_box["value"] = duration
                 except Exception:
                     pass
                 if _task_source_site_name(task) not in M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES:
                     try:
-                        total_bytes = self._get_m3u8_total_bytes(candidate, headers={"Referer": referer, "Origin": origin}, task=task)
+                        total_bytes = self._get_m3u8_total_bytes(candidate, headers=manifest_headers, task=task)
                         if total_bytes and total_bytes > 0:
                             total_bytes_box["value"] = total_bytes
                     except Exception:
                         pass
                 try:
-                    media_bps = self._estimate_m3u8_media_bps(candidate, headers={"Referer": referer, "Origin": origin})
+                    media_bps = self._estimate_m3u8_media_bps(candidate, headers=manifest_headers)
                     if media_bps and media_bps > 0:
                         media_bps_box["value"] = media_bps
                 except Exception:
@@ -9089,7 +9157,7 @@ class DownloadManagerApp:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
         last_error = None
-        headers = f"Referer: {referer}\r\nOrigin: {origin}\r\nUser-Agent: {DEFAULT_USER_AGENT}\r\n"
+        headers = _format_ffmpeg_header_lines(manifest_headers)
         total_duration = 0.0
         self._start_daemon_thread(probe_metadata)
 
@@ -9182,7 +9250,7 @@ class DownloadManagerApp:
                 total_duration = duration_box.get("value", 0.0)
             elif total_duration <= 0:
                 try:
-                    total_duration = self._get_m3u8_duration(candidate_url, headers={"Referer": referer, "Origin": origin})
+                    total_duration = self._get_m3u8_duration(candidate_url, headers=manifest_headers)
                 except Exception:
                     total_duration = 0.0
             total_bytes = total_bytes_box.get("value")
@@ -9203,7 +9271,7 @@ class DownloadManagerApp:
             if resume_anchor_seconds > 0:
                 rewind_seconds = self._get_m3u8_resume_rewind_seconds(
                     candidate_url,
-                    headers={"Referer": referer, "Origin": origin},
+                    headers=manifest_headers,
                 )
                 if rewind_seconds > 0:
                     resume_seek_seconds = max(resume_anchor_seconds - rewind_seconds, 0.0)
@@ -9214,7 +9282,7 @@ class DownloadManagerApp:
             if average_media_bps <= 0 and media_bps_box.get("value"):
                 average_media_bps = media_bps_box.get("value", 0.0)
             if average_media_bps <= 0:
-                average_media_bps = self._estimate_m3u8_media_bps(candidate_url, headers={"Referer": referer, "Origin": origin}) or 0.0
+                average_media_bps = self._estimate_m3u8_media_bps(candidate_url, headers=manifest_headers) or 0.0
             resume_overlap_bytes = 0
             if average_media_bps > 0 and resume_overlap_seconds > 0:
                 resume_overlap_bytes = max(int(average_media_bps * resume_overlap_seconds), 0)
@@ -10751,14 +10819,14 @@ class DownloadManagerApp:
                 try:
                     direct_session.get(
                         direct_referer,
-                        headers={"Referer": warmup_referer, "User-Agent": DEFAULT_USER_AGENT},
+                        headers=_make_ytdlp_http_headers(referer=warmup_referer),
                         timeout=20,
                     )
                 except Exception:
                     try:
                         direct_session.get(
                             direct_referer,
-                            headers={"Referer": direct_referer, "User-Agent": DEFAULT_USER_AGENT},
+                            headers=_make_ytdlp_http_headers(referer=direct_referer),
                             timeout=20,
                         )
                     except Exception:
@@ -10834,7 +10902,7 @@ class DownloadManagerApp:
                 url,
                 impersonate="chrome110",
                 timeout=20,
-                headers={"Referer": "https://nnyy.in/", "User-Agent": DEFAULT_USER_AGENT},
+                headers=_make_ytdlp_http_headers(referer="https://nnyy.in/"),
             )
             page_id = _extract_nnyy_page_id(url)
             if not page_id:
@@ -10849,11 +10917,7 @@ class DownloadManagerApp:
                 api_url,
                 impersonate="chrome110",
                 timeout=20,
-                headers={
-                    "Referer": url,
-                    "X-Requested-With": "XMLHttpRequest",
-                    "User-Agent": DEFAULT_USER_AGENT,
-                },
+                headers=_make_ajax_http_headers(referer=url),
             )
             candidates = _extract_nnyy_play_candidates(api_resp.text)
             if not candidates:
@@ -10888,7 +10952,7 @@ class DownloadManagerApp:
                 url,
                 impersonate="chrome110",
                 timeout=20,
-                headers={"Referer": "https://777tv.ai/", "User-Agent": DEFAULT_USER_AGENT},
+                headers=_make_ytdlp_http_headers(referer="https://777tv.ai/"),
             )
             page_title = _extract_html_title(resp.text, short_name or "777TV")
             page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or (short_name or "777TV")
@@ -10929,7 +10993,7 @@ class DownloadManagerApp:
                 url,
                 impersonate="chrome110",
                 timeout=20,
-                headers={"Referer": self._get_task_source_page(task, fallback_url="https://777tv.ai/") or "https://777tv.ai/", "User-Agent": DEFAULT_USER_AGENT},
+                headers=_make_ytdlp_http_headers(referer=self._get_task_source_page(task, fallback_url="https://777tv.ai/") or "https://777tv.ai/"),
             )
             page_title, candidates, _player_data = _extract_777tv_playback_candidates(resp.text, short_name or "777TV")
             if not candidates:
@@ -10953,7 +11017,7 @@ class DownloadManagerApp:
                 url,
                 impersonate="chrome110",
                 timeout=20,
-                headers={"Referer": "https://3kor.com/", "User-Agent": DEFAULT_USER_AGENT},
+                headers=_make_ytdlp_http_headers(referer="https://3kor.com/"),
             )
             detail_entries = _extract_3kor_detail_entries(resp.text)
             if not detail_entries:
@@ -10977,7 +11041,7 @@ class DownloadManagerApp:
                 detail_url,
                 impersonate="chrome110",
                 timeout=20,
-                headers={"Referer": "https://3kor.com/", "User-Agent": DEFAULT_USER_AGENT},
+                headers=_make_ytdlp_http_headers(referer="https://3kor.com/"),
             )
             page_title = _extract_html_title(resp.text, short_name or "3KOR")
             page_title = "".join(c for c in page_title if c not in '\\/:*?"<>|').strip() or (short_name or "3KOR")
@@ -10991,7 +11055,7 @@ class DownloadManagerApp:
                 api_url,
                 impersonate="chrome110",
                 timeout=20,
-                headers={"Referer": detail_url, "User-Agent": DEFAULT_USER_AGENT},
+                headers=_make_ytdlp_http_headers(referer=detail_url),
             ).text
             direct_stream_url = _decrypt_3kor_stream_url(encrypted_stream, "my-to-newhan-2025")
             if not direct_stream_url:
@@ -12069,10 +12133,13 @@ class DownloadManagerApp:
         if "missav" in parsed_url.netloc:
             self._set_task_parse_ui(item_id, key="eta_site_missav", fallback="正在解析 MissAV 頁面...")
             c_req = get_curl_cffi_requests()
-            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": url})
-            media_candidates = _extract_missav_media_candidates(resp.text)
-            candidates = media_candidates.get("manifests") or []
-            direct_media_candidates = media_candidates.get("direct_media") or []
+            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            resp, media_candidates, candidates, direct_media_candidates = _fetch_missav_media_candidates_with_retry(
+                c_req,
+                url,
+                site_root,
+                item_id=item_id,
+            )
             if not candidates and not direct_media_candidates:
                 write_error_log(
                     "missav parser candidates missing",
@@ -12319,17 +12386,13 @@ class DownloadManagerApp:
                     try:
                         direct_session.get(
                             declared_url,
-                            headers={"User-Agent": DEFAULT_USER_AGENT, "Referer": "https://www.dmm.co.jp/"},
+                            headers=_make_ytdlp_http_headers(referer="https://www.dmm.co.jp/"),
                             allow_redirects=True,
                             timeout=30,
                         )
                         probe_resp = direct_session.get(
                             media_url,
-                            headers={
-                                "User-Agent": DEFAULT_USER_AGENT,
-                                "Referer": dmm_content_url,
-                                "Origin": "https://video.dmm.co.jp",
-                            },
+                            headers=_make_ytdlp_http_headers(referer=dmm_content_url, origin="https://video.dmm.co.jp"),
                             allow_redirects=True,
                             timeout=20,
                             stream=True,
@@ -12349,11 +12412,7 @@ class DownloadManagerApp:
                             pass
                         direct_session = None
                         raise
-                    direct_headers = {
-                        "User-Agent": DEFAULT_USER_AGENT,
-                        "Referer": dmm_content_url,
-                        "Origin": "https://video.dmm.co.jp",
-                    }
+                    direct_headers = _make_ytdlp_http_headers(referer=dmm_content_url, origin="https://video.dmm.co.jp")
                 try:
                     self._download_direct_or_audio_media(
                         item_id,
@@ -12577,7 +12636,7 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
             c_req = get_curl_cffi_requests()
             safe_referer = f"{parsed_url.scheme}://{parsed_url.netloc}/"
-            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers={"Referer": safe_referer})
+            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=_make_ytdlp_http_headers(referer=safe_referer))
             candidates = _extract_candidate_media_urls(resp.text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
             media_url = next((candidate for candidate in candidates if candidate.lower().endswith(".mp4")), None)
             if not media_url:
@@ -12608,12 +12667,7 @@ class DownloadManagerApp:
             source_page_referer = self._get_task_source_page(task) or "https://www.movieffm.net/"
             evoload_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
             evoload_session = self._track_network_session(c_req.Session(impersonate="chrome120"))
-            page_headers = {
-                "Referer": source_page_referer,
-                "Origin": "https://www.movieffm.net",
-                "User-Agent": DEFAULT_USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            }
+            page_headers = _make_browser_page_headers(referer=source_page_referer, origin="https://www.movieffm.net")
             resp = evoload_session.get(url, timeout=20, headers=page_headers)
             page_variants = [resp.text]
             redirect_match = re.search(r"redirect_link\s*=\s*'([^']+)'", str(resp.text or ""), re.IGNORECASE)
@@ -12625,12 +12679,7 @@ class DownloadManagerApp:
                         redirect_resp = evoload_session.get(
                             redirect_url,
                             timeout=20,
-                            headers={
-                                "Referer": url,
-                                "Origin": evoload_origin,
-                                "User-Agent": DEFAULT_USER_AGENT,
-                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                            },
+                            headers=_make_browser_page_headers(referer=url, origin=evoload_origin),
                         )
                         page_variants.append(redirect_resp.text)
                     except Exception:
@@ -12685,7 +12734,7 @@ class DownloadManagerApp:
             watch_url = _normalize_mixdrop_watch_url(url) or url
             mixdrop_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
             mixdrop_session = self._track_network_session(c_req.Session(impersonate="chrome120"))
-            resp = mixdrop_session.get(watch_url, timeout=20, headers={"Referer": source_page_referer, "User-Agent": DEFAULT_USER_AGENT})
+            resp = mixdrop_session.get(watch_url, timeout=20, headers=_make_ytdlp_http_headers(referer=source_page_referer))
             candidates = _extract_mixdrop_media_candidates(resp.text)
             media_url = next((candidate for candidate in candidates if _looks_like_http_media_url(candidate)), None)
             if not media_url:
@@ -12737,7 +12786,7 @@ class DownloadManagerApp:
                 page_title,
                 source_site="threads",
                 referer=url,
-                headers={"Referer": url, "User-Agent": ydl_opts["http_headers"]["User-Agent"]},
+                headers=_make_ytdlp_http_headers(referer=url, user_agent=ydl_opts["http_headers"]["User-Agent"]),
             )
             return
 
@@ -12758,12 +12807,12 @@ class DownloadManagerApp:
                 "Origin": "https://www.instagram.com",
                 "Referer": "https://www.instagram.com/",
             }
-            page_resp = session.get(url, timeout=20, headers={"User-Agent": ydl_opts["http_headers"]["User-Agent"], "Referer": url})
+            page_resp = session.get(url, timeout=20, headers=_make_ytdlp_http_headers(referer=url, user_agent=ydl_opts["http_headers"]["User-Agent"]))
             candidates = _extract_instagram_media_candidates(page_resp.text)
 
             if not candidates:
                 try:
-                    embed_resp = session.get(f"https://www.instagram.com/reel/{shortcode}/embed/captioned/", timeout=20, headers={"User-Agent": ydl_opts["http_headers"]["User-Agent"], "Referer": url})
+                    embed_resp = session.get(f"https://www.instagram.com/reel/{shortcode}/embed/captioned/", timeout=20, headers=_make_ytdlp_http_headers(referer=url, user_agent=ydl_opts["http_headers"]["User-Agent"]))
                     candidates.extend(_extract_instagram_media_candidates(embed_resp.text))
                 except Exception:
                     pass
@@ -12845,7 +12894,7 @@ class DownloadManagerApp:
         if "facebook.com" in parsed_url.netloc and any(part in parsed_url.path for part in ("/reel/", "/watch/", "/videos/")):
             self._set_task_parse_ui(item_id, key="eta_site_facebook", fallback="正在解析 Facebook 頁面...")
             c_req = get_curl_cffi_requests()
-            resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"User-Agent": ydl_opts["http_headers"]["User-Agent"], "Referer": url})
+            resp = c_req.get(url, impersonate="chrome110", timeout=20, headers=_make_ytdlp_http_headers(referer=url, user_agent=ydl_opts["http_headers"]["User-Agent"]))
             candidates = _extract_facebook_media_candidates(resp.text)
             graphql_payload = _extract_facebook_graphql_payload(resp.text)
             if graphql_payload:
