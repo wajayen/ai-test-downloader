@@ -69,8 +69,8 @@ function Split-ErrorEntries {
 }
 
 $currentBuildId = Get-CurrentBuildId -Path $sourceFile
-$startedBuilds = Get-LatestStartedBuilds -Path $activityLog
-$latestStartedBuild = if ($startedBuilds.Count -gt 0) { $startedBuilds[-1] } else { '' }
+$startedBuilds = @(Get-LatestStartedBuilds -Path $activityLog)
+$latestStartedBuild = if ($startedBuilds.Count -gt 0) { $startedBuilds[$startedBuilds.Count - 1] } else { '' }
 $entries = Split-ErrorEntries -Path $errorLog
 $latestStartedErrors = @()
 if ($latestStartedBuild) {

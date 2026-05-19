@@ -36,6 +36,22 @@ function Sync-BundledBinary {
     if (-not (Test-Path -LiteralPath $SourcePath)) {
         return
     }
+    if (Test-Path -LiteralPath $DestinationPath) {
+        $sourceItem = Get-Item -LiteralPath $SourcePath
+        $destinationItem = Get-Item -LiteralPath $DestinationPath
+        try {
+            $sourceHash = (Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash
+            $destinationHash = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash
+            if ($sourceHash -eq $destinationHash) {
+                return
+            }
+        } catch {
+            Write-Verbose ("Unable to compare hashes for '{0}' and '{1}': {2}" -f $SourcePath, $DestinationPath, $_.Exception.Message)
+            if ($sourceItem.LastWriteTimeUtc -le $destinationItem.LastWriteTimeUtc) {
+                return
+            }
+        }
+    }
     try {
         Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
     } catch {
