@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260519-2930"
+APP_BUILD = "20260520-2940"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -247,6 +247,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg direct audio finished",
     "yt-dlp native hls fallback started",
     "yt-dlp native hls fallback finished",
+    "resume low speed reanalysis requested",
     "missav parser retry recovered",
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
@@ -1371,8 +1372,76 @@ def _extract_missav_media_candidates(page_html):
     }
 
 
+def _response_header_value(headers, name, default=""):
+    if not headers or not name:
+        return default
+    try:
+        value = headers.get(name)
+        if value is not None:
+            return value
+    except Exception:
+        pass
+    wanted = str(name).lower()
+    try:
+        items = headers.items()
+    except Exception:
+        return default
+    for key, value in items:
+        if str(key).lower() == wanted:
+            return value
+    return default
+
+
+def _http_response_log_fields(resp, prefix=""):
+    response_text = str(getattr(resp, "text", "") or "")
+    key_prefix = str(prefix or "")
+    response_headers = getattr(resp, "headers", {}) or {}
+    return {
+        f"{key_prefix}status": getattr(resp, "status_code", None),
+        f"{key_prefix}final_url": str(getattr(resp, "url", "") or ""),
+        f"{key_prefix}content_type": str(_response_header_value(response_headers, "Content-Type")),
+        f"{key_prefix}html_size": len(response_text),
+    }
+
+
+def _missav_alternate_page_urls(url, site_root):
+    alternates = []
+    normalized_url = _normalize_download_url(url) or str(url or "")
+    if normalized_url:
+        alternates.append(normalized_url)
+    try:
+        parsed = urllib.parse.urlsplit(normalized_url)
+    except Exception:
+        return alternates
+    path = parsed.path or ""
+    clean_path = path.lstrip("/")
+    if not clean_path:
+        return alternates
+    root = str(site_root or f"{parsed.scheme}://{parsed.netloc}").rstrip("/")
+    localized_candidates = []
+    dm_match = re.match(r"^dm\d+/(.+)$", clean_path, flags=re.IGNORECASE)
+    if dm_match:
+        stripped_path = dm_match.group(1).strip("/")
+        if stripped_path:
+            localized_candidates.append(stripped_path)
+    if not re.match(r"^(?:en|ja|ko|zh)(?:/|$)", clean_path, flags=re.IGNORECASE):
+        localized_candidates.append("en/" + clean_path)
+        if dm_match:
+            stripped_path = dm_match.group(1).strip("/")
+            if stripped_path:
+                localized_candidates.append("en/" + stripped_path)
+    if not re.match(r"^dm\d+/", clean_path, flags=re.IGNORECASE):
+        localized_candidates.extend(f"dm{suffix}/{clean_path}" for suffix in ("39", "85", "58", "55", "45", "43", "41", "31", "22"))
+    for candidate_path in localized_candidates:
+        candidate = root + "/" + candidate_path
+        if candidate not in alternates:
+            alternates.append(candidate)
+    return alternates
+
+
 def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=None):
     headers = _make_site_root_headers(site_root)
+    headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     headers["Accept-Language"] = "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=headers)
     media_candidates = _extract_missav_media_candidates(resp.text)
@@ -1381,49 +1450,48 @@ def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=Non
     if candidates or direct_media_candidates:
         return resp, media_candidates, candidates, direct_media_candidates
 
-    original_html = resp.text or ""
     retry_headers = [
         _make_site_root_headers(site_root),
         _make_ytdlp_http_headers(referer=site_root + "/"),
         _make_browser_page_headers(referer=url, origin=site_root),
     ]
     for retry_header in retry_headers:
+        retry_header["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         retry_header["Accept-Language"] = "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     retry_error = None
-    for retry_index, retry_header in enumerate(retry_headers, start=1):
-        try:
-            retry_resp = c_req.get(url, impersonate="chrome120", timeout=25, headers=retry_header)
-            retry_text = retry_resp.text or ""
-            retry_candidates = _extract_missav_media_candidates(retry_text)
-            retry_manifests = retry_candidates.get("manifests") or []
-            retry_direct = retry_candidates.get("direct_media") or []
-            if retry_manifests or retry_direct:
-                write_error_log(
-                    "missav parser retry recovered",
-                    Exception("MissAV parser recovered after refetch"),
-                    item_id=item_id,
-                    url=url,
-                    retry_index=retry_index,
-                    initial_status=getattr(resp, "status_code", None),
-                    retry_status=getattr(retry_resp, "status_code", None),
-                    retry_final_url=str(getattr(retry_resp, "url", "") or ""),
-                    original_html_size=len(original_html),
-                    retry_html_size=len(retry_text),
-                    manifest_count=len(retry_manifests),
-                    direct_count=len(retry_direct),
-                )
-                return retry_resp, retry_candidates, retry_manifests, retry_direct
-        except Exception as retry_exc:
-            retry_error = retry_exc
+    retry_urls = _missav_alternate_page_urls(url, site_root)
+    for retry_index, retry_url in enumerate(retry_urls, start=1):
+        for header_index, retry_header in enumerate(retry_headers, start=1):
+            try:
+                retry_resp = c_req.get(retry_url, impersonate="chrome120", timeout=25, headers=retry_header)
+                retry_text = retry_resp.text or ""
+                retry_candidates = _extract_missav_media_candidates(retry_text)
+                retry_manifests = retry_candidates.get("manifests") or []
+                retry_direct = retry_candidates.get("direct_media") or []
+                if retry_manifests or retry_direct:
+                    write_error_log(
+                        "missav parser retry recovered",
+                        Exception("MissAV parser recovered after refetch"),
+                        item_id=item_id,
+                        url=url,
+                        retry_url=retry_url,
+                        retry_index=retry_index,
+                        header_index=header_index,
+                        **_http_response_log_fields(resp, "initial_"),
+                        **_http_response_log_fields(retry_resp, "retry_"),
+                        manifest_count=len(retry_manifests),
+                        direct_count=len(retry_direct),
+                    )
+                    return retry_resp, retry_candidates, retry_manifests, retry_direct
+            except Exception as retry_exc:
+                retry_error = retry_exc
     if retry_error is not None:
         write_error_log(
             "missav parser retry failed",
             retry_error,
             item_id=item_id,
             url=url,
-            initial_status=getattr(resp, "status_code", None),
-            initial_final_url=str(getattr(resp, "url", "") or ""),
-            original_html_size=len(original_html),
+            **_http_response_log_fields(resp, "initial_"),
         )
     return resp, media_candidates, candidates, direct_media_candidates
 
@@ -2912,12 +2980,22 @@ def _make_browser_page_headers(referer=None, origin=None, user_agent=DEFAULT_USE
     return headers
 
 
+def _make_hls_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_AGENT):
+    headers = _make_ytdlp_http_headers(referer=referer, origin=origin, user_agent=user_agent)
+    headers["Accept"] = "*/*"
+    headers["Accept-Language"] = "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+    headers["Accept-Encoding"] = "identity"
+    headers["Connection"] = "keep-alive"
+    return headers
+
+
 def _format_ffmpeg_header_lines(headers):
     return "".join(f"{key}: {value}\r\n" for key, value in (headers or {}).items() if value)
 
 
 def _make_range_http_headers(headers=None, range_value="bytes=0-0"):
     range_headers = dict(headers or {})
+    range_headers["Accept-Encoding"] = "identity"
     if range_value:
         range_headers["Range"] = range_value
     return range_headers
@@ -6615,9 +6693,14 @@ class DownloadManagerApp:
             if self._shutdown_started:
                 return None
             try:
-                head_resp = c_req.head(segment_url, impersonate="chrome110", timeout=15, headers=headers)
+                head_resp = c_req.head(
+                    segment_url,
+                    impersonate="chrome110",
+                    timeout=15,
+                    headers=_make_range_http_headers(headers, range_value=None),
+                )
                 if head_resp.status_code < 400:
-                    content_length = head_resp.headers.get("Content-Length") or head_resp.headers.get("content-length")
+                    content_length = _response_header_value(head_resp.headers, "Content-Length")
                     if content_length:
                         return max(int(content_length), 0)
             except Exception:
@@ -6630,10 +6713,10 @@ class DownloadManagerApp:
                     headers=_make_range_http_headers(headers),
                 )
                 if get_resp.status_code < 400:
-                    content_range = get_resp.headers.get("Content-Range") or get_resp.headers.get("content-range")
+                    content_range = _response_header_value(get_resp.headers, "Content-Range")
                     if content_range and "/" in content_range:
                         return max(int(content_range.split("/")[-1]), 0)
-                    content_length = get_resp.headers.get("Content-Length") or get_resp.headers.get("content-length")
+                    content_length = _response_header_value(get_resp.headers, "Content-Length")
                     if content_length:
                         return max(int(content_length), 0)
                 return None
@@ -7536,15 +7619,15 @@ class DownloadManagerApp:
                         if status >= 400:
                             raise Exception(f"HTTP {status}")
                         resp_headers = resp.headers
-                        content_type = (resp_headers.get("Content-Type", "") or "")
-                        accept_ranges = (resp_headers.get("Accept-Ranges", "") or "").lower()
-                        content_range = resp_headers.get("Content-Range", "") or ""
+                        content_type = _response_header_value(resp_headers, "Content-Type")
+                        accept_ranges = str(_response_header_value(resp_headers, "Accept-Ranges")).lower()
+                        content_range = _response_header_value(resp_headers, "Content-Range")
                         if status == 206 or "bytes" in accept_ranges or content_range:
                             range_supported = True
                         if content_range and "/" in content_range:
                             total_size = max(int(content_range.split("/")[-1]), 0)
                         else:
-                            total_size = max(int(resp_headers.get("Content-Length", 0) or 0), 0)
+                            total_size = max(int(_response_header_value(resp_headers, "Content-Length", 0) or 0), 0)
                         try:
                             resp.close()
                         except Exception:
@@ -7567,15 +7650,15 @@ class DownloadManagerApp:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 status = getattr(resp, "status", resp.getcode())
                 resp_headers = resp.headers
-                content_type = (resp_headers.get("Content-Type", "") or "")
-                accept_ranges = (resp_headers.get("Accept-Ranges", "") or "").lower()
-                content_range = resp_headers.get("Content-Range", "") or ""
+                content_type = _response_header_value(resp_headers, "Content-Type")
+                accept_ranges = str(_response_header_value(resp_headers, "Accept-Ranges")).lower()
+                content_range = _response_header_value(resp_headers, "Content-Range")
                 if status == 206 or "bytes" in accept_ranges or content_range:
                     range_supported = True
                 if content_range and "/" in content_range:
                     total_size = max(int(content_range.split("/")[-1]), 0)
                 else:
-                    total_size = max(int(resp_headers.get("Content-Length", 0) or 0), 0)
+                    total_size = max(int(_response_header_value(resp_headers, "Content-Length", 0) or 0), 0)
             return {"total_size": total_size, "range_supported": range_supported, "content_type": content_type}
         except Exception:
             transient_sessions = []
@@ -7583,9 +7666,9 @@ class DownloadManagerApp:
                 req = urllib.request.Request(url, headers=headers, method="HEAD")
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     resp_headers = resp.headers
-                    content_type = (resp_headers.get("Content-Type", "") or "")
-                    accept_ranges = (resp_headers.get("Accept-Ranges", "") or "").lower()
-                    total_size = max(int(resp_headers.get("Content-Length", 0) or 0), 0)
+                    content_type = _response_header_value(resp_headers, "Content-Type")
+                    accept_ranges = str(_response_header_value(resp_headers, "Accept-Ranges")).lower()
+                    total_size = max(int(_response_header_value(resp_headers, "Content-Length", 0) or 0), 0)
                     range_supported = "bytes" in accept_ranges
             except Exception:
                 try:
@@ -7614,9 +7697,9 @@ class DownloadManagerApp:
                             if status >= 400:
                                 raise Exception(f"HTTP {status}")
                             resp_headers = resp.headers
-                            content_type = (resp_headers.get("Content-Type", "") or "")
-                            total_size = max(int(resp_headers.get("Content-Length", 0) or 0), 0)
-                            range_supported = "bytes" in (resp_headers.get("Accept-Ranges", "") or "").lower()
+                            content_type = _response_header_value(resp_headers, "Content-Type")
+                            total_size = max(int(_response_header_value(resp_headers, "Content-Length", 0) or 0), 0)
+                            range_supported = "bytes" in str(_response_header_value(resp_headers, "Accept-Ranges")).lower()
                             try:
                                 resp.close()
                             except Exception:
@@ -8376,6 +8459,17 @@ class DownloadManagerApp:
             if stream_response is None and last_exc is not None:
                 raise last_exc
             stream_iter = stream_response.iter_content(chunk_size=1048576)
+        response_status = None
+        try:
+            if res is not None:
+                response_status = int(getattr(res, "status", 0) or res.getcode() or 0)
+            elif stream_response is not None:
+                response_status = int(getattr(stream_response, "status_code", 0) or 0)
+        except Exception:
+            response_status = None
+        if resume_bytes > 0 and response_status != 206:
+            mode = "wb"
+            resume_bytes = 0
         switched_to_multipart = False
         downloaded = resume_bytes
         start_time = time.time()
@@ -8713,7 +8807,7 @@ class DownloadManagerApp:
             outtmpl=f"{os.path.splitext(temp_out_path)[0]}.%(ext)s",
             concurrent_fragment_downloads=native_options["concurrent_fragment_downloads"],
             format_selector="best",
-            http_headers=_make_ytdlp_http_headers(referer=referer, origin=origin),
+            http_headers=_make_hls_http_headers(referer=referer, origin=origin),
             hls_prefer_native=True,
             hls_use_mpegts=native_options["hls_use_mpegts"],
             socket_timeout=native_options["socket_timeout"],
@@ -9120,7 +9214,7 @@ class DownloadManagerApp:
         duration_box = {}
         media_bps_box = {}
         total_bytes_box = {}
-        manifest_headers = _make_ytdlp_http_headers(referer=referer, origin=origin)
+        manifest_headers = _make_hls_http_headers(referer=referer, origin=origin)
 
         def probe_metadata():
             for candidate in candidate_urls:
@@ -9317,6 +9411,8 @@ class DownloadManagerApp:
                 "error",
                 "-progress",
                 "pipe:1",
+                "-user_agent",
+                DEFAULT_USER_AGENT,
             ]
             cmd += [
                 "-protocol_whitelist",
@@ -10535,7 +10631,7 @@ class DownloadManagerApp:
                 raise last_exc
 
         def _download_manifest_with_generic_ytdlp(target_url, referer=None, origin=None):
-            ydl_opts["http_headers"] = _make_ytdlp_http_headers(referer=referer, origin=origin)
+            ydl_opts["http_headers"] = _make_hls_http_headers(referer=referer, origin=origin)
             ydl_opts["outtmpl"] = {"default": f"{safe_name}.%(ext)s"}
             _run_yt_dlp(target_url)
             if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "DELETED":
@@ -10704,7 +10800,7 @@ class DownloadManagerApp:
                 parsed_ref = urllib.parse.urlparse(referer)
                 if parsed_ref.scheme and parsed_ref.netloc:
                     origin = f"{parsed_ref.scheme}://{parsed_ref.netloc}"
-            ydl_opts["http_headers"] = _make_ytdlp_http_headers(referer=referer, origin=origin)
+            ydl_opts["http_headers"] = _make_hls_http_headers(referer=referer, origin=origin)
             self._log_m3u8_route_selected(task, item_id, url, source_site=forced_m3u8_site)
             _download_manifest_with_site_strategy(
                 url,
@@ -11880,7 +11976,7 @@ class DownloadManagerApp:
                         verify=False,
                     )
                     status_code = int(getattr(probe_resp, "status_code", 0) or 0)
-                    content_type = (probe_resp.headers.get("Content-Type", "") or "").lower()
+                    content_type = str(_response_header_value(getattr(probe_resp, "headers", {}) or {}, "Content-Type")).lower()
                     probe_text = str(getattr(probe_resp, "text", "") or "")[:2048]
                     if (
                         200 <= status_code < 400
@@ -12144,9 +12240,7 @@ class DownloadManagerApp:
                     Exception("MissAV parser found no usable media candidates"),
                     item_id=item_id,
                     url=url,
-                    status_code=getattr(resp, "status_code", None),
-                    final_url=str(getattr(resp, "url", "") or ""),
-                    html_size=len(resp.text or ""),
+                    **_http_response_log_fields(resp),
                     has_next_data="__NEXT_DATA__" in (resp.text or ""),
                     has_playlist_token="playlist" in (resp.text or "").lower(),
                     has_m3u8_token=".m3u8" in (resp.text or "").lower(),
@@ -12398,7 +12492,7 @@ class DownloadManagerApp:
                             stream=True,
                         )
                         probe_status = getattr(probe_resp, "status_code", 0)
-                        probe_content_type = (getattr(probe_resp, "headers", {}) or {}).get("Content-Type", "") or ""
+                        probe_content_type = _response_header_value(getattr(probe_resp, "headers", {}) or {}, "Content-Type")
                         try:
                             probe_resp.close()
                         except Exception:
