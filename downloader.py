@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260520-2940"
+APP_BUILD = "20260520-2950"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -78,8 +78,8 @@ MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {}
 MAX_DOWNLOADS_PER_SOURCE_SITE = {}
 LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
 LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 10
-RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 10.0
-RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 100 * 1024
+RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
+RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 64 * 1024
 MAX_QUEUE_TASKS = 300
 DISK_SPACE_RESERVE_BYTES = 256 * 1024 * 1024
 STATE_PERSIST_INTERVAL_SECONDS = 2.5
@@ -115,17 +115,17 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "xiaoyakankan": 15.0,
     "jable": 15.0,
 }
-YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 10
+YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 12
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "99itv": 14,
     "777tv": 14,
     "18jav": 18,
-    "gimy": 18,
+    "gimy": 24,
     "hohoj": 14,
     "jable": 14,
-    "missav": 18,
-    "nnyy": 18,
-    "movieffm": 18,
+    "missav": 24,
+    "nnyy": 20,
+    "movieffm": 24,
     "xiaoyakankan": 14,
 }
 YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
@@ -135,17 +135,17 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "gimy": True,
     "hohoj": False,
     "jable": False,
-    "missav": False,
+    "missav": True,
     "nnyy": False,
     "xiaoyakankan": False,
 }
-YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 10
+YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 12
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "18jav": 12,
-    "gimy": 14,
+    "gimy": 20,
     "hohoj": 12,
-    "missav": 16,
-    "movieffm": 16,
+    "missav": 24,
+    "movieffm": 20,
     "mixdrop": 14,
     "njavtv": 14,
     "99itv": 12,
@@ -178,7 +178,7 @@ YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
     "18av",
     "hohoj",
 ))
-NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv", "missav"))
+NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv"))
 NATIVE_HLS_NEVER_SITES = frozenset(("njavtv", "3kor"))
 NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "18av": ("streamfastpro",),
@@ -241,6 +241,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "single instance lock recovered after retry",
     "m3u8 route selected",
     "preferred native hls route selected",
+    "ffmpeg terminate requested",
     "ffmpeg download started",
     "ffmpeg download finished",
     "ffmpeg direct audio started",
@@ -284,6 +285,11 @@ FORCED_M3U8_SITE_RULES = {
         ),
         "origin": "https://www.movieffm.net",
         "referer": "https://www.movieffm.net/",
+    },
+    "missav": {
+        "hosts": (),
+        "origin": "https://missav.ws",
+        "referer": "https://missav.ws/",
     },
     "njavtv": {
         "hosts": ("surrit.com",),
@@ -6265,6 +6271,12 @@ class DownloadManagerApp:
         if explicit_output_path:
             path = explicit_output_path
             root, ext = os.path.splitext(path)
+            if (
+                _task_source_site_name(task) in ("gimy", "movieffm", "missav", "njavtv", "xiaoyakankan", "99itv")
+                and self._has_nonempty_file(path)
+                and str(_task_field_value(task, "state", "") or "") != "FINISHED"
+            ):
+                return True
             candidate_paths = [f"{path}.resume", f"{path}.merged", f"{path}.progress.json"]
             if ext:
                 candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}", f"{root}.part.progress.json", f"{root}.progress.json"])
@@ -6918,6 +6930,29 @@ class DownloadManagerApp:
             candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
         return any(self._has_nonempty_file(candidate_path) or os.path.exists(candidate_path) for candidate_path in candidate_paths)
 
+    def _find_resume_artifact_base_by_source_keys(self, resume_keys, ext="mp4"):
+        normalized_keys = {
+            _normalize_download_url(candidate)
+            for candidate in (resume_keys or [])
+            if _normalize_download_url(candidate)
+        }
+        if not normalized_keys:
+            return ""
+        normalized_ext = str(ext or "mp4").lstrip(".") or "mp4"
+        progress_pattern = os.path.join(tempfile.gettempdir(), f"downloader_resume_*.{normalized_ext}.progress.json")
+        for progress_path in glob.glob(progress_pattern):
+            try:
+                progress_info = self._load_resume_progress_info(progress_path)
+                stored_source = _normalize_download_url(progress_info.get("source_url", ""))
+                if stored_source not in normalized_keys and not self._resume_progress_matches(progress_info, list(normalized_keys), progress_path):
+                    continue
+                base_path = progress_path[: -len(".progress.json")]
+                if self._has_resume_artifact_family(base_path):
+                    return base_path
+            except Exception:
+                continue
+        return ""
+
     def _resolve_resume_artifact_base(self, task, url, ext="mp4", save_dir=None, fallback_name="Video"):
         explicit_temp_path = str(_task_field_value(task, "temp_filename", "") or "").strip()
         explicit_output_path = str(_task_field_value(task, "filename", "") or "").strip()
@@ -6952,6 +6987,9 @@ class DownloadManagerApp:
             legacy_base = self._get_stable_resume_base(url, ext=ext, resume_key=legacy_key)
             if legacy_base != primary_base and self._has_resume_artifact_family(legacy_base):
                 return legacy_base, primary_key, resume_keys
+        discovered_base = self._find_resume_artifact_base_by_source_keys(resume_keys, ext=ext)
+        if discovered_base and discovered_base != primary_base:
+            return discovered_base, primary_key, resume_keys
         return primary_base, primary_key, resume_keys
 
     def _probe_media_duration_seconds(self, path):
@@ -8827,8 +8865,13 @@ class DownloadManagerApp:
             hls_use_mpegts=ydl_opts["hls_use_mpegts"],
         )
         info = None
+        pre_existing_output = self._has_nonempty_file(out_path)
         with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if _looks_like_manifest_url(url) and _task_source_site_name(task) in YTDLP_DIRECT_MANIFEST_EXTRACT_SITES:
+            if (
+                _looks_like_manifest_url(url)
+                and _task_source_site_name(task) in YTDLP_DIRECT_MANIFEST_EXTRACT_SITES
+                and _task_source_site_name(task) != "missav"
+            ):
                 info = ydl.extract_info(url, download=True)
             elif _looks_like_manifest_url(url):
                 protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
@@ -8866,7 +8909,7 @@ class DownloadManagerApp:
                 if final_size < 64 * 1024 * 1024 or final_duration <= 0.0:
                     expected_duration = self._get_m3u8_duration(
                         url,
-                        headers={"Referer": referer, "Origin": origin},
+                        headers=_make_hls_http_headers(referer=referer, origin=origin),
                     )
             except Exception:
                 expected_duration = 0.0
@@ -8884,8 +8927,12 @@ class DownloadManagerApp:
                     size=final_size,
                     duration=final_duration,
                     expected_duration=expected_duration,
+                    pre_existing_output=pre_existing_output,
                 )
-                self._remove_artifact_paths(final_output_path, temp_out_path, resume_out_path, merged_out_path, progress_path)
+                if pre_existing_output:
+                    self._remove_artifact_paths(temp_out_path, resume_out_path, merged_out_path, progress_path)
+                else:
+                    self._remove_artifact_paths(final_output_path, temp_out_path, resume_out_path, merged_out_path, progress_path)
                 raise artifact_exc
         if self._has_nonempty_file(final_output_path):
             self._mark_task_finished(item_id)
@@ -9164,7 +9211,7 @@ class DownloadManagerApp:
                     return detail_rebuild
             return None
 
-        if _should_prefer_native_hls(url, task) and not _native_fallback_done:
+        if _should_prefer_native_hls(url, task) and source_site != "missav" and not _native_fallback_done:
             write_error_log(
                 "preferred native hls route selected",
                 Exception("preferred native hls route selected"),
@@ -9395,6 +9442,8 @@ class DownloadManagerApp:
                 total_duration=total_duration,
                 total_bytes=total_bytes,
                 average_media_bps=average_media_bps,
+                referer=referer,
+                origin=origin,
                 **self._build_ffmpeg_runtime_fields(
                     ffmpeg_path,
                     retry_count=_unexpected_retry_count,
@@ -9414,6 +9463,7 @@ class DownloadManagerApp:
                 "-user_agent",
                 DEFAULT_USER_AGENT,
             ]
+            use_fast_hls_http = _task_source_site_name(task) in ("missav", "njavtv", "movieffm")
             cmd += [
                 "-protocol_whitelist",
                 "file,http,https,tcp,tls,crypto,data",
@@ -9424,11 +9474,15 @@ class DownloadManagerApp:
                 "-rw_timeout",
                 FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS,
                 "-http_persistent",
-                "0",
+                "1" if use_fast_hls_http else "0",
                 "-headers",
                 headers,
             ]
-            if _task_source_site_name(task) in ("missav", "njavtv", "movieffm"):
+            if use_fast_hls_http:
+                cmd += ["-http_multiple", "1"]
+            if referer:
+                cmd += ["-referer", referer]
+            if use_fast_hls_http:
                 cmd += [
                     "-extension_picky",
                     "0",
@@ -10384,6 +10438,10 @@ class DownloadManagerApp:
 
     def _download_with_cached_resolved_link(self, task, item_id, source_url, cached_resolved_url, save_dir, use_impersonate, is_mp3):
         self._set_task_parse_ui(item_id, message="使用已記錄下載連結續傳...")
+        normalized_source_url = _normalize_download_url(source_url)
+        if normalized_source_url and not self._get_task_source_page(task, fallback_url=""):
+            _set_task_aux_fields(task, source_page=normalized_source_url)
+            self._update_task_state_entry(task, source_page=normalized_source_url)
         if _task_source_site_name(task) == "99itv":
             source_page_url = self._get_task_source_page(task, fallback_url=source_url)
             parsed_source_page = urllib.parse.urlparse(source_page_url or "")
@@ -10795,7 +10853,7 @@ class DownloadManagerApp:
             site_config = FORCED_M3U8_SITE_RULES[forced_m3u8_site]
             referer = site_config["referer"]
             origin = site_config["origin"]
-            if forced_m3u8_site == "xiaoyakankan":
+            if forced_m3u8_site in ("missav", "xiaoyakankan"):
                 referer = self._get_task_source_page(task, fallback_url=referer) or referer
                 parsed_ref = urllib.parse.urlparse(referer)
                 if parsed_ref.scheme and parsed_ref.netloc:
