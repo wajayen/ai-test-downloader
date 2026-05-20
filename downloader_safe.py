@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260520-2950"
+APP_BUILD = "20260520-2960"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -101,6 +101,19 @@ FFMPEG_HLS_RECONNECT_OPTIONS = (
     "-reconnect_max_retries", "20",
 )
 FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS = "15000000"
+FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
+    "18jav",
+    "777tv",
+    "99itv",
+    "goodav17",
+    "hohoj",
+    "jable",
+    "missav",
+    "movieffm",
+    "njavtv",
+    "nnyy",
+    "xiaoyakankan",
+))
 FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
@@ -117,16 +130,16 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
 }
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS = 12
 YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
-    "99itv": 14,
-    "777tv": 14,
-    "18jav": 18,
-    "gimy": 24,
-    "hohoj": 14,
-    "jable": 14,
+    "99itv": 18,
+    "777tv": 18,
+    "18jav": 24,
+    "gimy": 32,
+    "hohoj": 18,
+    "jable": 18,
     "missav": 24,
-    "nnyy": 20,
-    "movieffm": 24,
-    "xiaoyakankan": 14,
+    "nnyy": 24,
+    "movieffm": 32,
+    "xiaoyakankan": 18,
 }
 YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "99itv": False,
@@ -141,30 +154,63 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
 }
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 12
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
-    "18jav": 12,
-    "gimy": 20,
-    "hohoj": 12,
+    "18jav": 18,
+    "gimy": 24,
+    "hohoj": 18,
     "missav": 24,
-    "movieffm": 20,
-    "mixdrop": 14,
-    "njavtv": 14,
-    "99itv": 12,
-    "nnyy": 12,
+    "movieffm": 24,
+    "mixdrop": 16,
+    "njavtv": 18,
+    "99itv": 18,
+    "nnyy": 18,
 }
-HTTP_MULTIPART_TRIGGER_SECONDS = 0.35
+YTDLP_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
+YTDLP_HTTP_CHUNK_SIZE_BY_SITE = {
+    "gimy": 10 * 1024 * 1024,
+    "goodav17": 10 * 1024 * 1024,
+    "movieffm": 10 * 1024 * 1024,
+    "mixdrop": 10 * 1024 * 1024,
+    "missav": 10 * 1024 * 1024,
+}
+YTDLP_THROTTLED_RATE_BPS = 256 * 1024
+YTDLP_THROTTLED_RATE_BPS_BY_SITE = {
+    "gimy": 256 * 1024,
+    "goodav17": 256 * 1024,
+    "missav": 256 * 1024,
+    "movieffm": 256 * 1024,
+}
+HTTP_MULTIPART_TRIGGER_SECONDS = 0.15
 HTTP_MULTIPART_TRIGGER_SPEED_BPS = 6 * 1024 * 1024
 HTTP_MULTIPART_MIN_REMAINING_BYTES = 1 * 1024 * 1024
-HTTP_MULTIPART_PART_COUNT_DEFAULT = 14
+HTTP_MULTIPART_PART_COUNT_DEFAULT = 16
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
+    "18jav": 16,
     "anime1": 4,
     "goodav17": 16,
+    "jable": 16,
     "mixdrop": 16,
     "movieffm": 16,
     "missav": 14,
+    "njavtv": 16,
     "avjoy": 14,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
-HTTP_MULTIPART_IMMEDIATE_SITES = frozenset(("movieffm", "mixdrop", "missav", "avjoy", "goodav17"))
+HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
+    "18jav",
+    "777tv",
+    "99itv",
+    "avjoy",
+    "gimy",
+    "goodav17",
+    "hohoj",
+    "jable",
+    "missav",
+    "mixdrop",
+    "movieffm",
+    "njavtv",
+    "nnyy",
+    "xiaoyakankan",
+))
 YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
     "99itv",
     "777tv",
@@ -246,6 +292,9 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg download finished",
     "ffmpeg direct audio started",
     "ffmpeg direct audio finished",
+    "m3u8 total bytes invalidated",
+    "download concurrency limit changed",
+    "http multipart download started",
     "yt-dlp native hls fallback started",
     "yt-dlp native hls fallback finished",
     "resume low speed reanalysis requested",
@@ -3029,6 +3078,8 @@ def _build_ytdlp_download_opts(
     hls_prefer_native=False,
     hls_use_mpegts=None,
     socket_timeout=None,
+    http_chunk_size=None,
+    throttled_rate_bps=None,
 ):
     opts = {
         "color": "never",
@@ -3066,7 +3117,31 @@ def _build_ytdlp_download_opts(
         opts["hls_use_mpegts"] = bool(hls_use_mpegts)
     if socket_timeout is not None:
         opts["socket_timeout"] = float(socket_timeout)
+    if http_chunk_size:
+        opts["http_chunk_size"] = int(http_chunk_size)
+    if throttled_rate_bps:
+        opts["throttledratelimit"] = int(throttled_rate_bps)
     return opts
+
+
+def _site_tuning_value(site, values_by_site, default_value):
+    return values_by_site.get((site or "").strip().lower(), default_value)
+
+
+def _ytdlp_native_concurrency_for_site(site):
+    return int(_site_tuning_value(site, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS))
+
+
+def _ytdlp_generic_concurrency_for_site(site):
+    return int(_site_tuning_value(site, YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE, YTDLP_GENERIC_CONCURRENT_FRAGMENTS))
+
+
+def _ytdlp_http_chunk_size_for_site(site):
+    return int(_site_tuning_value(site, YTDLP_HTTP_CHUNK_SIZE_BY_SITE, YTDLP_HTTP_CHUNK_SIZE))
+
+
+def _ytdlp_throttled_rate_for_site(site):
+    return int(_site_tuning_value(site, YTDLP_THROTTLED_RATE_BPS_BY_SITE, YTDLP_THROTTLED_RATE_BPS))
 
 
 class UIThrottler:
@@ -3691,6 +3766,7 @@ class DownloadManagerApp:
         self.root.rowconfigure(2, weight=1)
         self.tasks = {}
         self._m3u8_total_bytes_cache = {}
+        self._last_reported_domain_limit = None
         self.config = load_config()
         global CURRENT_LANG
         CURRENT_LANG = detect_default_language()
@@ -8075,14 +8151,49 @@ class DownloadManagerApp:
             return MAX_DOWNLOADS_PER_DOMAIN
         if len(active_tasks) >= LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS:
             return LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS
+        measured_speeds = []
         for task in active_tasks:
             try:
                 speed_bps = max(float(_task_field_value(task, "_last_speed_bps", 0.0) or 0.0), 0.0)
             except Exception:
                 speed_bps = 0.0
-            if speed_bps <= 0 or speed_bps >= LOW_SPEED_CONCURRENCY_THRESHOLD_BPS:
-                return MAX_DOWNLOADS_PER_DOMAIN
-        return LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS
+            if speed_bps > 0:
+                measured_speeds.append(speed_bps)
+        if not measured_speeds:
+            return MAX_DOWNLOADS_PER_DOMAIN
+        if all(speed_bps < LOW_SPEED_CONCURRENCY_THRESHOLD_BPS for speed_bps in measured_speeds):
+            return LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS
+        return MAX_DOWNLOADS_PER_DOMAIN
+
+    def _source_download_limits(self, source_site, domain_limit):
+        site = (source_site or "").strip().lower()
+        source_page_limit = int(MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE.get(site, MAX_DOWNLOADS_PER_SOURCE_PAGE))
+        source_site_limit = int(MAX_DOWNLOADS_PER_SOURCE_SITE.get(site, MAX_DOWNLOADS_PER_DOMAIN))
+        if source_page_limit == MAX_DOWNLOADS_PER_SOURCE_PAGE:
+            source_page_limit = domain_limit
+        if source_site_limit == MAX_DOWNLOADS_PER_DOMAIN:
+            source_site_limit = domain_limit
+        return source_page_limit, source_site_limit
+
+    def _log_domain_limit_change(self, domain_limit, active_count, queued_count):
+        try:
+            normalized_limit = int(domain_limit)
+        except Exception:
+            return
+        if self._last_reported_domain_limit == normalized_limit:
+            return
+        previous_limit = self._last_reported_domain_limit
+        self._last_reported_domain_limit = normalized_limit
+        write_error_log(
+            "download concurrency limit changed",
+            Exception("download concurrency limit changed"),
+            previous_limit=previous_limit,
+            domain_limit=normalized_limit,
+            active_count=active_count,
+            queued_count=queued_count,
+            low_speed_threshold_bps=LOW_SPEED_CONCURRENCY_THRESHOLD_BPS,
+            low_speed_max_downloads=LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS,
+        )
 
     def _make_yt_dlp_progress_hook(self, task, item_id, save_dir):
         last_ui_update = 0.0
@@ -8630,6 +8741,18 @@ class DownloadManagerApp:
                     part_count = min(part_count, 12)
                 part_count = min(max(2, part_count), 16)
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
+                write_error_log(
+                    "http multipart download started",
+                    Exception("http multipart download started"),
+                    url=url,
+                    item_id=item_id,
+                    source_site=source_site,
+                    part_count=part_count,
+                    remaining_size=remaining_size,
+                    part_size=part_size,
+                    resume_bytes=resume_bytes,
+                    total_size=total_size,
+                )
                 futures = []
                 executor = None
                 try:
@@ -8820,12 +8943,7 @@ class DownloadManagerApp:
                     YTDLP_HLS_NATIVE_SOCKET_TIMEOUT,
                 )
             ),
-            "concurrent_fragment_downloads": int(
-                YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE.get(
-                    source_site,
-                    YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS,
-                )
-            ),
+            "concurrent_fragment_downloads": _ytdlp_native_concurrency_for_site(source_site),
             "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(source_site, True)),
         }
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Video" or "").strip()
@@ -8849,6 +8967,7 @@ class DownloadManagerApp:
             hls_prefer_native=True,
             hls_use_mpegts=native_options["hls_use_mpegts"],
             socket_timeout=native_options["socket_timeout"],
+            throttled_rate_bps=_ytdlp_throttled_rate_for_site(source_site),
         )
         if is_mp3:
             _apply_ytdlp_audio_postprocessing(ydl_opts)
@@ -8862,6 +8981,7 @@ class DownloadManagerApp:
             origin=origin,
             socket_timeout=native_options["socket_timeout"],
             concurrent_fragment_downloads=ydl_opts["concurrent_fragment_downloads"],
+            throttled_rate_bps=ydl_opts.get("throttledratelimit"),
             hls_use_mpegts=ydl_opts["hls_use_mpegts"],
         )
         info = None
@@ -9463,7 +9583,7 @@ class DownloadManagerApp:
                 "-user_agent",
                 DEFAULT_USER_AGENT,
             ]
-            use_fast_hls_http = _task_source_site_name(task) in ("missav", "njavtv", "movieffm")
+            use_fast_hls_http = _task_source_site_name(task) in FFMPEG_FAST_HLS_HTTP_SITES
             cmd += [
                 "-protocol_whitelist",
                 "file,http,https,tcp,tls,crypto,data",
@@ -9479,7 +9599,16 @@ class DownloadManagerApp:
                 headers,
             ]
             if use_fast_hls_http:
-                cmd += ["-http_multiple", "1"]
+                cmd += [
+                    "-http_multiple",
+                    "1",
+                    "-http_seekable",
+                    "0",
+                    "-multiple_requests",
+                    "1",
+                    "-seg_max_retry",
+                    "3",
+                ]
             if referer:
                 cmd += ["-referer", referer]
             if use_fast_hls_http:
@@ -10300,6 +10429,7 @@ class DownloadManagerApp:
                     source_site_counts[source_site] = source_site_counts.get(source_site, 0) + 1
             elif self._is_queued_state(str(_task_field_value(task, "state", "") or "")):
                 queued_items.append(item_id)
+        self._log_domain_limit_change(domain_limit, sum(domain_counts.values()), len(queued_items))
         for item_id in queued_items:
             task = self.tasks[item_id]
             domain, source_page = (
@@ -10307,13 +10437,7 @@ class DownloadManagerApp:
                 self._get_task_source_page(task),
             )
             source_site = _task_source_site_name(task)
-            source_site = _task_source_site_name(task)
-            source_page_limit = int(MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE.get(source_site, MAX_DOWNLOADS_PER_SOURCE_PAGE))
-            source_site_limit = int(MAX_DOWNLOADS_PER_SOURCE_SITE.get(source_site, MAX_DOWNLOADS_PER_DOMAIN))
-            if source_page_limit == MAX_DOWNLOADS_PER_SOURCE_PAGE:
-                source_page_limit = domain_limit
-            if source_site_limit == MAX_DOWNLOADS_PER_DOMAIN:
-                source_site_limit = domain_limit
+            source_page_limit, source_site_limit = self._source_download_limits(source_site, domain_limit)
             if domain_counts.get(domain, 0) >= domain_limit:
                 continue
             if source_page and source_page_counts.get(source_page, 0) >= source_page_limit:
@@ -10646,12 +10770,11 @@ class DownloadManagerApp:
             home_dir=save_dir,
             temp_dir=tempfile.gettempdir(),
             outtmpl="%(title)s.%(ext)s",
-            concurrent_fragment_downloads=YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE.get(
-                _task_source_site_name(task),
-                YTDLP_GENERIC_CONCURRENT_FRAGMENTS,
-            ),
+            concurrent_fragment_downloads=_ytdlp_generic_concurrency_for_site(_task_source_site_name(task)),
             http_headers=_make_ytdlp_http_headers(),
             extractor_args={"youtube": {"player_client": ["android", "web"]}},
+            http_chunk_size=_ytdlp_http_chunk_size_for_site(_task_source_site_name(task)),
+            throttled_rate_bps=_ytdlp_throttled_rate_for_site(_task_source_site_name(task)),
         )
         if is_mp3:
             _apply_ytdlp_audio_postprocessing(ydl_opts)
