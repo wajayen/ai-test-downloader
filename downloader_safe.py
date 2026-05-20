@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260520-2960"
+APP_BUILD = "20260520-2970"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -182,17 +182,19 @@ YTDLP_THROTTLED_RATE_BPS_BY_SITE = {
 HTTP_MULTIPART_TRIGGER_SECONDS = 0.15
 HTTP_MULTIPART_TRIGGER_SPEED_BPS = 6 * 1024 * 1024
 HTTP_MULTIPART_MIN_REMAINING_BYTES = 1 * 1024 * 1024
-HTTP_MULTIPART_PART_COUNT_DEFAULT = 16
+HTTP_MULTIPART_PART_COUNT_DEFAULT = 20
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
-    "18jav": 16,
+    "18jav": 20,
     "anime1": 4,
-    "goodav17": 16,
-    "jable": 16,
-    "mixdrop": 16,
-    "movieffm": 16,
-    "missav": 14,
-    "njavtv": 16,
-    "avjoy": 14,
+    "avjoy": 6,
+    "gimy": 24,
+    "goodav17": 20,
+    "hohoj": 20,
+    "jable": 20,
+    "mixdrop": 18,
+    "movieffm": 24,
+    "missav": 20,
+    "njavtv": 20,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
@@ -242,7 +244,7 @@ M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
     "gimy": 4,
     "movieffm": 4,
 }
-M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES = frozenset(("gimy", "movieffm"))
+M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES = frozenset(("gimy", "missav", "movieffm"))
 FFMPEG_PROGRESS_IO_POLL_INTERVAL_SECONDS = 2.5
 FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 2.0
 FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA = 2 * 1024 * 1024
@@ -295,6 +297,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "m3u8 total bytes invalidated",
     "download concurrency limit changed",
     "http multipart download started",
+    "direct media fallback retry",
+    "avjoy media refresh retry",
     "yt-dlp native hls fallback started",
     "yt-dlp native hls fallback finished",
     "resume low speed reanalysis requested",
@@ -3306,7 +3310,19 @@ def load_state():
         raw = _load_json_with_backup(STATE_FILE, [])
         if not isinstance(raw, list):
             return []
-        return [_normalize_state_entry(entry) for entry in raw]
+        entries = [_normalize_state_entry(entry) for entry in raw]
+        seen_temp_paths = set()
+        for entry in entries:
+            temp_filename = str(entry.get("temp_filename", "") or "").strip()
+            if not temp_filename:
+                continue
+            temp_key = os.path.normcase(os.path.abspath(temp_filename))
+            if temp_key in seen_temp_paths:
+                entry["temp_filename"] = ""
+                entry["resume_requested"] = False
+                continue
+            seen_temp_paths.add(temp_key)
+        return entries
     except Exception:
         return []
 
@@ -3767,6 +3783,8 @@ class DownloadManagerApp:
         self.tasks = {}
         self._m3u8_total_bytes_cache = {}
         self._last_reported_domain_limit = None
+        self._resume_artifact_locks = {}
+        self._resume_artifact_locks_guard = threading.Lock()
         self.config = load_config()
         global CURRENT_LANG
         CURRENT_LANG = detect_default_language()
@@ -6328,21 +6346,35 @@ class DownloadManagerApp:
     def _has_resume_artifact_state(self, task, save_dir=None, is_mp3=None):
         if not task:
             return False
-        if bool(_task_field_value(task, "resume_requested", False)):
-            return True
-        if str(_task_field_value(task, "state", "") or "") in PAUSED_TASK_STATES:
-            return True
+        effective_is_mp3 = bool(_task_field_value(task, "is_mp3", False)) if is_mp3 is None else bool(is_mp3)
+        effective_save_dir = save_dir or self.save_dir_var.get()
+        ext = "mp3" if effective_is_mp3 else "mp4"
+        source_url = (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or "") or (_normalize_download_url(_task_field_value(task, "url", "")) or "") or self._get_task_source_page(task)
+        resume_keys = []
+        for candidate in (
+            _normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(source_url),
+            self._get_task_source_page(task, fallback_url=source_url),
+            source_url,
+        ):
+            normalized_candidate = _normalize_download_url(candidate)
+            if normalized_candidate and normalized_candidate not in resume_keys:
+                resume_keys.append(normalized_candidate)
+        output_identity_key = self._build_resume_output_identity_key(
+            task,
+            ext=ext,
+            save_dir=effective_save_dir,
+            fallback_name="Audio" if effective_is_mp3 else "Video",
+        )
+        if output_identity_key and output_identity_key not in resume_keys:
+            resume_keys.insert(0, output_identity_key)
         explicit_output_path = str(_task_field_value(task, "filename", "") or "").strip()
         explicit_temp_path = str(_task_field_value(task, "temp_filename", "") or "").strip()
         if explicit_temp_path:
             temp_root, temp_ext = os.path.splitext(explicit_temp_path)
-            candidate_paths = [explicit_temp_path, f"{explicit_temp_path}.resume", f"{explicit_temp_path}.merged", f"{explicit_temp_path}.progress.json"]
+            candidate_paths = [explicit_temp_path, f"{explicit_temp_path}.resume", f"{explicit_temp_path}.merged"]
             if temp_ext:
-                candidate_paths.extend([f"{temp_root}.resume{temp_ext}", f"{temp_root}.merged{temp_ext}", f"{temp_root}.part.progress.json"])
-            if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths):
-                return True
-            progress_info = self._load_resume_progress_info(f"{explicit_temp_path}.progress.json")
-            if max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0 or max(int(progress_info.get("bytes", 0) or 0), 0) > 0:
+                candidate_paths.extend([f"{temp_root}.resume{temp_ext}", f"{temp_root}.merged{temp_ext}"])
+            if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths) and self._resume_artifact_matches_keys(explicit_temp_path, resume_keys):
                 return True
         if explicit_output_path:
             path = explicit_output_path
@@ -6353,20 +6385,13 @@ class DownloadManagerApp:
                 and str(_task_field_value(task, "state", "") or "") != "FINISHED"
             ):
                 return True
-            candidate_paths = [f"{path}.resume", f"{path}.merged", f"{path}.progress.json"]
+            candidate_paths = [f"{path}.resume", f"{path}.merged"]
             if ext:
-                candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}", f"{root}.part.progress.json", f"{root}.progress.json"])
-            if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths):
+                candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
+            if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths) and self._resume_artifact_matches_keys(path, resume_keys):
                 return True
-            progress_info = self._load_resume_progress_info(f"{path}.progress.json")
-            if max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0 or max(int(progress_info.get("bytes", 0) or 0), 0) > 0:
-                return True
-        effective_is_mp3 = bool(_task_field_value(task, "is_mp3", False)) if is_mp3 is None else bool(is_mp3)
-        effective_save_dir = save_dir or self.save_dir_var.get()
-        source_url = (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or "") or (_normalize_download_url(_task_field_value(task, "url", "")) or "") or self._get_task_source_page(task)
         if not source_url or not effective_save_dir:
             return False
-        ext = "mp3" if effective_is_mp3 else "mp4"
         try:
             temp_out_path, _, _ = self._resolve_resume_artifact_base(
                 task,
@@ -6383,13 +6408,9 @@ class DownloadManagerApp:
             f"{temp_root}.resume{temp_ext}",
             f"{temp_root}.merged{temp_ext}",
         )
-        if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths):
+        if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths) and self._resume_artifact_matches_keys(temp_out_path, resume_keys):
             return True
-        progress_info = self._load_resume_progress_info(temp_out_path + ".progress.json")
-        return (
-            max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0
-            or max(int(progress_info.get("bytes", 0) or 0), 0) > 0
-        )
+        return False
 
     def _is_resume_download_active(self, task, save_dir=None, is_mp3=False, include_cached_resolved=False):
         if not task:
@@ -6965,8 +6986,7 @@ class DownloadManagerApp:
 
     def _build_resume_output_identity_key(self, task, ext="mp4", save_dir=None, fallback_name="Video"):
         primary_value = str(_task_field_value(task, "filename") or "").strip()
-        secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
-        preferred_output = primary_value or secondary_value or ""
+        preferred_output = primary_value or ""
         if preferred_output:
             normalized_output = os.path.normcase(os.path.abspath(preferred_output))
             return f"output::{normalized_output}"
@@ -7029,22 +7049,23 @@ class DownloadManagerApp:
                 continue
         return ""
 
+    def _resume_artifact_matches_keys(self, base_path, resume_keys):
+        if not base_path:
+            return False
+        root, ext = os.path.splitext(base_path)
+        media_candidates = [base_path]
+        if ext:
+            media_candidates.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
+        if not any(self._has_nonempty_file(candidate_path) for candidate_path in media_candidates):
+            return False
+        progress_path = str(base_path or "") + ".progress.json"
+        if not os.path.exists(progress_path):
+            return not os.path.basename(str(base_path or "")).lower().startswith("downloader_resume_")
+        progress_info = self._load_resume_progress_info(progress_path)
+        has_identity = bool(progress_info.get("source_url") or progress_info.get("resume_id"))
+        return (not has_identity) or self._resume_progress_matches(progress_info, resume_keys, progress_path)
+
     def _resolve_resume_artifact_base(self, task, url, ext="mp4", save_dir=None, fallback_name="Video"):
-        explicit_temp_path = str(_task_field_value(task, "temp_filename", "") or "").strip()
-        explicit_output_path = str(_task_field_value(task, "filename", "") or "").strip()
-        for explicit_path in (explicit_temp_path, explicit_output_path):
-            if explicit_path and self._has_resume_artifact_family(explicit_path):
-                resume_keys = []
-                for candidate in (
-                    _normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url),
-                    self._get_task_source_page(task, fallback_url=url),
-                    url,
-                ):
-                    normalized_candidate = _normalize_download_url(candidate)
-                    if normalized_candidate and normalized_candidate not in resume_keys:
-                        resume_keys.append(normalized_candidate)
-                primary_key = resume_keys[0] if resume_keys else (_normalize_download_url(url) or str(url or ""))
-                return explicit_path, primary_key, resume_keys
         resume_keys = []
         for candidate in (
             _normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url),
@@ -7058,10 +7079,16 @@ class DownloadManagerApp:
         if output_identity_key and output_identity_key not in resume_keys:
             resume_keys.insert(0, output_identity_key)
         primary_key = resume_keys[0] if resume_keys else (_normalize_download_url(url) or str(url or ""))
+        explicit_temp_path = str(_task_field_value(task, "temp_filename", "") or "").strip()
+        if explicit_temp_path and self._resume_artifact_matches_keys(explicit_temp_path, resume_keys):
+            return explicit_temp_path, primary_key, resume_keys
+        explicit_output_path = str(_task_field_value(task, "filename", "") or "").strip()
+        if explicit_output_path and self._resume_artifact_matches_keys(explicit_output_path, resume_keys):
+            return explicit_output_path, primary_key, resume_keys
         primary_base = self._get_stable_resume_base(url, ext=ext, resume_key=primary_key)
         for legacy_key in resume_keys[1:]:
             legacy_base = self._get_stable_resume_base(url, ext=ext, resume_key=legacy_key)
-            if legacy_base != primary_base and self._has_resume_artifact_family(legacy_base):
+            if legacy_base != primary_base and self._resume_artifact_matches_keys(legacy_base, resume_keys):
                 return legacy_base, primary_key, resume_keys
         discovered_base = self._find_resume_artifact_base_by_source_keys(resume_keys, ext=ext)
         if discovered_base and discovered_base != primary_base:
@@ -7249,7 +7276,27 @@ class DownloadManagerApp:
             except OSError:
                 pass
 
+    def _resume_artifact_lock_for(self, *paths):
+        key_source = next((str(path or "") for path in paths if path), "")
+        key = os.path.abspath(key_source) if key_source else "__resume_artifact__"
+        try:
+            root, ext = os.path.splitext(key)
+            if root.endswith(".resume"):
+                key = root[:-7] + ext
+        except Exception:
+            pass
+        with self._resume_artifact_locks_guard:
+            lock = self._resume_artifact_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._resume_artifact_locks[key] = lock
+            return lock
+
     def _promote_resume_artifact(self, src_path, dst_path):
+        with self._resume_artifact_lock_for(src_path, dst_path):
+            return self._promote_resume_artifact_locked(src_path, dst_path)
+
+    def _promote_resume_artifact_locked(self, src_path, dst_path):
         temp_exists = self._has_nonempty_file(src_path)
         resume_exists = self._has_nonempty_file(dst_path)
         if not resume_exists:
@@ -7369,7 +7416,7 @@ class DownloadManagerApp:
         })
         return best_state
 
-    def _move_file_with_retry(self, src_path, dst_path, attempts=8, delay_seconds=0.5):
+    def _move_file_with_retry(self, src_path, dst_path, attempts=24, delay_seconds=0.5):
         last_error = None
         total_attempts = max(int(attempts or 1), 1)
         for attempt in range(total_attempts):
@@ -7377,6 +7424,13 @@ class DownloadManagerApp:
                 shutil.move(src_path, dst_path)
                 return True
             except PermissionError as exc:
+                last_error = exc
+                if attempt >= total_attempts - 1:
+                    break
+                time.sleep(max(float(delay_seconds or 0.0), 0.0))
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != 32:
+                    raise
                 last_error = exc
                 if attempt >= total_attempts - 1:
                     break
@@ -7423,6 +7477,8 @@ class DownloadManagerApp:
         stored_source = _normalize_download_url(stored_info.get("source_url", ""))
         if stored_source and stored_source in normalized_keys:
             return True
+        if stored_source:
+            return False
         current_resume_id = self._normalize_resume_state_id(progress_path)
         stored_resume_id = str(stored_info.get("resume_id", "") or "")
         return bool(current_resume_id and stored_resume_id and current_resume_id == stored_resume_id)
@@ -7836,11 +7892,15 @@ class DownloadManagerApp:
 
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
         req_headers = _make_range_http_headers(headers, f"bytes={start_byte}-{end_byte}")
+        parsed_download_url = urllib.parse.urlparse(str(url or ""))
+        download_netloc = parsed_download_url.netloc.lower()
         disable_ssl_verify = (
-            "vr.goodav17.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
-            or "ggjav.com" in urllib.parse.urlparse(str(url or "")).netloc.lower()
+            "vr.goodav17.com" in download_netloc
+            or "ggjav.com" in download_netloc
         )
-        if disable_ssl_verify:
+        prefer_curl_transport = disable_ssl_verify or ("avjoy.me" in download_netloc and "media-cdn" in download_netloc)
+        expected_size = max(int(end_byte) - int(start_byte) + 1, 0)
+        if prefer_curl_transport:
             c_req = get_curl_cffi_requests()
             last_exc = None
             candidate_sessions = []
@@ -7854,27 +7914,37 @@ class DownloadManagerApp:
                     continue
             response = None
             try:
-                for candidate_session in candidate_sessions:
-                    try:
-                        candidate_response = candidate_session.get(
-                            url,
-                            headers=req_headers,
-                            timeout=30,
-                            stream=True,
-                            verify=False,
-                        )
-                        status = getattr(candidate_response, "status_code", 0)
-                        if status >= 400:
-                            try:
-                                candidate_response.close()
-                            except Exception:
-                                pass
-                            raise Exception(f"HTTP {status}")
-                        response = candidate_response
-                        last_exc = None
+                for attempt in range(4):
+                    for candidate_session in candidate_sessions:
+                        try:
+                            candidate_response = candidate_session.get(
+                                url,
+                                headers=req_headers,
+                                timeout=30,
+                                stream=True,
+                                verify=False,
+                            )
+                            status = getattr(candidate_response, "status_code", 0)
+                            if status >= 400:
+                                try:
+                                    candidate_response.close()
+                                except Exception:
+                                    pass
+                                raise Exception(f"HTTP {status}")
+                            if expected_size > 0 and status != 206:
+                                try:
+                                    candidate_response.close()
+                                except Exception:
+                                    pass
+                                raise Exception(f"HTTP range request returned {status or 'unknown'}")
+                            response = candidate_response
+                            last_exc = None
+                            break
+                        except Exception as exc:
+                            last_exc = exc
+                    if response is not None or stop_event.is_set() or self._shutdown_started:
                         break
-                    except Exception as exc:
-                        last_exc = exc
+                    time.sleep(min(0.4 * (attempt + 1), 1.5))
                 if response is None and last_exc is not None:
                     raise last_exc
                 with open(part_path, "wb") as f:
@@ -7885,6 +7955,9 @@ class DownloadManagerApp:
                             continue
                         f.write(chunk)
                         progress_box["bytes"] = progress_box["bytes"] + len(chunk)
+                actual_size = self._get_existing_file_size(part_path)
+                if expected_size > 0 and actual_size != expected_size and not stop_event.is_set() and not self._shutdown_started:
+                    raise Exception(f"HTTP range part incomplete: expected {expected_size}, got {actual_size}")
             finally:
                 try:
                     if response is not None:
@@ -7899,6 +7972,9 @@ class DownloadManagerApp:
             return
         req = urllib.request.Request(url, headers=req_headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
+            status = int(getattr(resp, "status", 0) or resp.getcode() or 0)
+            if expected_size > 0 and status != 206:
+                raise Exception(f"HTTP range request returned {status or 'unknown'}")
             with open(part_path, "wb") as f:
                 while not stop_event.is_set() and not self._shutdown_started:
                     chunk = resp.read(1048576)
@@ -7906,6 +7982,9 @@ class DownloadManagerApp:
                         break
                     f.write(chunk)
                     progress_box["bytes"] = progress_box["bytes"] + len(chunk)
+        actual_size = self._get_existing_file_size(part_path)
+        if expected_size > 0 and actual_size != expected_size and not stop_event.is_set() and not self._shutdown_started:
+            raise Exception(f"HTTP range part incomplete: expected {expected_size}, got {actual_size}")
 
     def _download_direct_media_audio_with_ffmpeg(self, item_id, url, save_dir, referer=None, origin=None):
         task = self.tasks.get(item_id, {})
@@ -8560,6 +8639,14 @@ class DownloadManagerApp:
         if total_size > 0 and resume_bytes >= total_size:
             self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
             return
+        immediate_multipart = (
+            not prefer_curl_stream
+            and range_supported
+            and total_size > 0
+            and resume_bytes <= 0
+            and _task_source_site_name(task) in HTTP_MULTIPART_IMMEDIATE_SITES
+            and max(int(total_size or 0), 0) >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
+        )
         mode = "ab" if resume_bytes > 0 else "wb"
         dl_headers = _make_range_http_headers(headers, f"bytes={resume_bytes}-") if resume_bytes > 0 else dict(headers)
         res = None
@@ -8567,47 +8654,52 @@ class DownloadManagerApp:
         stream_response = None
         owned_sessions = []
         try:
+            if immediate_multipart:
+                raise RuntimeError("prefer immediate multipart")
             if prefer_curl_stream or session is not None:
                 raise RuntimeError("prefer curl stream")
             req = urllib.request.Request(url, headers=dl_headers)
             res = urllib.request.urlopen(req, timeout=20)
         except Exception:
-            c_req = get_curl_cffi_requests()
-            last_exc = None
-            candidate_sessions = []
-            if session is not None:
-                candidate_sessions.append(session)
-            for browser in ("chrome110", "chrome120"):
-                try:
-                    candidate_session = c_req.Session(impersonate=browser)
-                    candidate_sessions.append(candidate_session)
-                    owned_sessions.append(candidate_session)
-                except Exception:
-                    continue
-            for candidate_session in candidate_sessions:
-                try:
-                    candidate_response = candidate_session.get(
-                        url,
-                        headers=dl_headers,
-                        timeout=20,
-                        stream=True,
-                        verify=not disable_ssl_verify,
-                    )
-                    status = getattr(candidate_response, "status_code", 0)
-                    if status >= 400:
-                        try:
-                            candidate_response.close()
-                        except Exception:
-                            pass
-                        raise Exception(f"HTTP {status}")
-                    stream_response = candidate_response
-                    last_exc = None
-                    break
-                except Exception as exc:
-                    last_exc = exc
-            if stream_response is None and last_exc is not None:
-                raise last_exc
-            stream_iter = stream_response.iter_content(chunk_size=1048576)
+            if immediate_multipart:
+                stream_iter = None
+            else:
+                c_req = get_curl_cffi_requests()
+                last_exc = None
+                candidate_sessions = []
+                if session is not None:
+                    candidate_sessions.append(session)
+                for browser in ("chrome110", "chrome120"):
+                    try:
+                        candidate_session = c_req.Session(impersonate=browser)
+                        candidate_sessions.append(candidate_session)
+                        owned_sessions.append(candidate_session)
+                    except Exception:
+                        continue
+                for candidate_session in candidate_sessions:
+                    try:
+                        candidate_response = candidate_session.get(
+                            url,
+                            headers=dl_headers,
+                            timeout=20,
+                            stream=True,
+                            verify=not disable_ssl_verify,
+                        )
+                        status = getattr(candidate_response, "status_code", 0)
+                        if status >= 400:
+                            try:
+                                candidate_response.close()
+                            except Exception:
+                                pass
+                            raise Exception(f"HTTP {status}")
+                        stream_response = candidate_response
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                if stream_response is None and last_exc is not None:
+                    raise last_exc
+                stream_iter = stream_response.iter_content(chunk_size=1048576)
         response_status = None
         try:
             if res is not None:
@@ -8739,7 +8831,7 @@ class DownloadManagerApp:
                     part_count = min(part_count, 4)
                 elif remaining_size and remaining_size < 64 * 1024 * 1024:
                     part_count = min(part_count, 12)
-                part_count = min(max(2, part_count), 16)
+                part_count = min(max(2, part_count), 24)
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
                 write_error_log(
                     "http multipart download started",
@@ -8755,6 +8847,7 @@ class DownloadManagerApp:
                 )
                 futures = []
                 executor = None
+                part_specs = []
                 try:
                     executor = DaemonThreadPoolExecutor(max_workers=part_count)
                     for index in range(part_count):
@@ -8766,6 +8859,7 @@ class DownloadManagerApp:
                         digest = hashlib.sha1(normalized_out_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
                         part_path = os.path.join(tempfile.gettempdir(), f"downloader_http_{digest}.part{index}")
                         part_paths.append(part_path)
+                        part_specs.append((part_path, part_start, part_end))
                         box = {"bytes": 0}
                         progress_boxes.append(box)
                         futures.append(executor.submit(self._download_http_range_part, url, headers, part_start, part_end, part_path, box, stop_event))
@@ -8792,6 +8886,13 @@ class DownloadManagerApp:
                                 future.cancel()
                             return
                         done, futures = concurrent.futures.wait(futures, timeout=0.5, return_when=concurrent.futures.FIRST_COMPLETED)
+                        for done_future in done:
+                            part_error = done_future.exception()
+                            if part_error is not None:
+                                stop_event.set()
+                                for future in futures:
+                                    future.cancel()
+                                raise part_error
                         now = time.time()
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         elapsed = max(now - start_time, 0.001)
@@ -8829,10 +8930,13 @@ class DownloadManagerApp:
                             executor.shutdown(wait=not self._shutdown_started, cancel_futures=True)
                         except Exception:
                             pass
+                for part_path, part_start, part_end in part_specs:
+                    expected_part_size = max(part_end - part_start + 1, 0)
+                    actual_part_size = self._get_existing_file_size(part_path)
+                    if expected_part_size > 0 and actual_part_size != expected_part_size:
+                        raise Exception(f"HTTP multipart part incomplete: expected {expected_part_size}, got {actual_part_size}")
                 with open(out_path, "ab") as main_out:
                     for part_path in part_paths:
-                        if not os.path.exists(part_path):
-                            continue
                         with open(part_path, "rb") as part_in:
                             shutil.copyfileobj(part_in, main_out)
                 for part_path in part_paths:
@@ -8846,9 +8950,9 @@ class DownloadManagerApp:
                 free_bytes = self._get_disk_free_bytes(out_path)
                 self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
                 return
-            return
+            raise
         except Exception:
-            return
+            raise
         finally:
             for owned_session in owned_sessions:
                 self._close_network_session(owned_session)
@@ -8869,6 +8973,63 @@ class DownloadManagerApp:
         media_headers = dict(headers or _make_ytdlp_http_headers(referer=referer, origin=origin))
         self._download_http_media(item_id, media_url, out_path, headers=media_headers, session=session)
         return out_path
+
+    def _is_retryable_media_download_error(self, exc):
+        text = str(exc or "").lower()
+        retry_markers = (
+            "http 403",
+            "http 404",
+            "http 410",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "service temporarily unavailable",
+            "temporarily unavailable",
+            "timed out",
+            "timeout",
+        )
+        return any(marker in text for marker in retry_markers)
+
+    def _fetch_avjoy_media_candidates(self, page_url, fallback_name="AVJOY"):
+        parsed = urllib.parse.urlsplit(str(page_url or ""))
+        site_root = f"{parsed.scheme or 'https'}://{parsed.netloc or 'avjoy.me'}/"
+        headers = _make_ytdlp_http_headers(referer=site_root)
+        c_req = get_curl_cffi_requests()
+        last_exc = None
+        for browser in ("chrome120", "chrome110", "edge101"):
+            try:
+                resp = c_req.get(page_url, impersonate=browser, timeout=20, headers=headers)
+                page_text = str(getattr(resp, "text", "") or "")
+                candidates = _extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
+                unpacked = unpack_packed_javascript(page_text)
+                if unpacked:
+                    candidates.extend(_extract_candidate_media_urls(unpacked, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+                candidates = _dedupe_download_urls(candidates)
+                title = _extract_html_title(page_text, fallback_name)
+                if candidates:
+                    return title, candidates
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        return fallback_name, []
+
+    def _select_avjoy_media_candidate(self, candidates, failed_urls=None):
+        failed_set = set(_dedupe_download_urls(failed_urls or []))
+        ordered = [candidate for candidate in _dedupe_download_urls(candidates) if candidate not in failed_set]
+        if not ordered:
+            return "", []
+        manifest_candidates, direct_candidates = _split_stream_and_direct_candidates(ordered)
+        media_url, fallback_urls = _pick_primary_with_fallbacks(direct_candidates)
+        if not media_url:
+            media_url, fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
+        if not media_url:
+            return "", []
+        remaining = [candidate for candidate in ordered if candidate != media_url and candidate not in fallback_urls]
+        return media_url, _dedupe_download_urls(fallback_urls + remaining)
 
     def _download_routed_media_url(self, task, item_id, media_url, save_dir, display_name, is_mp3=False, source_site=None, fallback_urls=None, referer=None, origin=None, manifest_downloader=None, manifest_default_route="ffmpeg", headers=None, session=None, default_ext=".mp4", allow_audio_extract=True, persist_direct_output=False, show_direct_filename=False):
         site = source_site or _task_source_site_name(task)
@@ -8891,18 +9052,52 @@ class DownloadManagerApp:
             _set_task_aux_fields(task, filename=out_path)
             if show_direct_filename:
                 self._set_task_named_column_text(item_id, "name", out_name)
-        self._download_direct_or_audio_media(
-            item_id,
-            media_url,
-            save_dir,
-            display_name,
-            is_mp3=is_mp3 and allow_audio_extract,
-            referer=referer,
-            origin=origin,
-            headers=headers,
-            session=session,
-            default_ext=default_ext,
-        )
+        direct_candidates = _dedupe_download_urls([media_url] + fallbacks)
+        last_error = None
+        for index, candidate_url in enumerate(direct_candidates):
+            try:
+                if _looks_like_manifest_url(candidate_url):
+                    self._log_m3u8_route_selected(task, item_id, candidate_url, source_site=site, fallback_urls=direct_candidates[index + 1 :])
+                    if manifest_downloader is None:
+                        self._download_m3u8_with_ffmpeg(item_id, candidate_url, save_dir, is_mp3=is_mp3, referer=referer, origin=origin)
+                    else:
+                        manifest_downloader(
+                            candidate_url,
+                            referer=referer,
+                            origin=origin,
+                            default_route=manifest_default_route,
+                        )
+                    return
+                self._download_direct_or_audio_media(
+                    item_id,
+                    candidate_url,
+                    save_dir,
+                    display_name,
+                    is_mp3=is_mp3 and allow_audio_extract,
+                    referer=referer,
+                    origin=origin,
+                    headers=headers,
+                    session=session,
+                    default_ext=default_ext,
+                )
+                return
+            except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+                raise
+            except Exception as exc:
+                last_error = exc
+                if index >= len(direct_candidates) - 1 or not self._is_retryable_media_download_error(exc):
+                    raise
+                write_error_log(
+                    "direct media fallback retry",
+                    Exception("direct media fallback retry"),
+                    item_id=item_id,
+                    url=candidate_url,
+                    next_url=direct_candidates[index + 1],
+                    source_site=site,
+                    reason=str(exc)[:240],
+                )
+        if last_error:
+            raise last_error
 
     def _gimy_direct_media_headers(self, referer, origin):
         return {"Referer": referer, "Origin": origin, "User-Agent": DEFAULT_USER_AGENT}
@@ -9956,12 +10151,13 @@ class DownloadManagerApp:
                     continue
 
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                if os.path.exists(out_path):
-                    try:
-                        os.remove(out_path)
-                    except OSError:
-                        pass
-                self._move_file_with_retry(final_source, out_path)
+                with self._resume_artifact_lock_for(final_source, out_path):
+                    if os.path.exists(out_path):
+                        try:
+                            os.remove(out_path)
+                        except OSError:
+                            pass
+                    self._move_file_with_retry(final_source, out_path, attempts=48, delay_seconds=0.5)
 
                 self._remove_artifact_paths(
                     *(stale_path for stale_path in (temp_out_path, resume_out_path, merged_out_path, progress_path) if stale_path != out_path)
@@ -10642,12 +10838,8 @@ class DownloadManagerApp:
             f"{temp_root}.merged{temp_ext}",
         )
         if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths):
-            return True
-        progress_info = self._load_resume_progress_info(temp_out_path + ".progress.json")
-        return (
-            max(float(progress_info.get("seconds", 0.0) or 0.0), 0.0) > 0.0
-            or max(int(progress_info.get("bytes", 0) or 0), 0) > 0
-        )
+            return self._resume_artifact_matches_keys(temp_out_path, [source_url, cached_resolved_url])
+        return False
 
     def download_task(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         has_anime1_lock = False
@@ -12909,31 +13101,62 @@ class DownloadManagerApp:
 
         if "avjoy.me" in parsed_url.netloc and "/video/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
-            c_req = get_curl_cffi_requests()
             safe_referer = f"{parsed_url.scheme}://{parsed_url.netloc}/"
-            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=_make_ytdlp_http_headers(referer=safe_referer))
-            candidates = _extract_candidate_media_urls(resp.text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
-            media_url = next((candidate for candidate in candidates if candidate.lower().endswith(".mp4")), None)
-            if not media_url:
-                media_url = next((candidate for candidate in candidates if any(ext in candidate.lower() for ext in (".m3u8", ".mpd"))), None)
+            page_title, candidates = self._fetch_avjoy_media_candidates(url, fallback_name=short_name)
+            media_url, fallback_urls = self._select_avjoy_media_candidate(candidates)
             if not media_url:
                 raise Exception("AVJOY media URL missing")
-            page_title = _extract_html_title(resp.text, short_name)
-            fallback_urls = [u for u in candidates if u != media_url]
             _set_task_identity(name=page_title, source_site="avjoy", source_page=url, fallback_urls=fallback_urls)
-            self._download_routed_media_url(
-                task,
-                item_id,
-                media_url,
-                save_dir,
-                page_title,
-                is_mp3=is_mp3,
-                source_site="avjoy",
-                fallback_urls=fallback_urls,
-                referer=safe_referer,
-                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
-                manifest_downloader=_download_manifest_with_site_strategy,
-            )
+            try:
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    media_url,
+                    save_dir,
+                    page_title,
+                    is_mp3=is_mp3,
+                    source_site="avjoy",
+                    fallback_urls=fallback_urls,
+                    referer=safe_referer,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                    manifest_downloader=_download_manifest_with_site_strategy,
+                )
+            except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+                raise
+            except Exception as exc:
+                if not self._is_retryable_media_download_error(exc):
+                    raise
+                failed_urls = _dedupe_download_urls([media_url] + fallback_urls)
+                fresh_title, fresh_candidates = self._fetch_avjoy_media_candidates(url, fallback_name=page_title or short_name)
+                fresh_media_url, fresh_fallback_urls = self._select_avjoy_media_candidate(fresh_candidates, failed_urls=failed_urls)
+                if not fresh_media_url:
+                    raise
+                page_title = fresh_title or page_title
+                _set_task_identity(name=page_title, source_site="avjoy", source_page=url, fallback_urls=fresh_fallback_urls)
+                write_error_log(
+                    "avjoy media refresh retry",
+                    Exception("avjoy media refresh retry"),
+                    item_id=item_id,
+                    url=url,
+                    failed_url=media_url,
+                    refreshed_url=fresh_media_url,
+                    source_site="avjoy",
+                    reason=str(exc)[:240],
+                    refreshed_count=len(fresh_candidates),
+                )
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    fresh_media_url,
+                    save_dir,
+                    page_title,
+                    is_mp3=is_mp3,
+                    source_site="avjoy",
+                    fallback_urls=fresh_fallback_urls,
+                    referer=safe_referer,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                    manifest_downloader=_download_manifest_with_site_strategy,
+                )
             return
 
         if "evoload.io" in parsed_url.netloc:
