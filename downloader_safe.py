@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260520-2970"
+APP_BUILD = "20260521-2980"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -74,8 +74,12 @@ ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
 MAX_DOWNLOADS_PER_DOMAIN = 3
 MAX_DOWNLOADS_PER_SOURCE_PAGE = MAX_DOWNLOADS_PER_DOMAIN
-MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {}
-MAX_DOWNLOADS_PER_SOURCE_SITE = {}
+MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
+    "movieffm": 3,
+}
+MAX_DOWNLOADS_PER_SOURCE_SITE = {
+    "movieffm": 3,
+}
 LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
 LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 10
 RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
@@ -115,6 +119,14 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "xiaoyakankan",
 ))
 FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm",))
+PARALLEL_HLS_SEGMENT_HOST_MARKERS = ("xluuss", "xlzyd.com")
+PARALLEL_HLS_SEGMENT_WORKERS = 16
+PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
+    "movieffm": 20,
+}
+PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 30
+PARALLEL_HLS_SEGMENT_RETRIES = 5
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "gimy": 15.0,
@@ -134,7 +146,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "777tv": 18,
     "18jav": 24,
     "gimy": 32,
-    "hohoj": 18,
+    "hohoj": 12,
     "jable": 18,
     "missav": 24,
     "nnyy": 24,
@@ -148,6 +160,7 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "gimy": True,
     "hohoj": False,
     "jable": False,
+    "movieffm": False,
     "missav": True,
     "nnyy": False,
     "xiaoyakankan": False,
@@ -172,12 +185,8 @@ YTDLP_HTTP_CHUNK_SIZE_BY_SITE = {
     "mixdrop": 10 * 1024 * 1024,
     "missav": 10 * 1024 * 1024,
 }
-YTDLP_THROTTLED_RATE_BPS = 256 * 1024
+YTDLP_THROTTLED_RATE_BPS = 0
 YTDLP_THROTTLED_RATE_BPS_BY_SITE = {
-    "gimy": 256 * 1024,
-    "goodav17": 256 * 1024,
-    "missav": 256 * 1024,
-    "movieffm": 256 * 1024,
 }
 HTTP_MULTIPART_TRIGGER_SECONDS = 0.15
 HTTP_MULTIPART_TRIGGER_SPEED_BPS = 6 * 1024 * 1024
@@ -197,6 +206,9 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "njavtv": 20,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
+HTTP_STREAM_CHUNK_SIZE = 4 * 1024 * 1024
+HTTP_RANGE_CHUNK_SIZE = 4 * 1024 * 1024
+HTTP_FILE_COPY_CHUNK_SIZE = 4 * 1024 * 1024
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
     "18jav",
     "777tv",
@@ -292,6 +304,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg terminate requested",
     "ffmpeg download started",
     "ffmpeg download finished",
+    "parallel hls download started",
+    "parallel hls download finished",
     "ffmpeg direct audio started",
     "ffmpeg direct audio finished",
     "m3u8 total bytes invalidated",
@@ -1839,6 +1853,7 @@ def _should_use_ffmpeg_for_movieffm_manifest(stream_url):
     host = urllib.parse.urlsplit(_normalize_download_url(stream_url)).netloc.lower()
     return any(marker in host for marker in (
         "okzy",
+        "xluuss",
         "youku.cdn7-okzy.com",
     ))
 
@@ -2385,6 +2400,25 @@ def _clean_javfilms_title(raw_title):
         return cleaned
     cleaned = re.sub(r"\s*\|\s*JAV\s*Films.*$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _clean_avjoy_title(raw_title, fallback_title="AVJOY"):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return str(fallback_title or "AVJOY").strip() or "AVJOY"
+    cleaned = re.sub(r"\s*[-|]\s*AVJoy.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\[[^\]]+\]\s*", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)\b(chinese\s*subtitle|subtitle|subbed)\b", "", cleaned)
+    cleaned = cleaned.replace("..", " ").strip(" -|/,._")
+    ascii_prefix = re.match(r"([A-Za-z0-9][A-Za-z0-9 ._-]{2,})", cleaned)
+    if ascii_prefix:
+        candidate = re.sub(r"\s+", " ", ascii_prefix.group(1)).strip(" -|/,._")
+        if candidate:
+            return candidate
+    code_match = re.search(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})\b", cleaned)
+    if code_match:
+        return f"{code_match.group(1).upper()}-{code_match.group(2)}"
+    return cleaned.strip(" -|/,") or str(fallback_title or "AVJOY").strip() or "AVJOY"
 
 
 def _clean_gimy_title(raw_title):
@@ -3091,9 +3125,9 @@ def _build_ytdlp_download_opts(
         "continuedl": True,
         "nocheckcertificate": True,
         "retries": 20,
-        "fragment_retries": 20,
+        "fragment_retries": 30,
         "extractor_retries": 5,
-        "file_access_retries": 3,
+        "file_access_retries": 10,
         "skip_unavailable_fragments": False,
         "concurrent_fragment_downloads": int(concurrent_fragment_downloads),
         "paths": {"home": home_dir, "temp": temp_dir},
@@ -3331,6 +3365,8 @@ def _should_prefer_native_hls(url, task=None):
     parsed = urllib.parse.urlparse(str(url or ""))
     host = str(parsed.netloc or "").strip().lower()
     source_site = _task_source_site_name(task)
+    if source_site == "movieffm" and _should_use_ffmpeg_for_movieffm_manifest(url):
+        return False
     if source_site in NATIVE_HLS_ALWAYS_SITES:
         return True
     if source_site in NATIVE_HLS_NEVER_SITES:
@@ -6496,7 +6532,7 @@ class DownloadManagerApp:
             pass
         if expected_seconds > 300.0 and duration > 0.0 and duration + max(60.0, expected_seconds * 0.2) < expected_seconds:
             return True
-        if expected_seconds > 300.0 and duration <= 0.0 and size < 64 * 1024 * 1024:
+        if expected_seconds > 300.0 and duration <= 0.0:
             return True
         return False
 
@@ -7001,9 +7037,14 @@ class DownloadManagerApp:
             output_dir = str(output_dir or _APP_DIR)
         normalized_ext = str(ext or "mp4").lstrip(".") or "mp4"
         candidate_output = os.path.normcase(os.path.join(output_dir, f"{safe_name}.{normalized_ext}"))
+        source_key = (
+            _normalize_download_url(_task_field_value(task, "source_page", ""))
+            or _normalize_download_url(_task_field_value(task, "url", ""))
+            or ""
+        )
         source_site = (_task_source_site_name(task) or "").strip().lower()
         if source_site:
-            return f"{source_site}::{candidate_output}"
+            return f"{source_site}::{candidate_output}::{source_key}"
         return f"output::{candidate_output}"
 
     def _normalize_resume_state_id(self, progress_path):
@@ -7027,11 +7068,7 @@ class DownloadManagerApp:
         return any(self._has_nonempty_file(candidate_path) or os.path.exists(candidate_path) for candidate_path in candidate_paths)
 
     def _find_resume_artifact_base_by_source_keys(self, resume_keys, ext="mp4"):
-        normalized_keys = {
-            _normalize_download_url(candidate)
-            for candidate in (resume_keys or [])
-            if _normalize_download_url(candidate)
-        }
+        normalized_keys = set(self._normalize_resume_match_keys(resume_keys))
         if not normalized_keys:
             return ""
         normalized_ext = str(ext or "mp4").lstrip(".") or "mp4"
@@ -7039,8 +7076,7 @@ class DownloadManagerApp:
         for progress_path in glob.glob(progress_pattern):
             try:
                 progress_info = self._load_resume_progress_info(progress_path)
-                stored_source = _normalize_download_url(progress_info.get("source_url", ""))
-                if stored_source not in normalized_keys and not self._resume_progress_matches(progress_info, list(normalized_keys), progress_path):
+                if not self._resume_progress_matches(progress_info, list(normalized_keys), progress_path):
                     continue
                 base_path = progress_path[: -len(".progress.json")]
                 if self._has_resume_artifact_family(base_path):
@@ -7063,6 +7099,8 @@ class DownloadManagerApp:
             return not os.path.basename(str(base_path or "")).lower().startswith("downloader_resume_")
         progress_info = self._load_resume_progress_info(progress_path)
         has_identity = bool(progress_info.get("source_url") or progress_info.get("resume_id"))
+        if os.path.basename(str(base_path or "")).lower().startswith("downloader_resume_") and not has_identity:
+            return False
         return (not has_identity) or self._resume_progress_matches(progress_info, resume_keys, progress_path)
 
     def _resolve_resume_artifact_base(self, task, url, ext="mp4", save_dir=None, fallback_name="Video"):
@@ -7451,6 +7489,25 @@ class DownloadManagerApp:
             except OSError:
                 continue
 
+    def _remove_yt_dlp_fragment_artifacts(self, output_root):
+        root = str(output_root or "").strip()
+        if not root:
+            return
+        for pattern in (
+            f"{root}.part*",
+            f"{root}.*.part*",
+            f"{root}.ytdl",
+            f"{root}.ytdl.*",
+            f"{root}.*.ytdl",
+            f"{root}.f*.part*",
+        ):
+            for artifact_path in glob.glob(pattern):
+                try:
+                    if os.path.exists(artifact_path):
+                        os.remove(artifact_path)
+                except OSError:
+                    continue
+
     def _reset_resume_artifacts(self, *paths):
         self._remove_artifact_paths(*paths)
         return 0, 0.0
@@ -7471,17 +7528,32 @@ class DownloadManagerApp:
         except Exception:
             return {"seconds": 0, "bytes": 0, "source_url": "", "resume_id": ""}
 
+    def _normalize_resume_match_keys(self, resume_keys):
+        keys = []
+        for candidate in resume_keys or []:
+            raw_candidate = str(candidate or "").strip()
+            normalized_candidate = _normalize_download_url(raw_candidate) or raw_candidate
+            if normalized_candidate and normalized_candidate not in keys:
+                keys.append(normalized_candidate)
+        return keys
+
     def _resume_progress_matches(self, stored_info, resume_keys, progress_path):
         stored_info = stored_info or {}
-        normalized_keys = set(resume_keys or [])
-        stored_source = _normalize_download_url(stored_info.get("source_url", ""))
+        normalized_keys = set(self._normalize_resume_match_keys(resume_keys))
+        stored_source_raw = str(stored_info.get("source_url", "") or "").strip()
+        stored_source = _normalize_download_url(stored_source_raw) or stored_source_raw
         if stored_source and stored_source in normalized_keys:
             return True
         if stored_source:
             return False
         current_resume_id = self._normalize_resume_state_id(progress_path)
         stored_resume_id = str(stored_info.get("resume_id", "") or "")
-        return bool(current_resume_id and stored_resume_id and current_resume_id == stored_resume_id)
+        if current_resume_id and stored_resume_id and current_resume_id == stored_resume_id:
+            return not any(
+                str(key or "").startswith(("output::", "movieffm::", "gimy::", "missav::", "hohoj::"))
+                for key in normalized_keys
+            )
+        return False
 
     def _load_resume_progress(self, progress_path):
         return self._load_resume_progress_info(progress_path).get("seconds", 0)
@@ -7948,7 +8020,7 @@ class DownloadManagerApp:
                 if response is None and last_exc is not None:
                     raise last_exc
                 with open(part_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=1048576):
+                    for chunk in response.iter_content(chunk_size=HTTP_RANGE_CHUNK_SIZE):
                         if stop_event.is_set() or self._shutdown_started:
                             break
                         if not chunk:
@@ -7977,7 +8049,7 @@ class DownloadManagerApp:
                 raise Exception(f"HTTP range request returned {status or 'unknown'}")
             with open(part_path, "wb") as f:
                 while not stop_event.is_set() and not self._shutdown_started:
-                    chunk = resp.read(1048576)
+                    chunk = resp.read(HTTP_RANGE_CHUNK_SIZE)
                     if not chunk:
                         break
                     f.write(chunk)
@@ -8699,7 +8771,7 @@ class DownloadManagerApp:
                         last_exc = exc
                 if stream_response is None and last_exc is not None:
                     raise last_exc
-                stream_iter = stream_response.iter_content(chunk_size=1048576)
+                stream_iter = stream_response.iter_content(chunk_size=HTTP_STREAM_CHUNK_SIZE)
         response_status = None
         try:
             if res is not None:
@@ -8716,14 +8788,6 @@ class DownloadManagerApp:
         start_time = time.time()
         last_update_time = start_time
         last_update_bytes = downloaded
-        immediate_multipart = (
-            not prefer_curl_stream
-            and range_supported
-            and total_size > 0
-            and resume_bytes <= 0
-            and _task_source_site_name(task) in HTTP_MULTIPART_IMMEDIATE_SITES
-            and max(int(total_size or 0), 0) >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
-        )
         try:
             with open(out_path, mode) as f:
                 while True:
@@ -8763,7 +8827,7 @@ class DownloadManagerApp:
                                 switched_to_multipart = True
                                 break
                     if res is not None:
-                        chunk = res.read(1048576)
+                        chunk = res.read(HTTP_STREAM_CHUNK_SIZE)
                     else:
                         try:
                             chunk = next(stream_iter)
@@ -8938,7 +9002,7 @@ class DownloadManagerApp:
                 with open(out_path, "ab") as main_out:
                     for part_path in part_paths:
                         with open(part_path, "rb") as part_in:
-                            shutil.copyfileobj(part_in, main_out)
+                            shutil.copyfileobj(part_in, main_out, length=HTTP_FILE_COPY_CHUNK_SIZE)
                 for part_path in part_paths:
                     if os.path.exists(part_path):
                         try:
@@ -9007,7 +9071,7 @@ class DownloadManagerApp:
                 if unpacked:
                     candidates.extend(_extract_candidate_media_urls(unpacked, allowed_exts=(".mp4", ".m3u8", ".mpd")))
                 candidates = _dedupe_download_urls(candidates)
-                title = _extract_html_title(page_text, fallback_name)
+                title = _clean_avjoy_title(_extract_html_title(page_text, fallback_name), fallback_name)
                 if candidates:
                     return title, candidates
             except Exception as exc:
@@ -9102,6 +9166,317 @@ class DownloadManagerApp:
     def _gimy_direct_media_headers(self, referer, origin):
         return {"Referer": referer, "Origin": origin, "User-Agent": DEFAULT_USER_AGENT}
 
+    def _parallel_hls_workers_for_site(self, source_site):
+        site = (source_site or "").strip().lower()
+        return max(int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, PARALLEL_HLS_SEGMENT_WORKERS)), 1)
+
+    def _should_try_parallel_hls_segments(self, url, task):
+        source_site = _task_source_site_name(task)
+        if source_site not in PARALLEL_HLS_SEGMENT_SITES:
+            return False
+        normalized_url = _normalize_download_url(url)
+        if not normalized_url:
+            return False
+        host = urllib.parse.urlsplit(normalized_url).netloc.lower()
+        lowered = normalized_url.lower()
+        return any(marker in host or marker in lowered for marker in PARALLEL_HLS_SEGMENT_HOST_MARKERS)
+
+    def _parse_hls_attribute_list(self, raw_value):
+        attrs = {}
+        for match in re.finditer(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)', str(raw_value or ""), re.IGNORECASE):
+            value = match.group(2).strip()
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            attrs[match.group(1).strip().upper()] = value
+        return attrs
+
+    def _fetch_hls_text_for_parallel(self, url, headers):
+        request_headers = dict(headers or {})
+        request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        with urllib.request.urlopen(urllib.request.Request(url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+            return resp.read().decode("utf-8", "ignore")
+
+    def _resolve_parallel_hls_media_playlist(self, url, headers):
+        playlist_url = _normalize_download_url(url)
+        playlist_text = self._fetch_hls_text_for_parallel(playlist_url, headers)
+        lines = [line.strip() for line in playlist_text.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            if not line.startswith("#EXT-X-STREAM-INF"):
+                continue
+            for next_line in lines[index + 1:]:
+                if next_line.startswith("#"):
+                    continue
+                media_url = urllib.parse.urljoin(playlist_url, next_line)
+                return media_url, self._fetch_hls_text_for_parallel(media_url, headers)
+        return playlist_url, playlist_text
+
+    def _parse_parallel_hls_segments(self, playlist_url, playlist_text):
+        lines = [line.strip() for line in str(playlist_text or "").splitlines() if line.strip()]
+        if not any(line.startswith("#EXT-X-ENDLIST") for line in lines):
+            raise Exception("parallel HLS only supports complete VOD playlists")
+        active_key = None
+        sequence_number = 0
+        pending_duration = 0.0
+        segments = []
+        for line in lines:
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE"):
+                try:
+                    sequence_number = int(line.split(":", 1)[1].strip())
+                except Exception:
+                    sequence_number = 0
+            elif line.startswith("#EXT-X-KEY"):
+                attrs = self._parse_hls_attribute_list(line.split(":", 1)[1] if ":" in line else "")
+                method = str(attrs.get("METHOD", "") or "").upper()
+                if method and method != "AES-128":
+                    raise Exception(f"parallel HLS unsupported key method: {method}")
+                key_uri = attrs.get("URI", "")
+                active_key = {
+                    "method": method,
+                    "uri": urllib.parse.urljoin(playlist_url, key_uri) if key_uri else "",
+                    "iv": attrs.get("IV", ""),
+                }
+            elif line.startswith("#EXTINF"):
+                try:
+                    pending_duration = float(line.split(":", 1)[1].split(",", 1)[0].strip())
+                except Exception:
+                    pending_duration = 0.0
+            elif not line.startswith("#"):
+                segments.append({
+                    "index": len(segments),
+                    "sequence": sequence_number + len(segments),
+                    "url": urllib.parse.urljoin(playlist_url, line),
+                    "duration": pending_duration,
+                    "key": dict(active_key or {}),
+                })
+                pending_duration = 0.0
+        if not segments:
+            raise Exception("parallel HLS playlist has no media segments")
+        return segments
+
+    def _fetch_parallel_hls_keys(self, segments, headers):
+        key_cache = {}
+        for segment in segments:
+            key_url = (segment.get("key") or {}).get("uri")
+            if not key_url or key_url in key_cache:
+                continue
+            request_headers = dict(headers or {})
+            request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+            with urllib.request.urlopen(urllib.request.Request(key_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                key_data = resp.read()
+            if len(key_data) != 16:
+                raise Exception("parallel HLS AES key has invalid length")
+            key_cache[key_url] = key_data
+        return key_cache
+
+    def _parallel_hls_iv_for_segment(self, key_info, sequence):
+        raw_iv = str((key_info or {}).get("iv", "") or "").strip()
+        if raw_iv:
+            if raw_iv.lower().startswith("0x"):
+                raw_iv = raw_iv[2:]
+            return bytes.fromhex(raw_iv.zfill(32)[-32:])
+        return int(sequence).to_bytes(16, byteorder="big", signed=False)
+
+    def _download_parallel_hls_segment(self, segment, part_path, headers, key_cache, stop_event):
+        if stop_event.is_set() or self._shutdown_started:
+            raise StopDownloadException("stop requested")
+        if self._has_nonempty_file(part_path):
+            return os.path.getsize(part_path)
+        request_headers = dict(headers or {})
+        request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        last_exc = None
+        for attempt in range(PARALLEL_HLS_SEGMENT_RETRIES):
+            try:
+                if stop_event.is_set() or self._shutdown_started:
+                    raise StopDownloadException("stop requested")
+                with urllib.request.urlopen(urllib.request.Request(segment["url"], headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                    data = resp.read()
+                key_info = segment.get("key") or {}
+                key_url = key_info.get("uri")
+                if key_url:
+                    if CryptoAES is None:
+                        raise Exception("parallel HLS AES dependency missing")
+                    cipher = CryptoAES.new(
+                        key_cache[key_url],
+                        CryptoAES.MODE_CBC,
+                        self._parallel_hls_iv_for_segment(key_info, segment.get("sequence", segment.get("index", 0))),
+                    )
+                    data = cipher.decrypt(data)
+                temp_part_path = f"{part_path}.tmp"
+                with open(temp_part_path, "wb") as out_f:
+                    out_f.write(data)
+                os.replace(temp_part_path, part_path)
+                return len(data)
+            except StopDownloadException:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(min(0.5 * (attempt + 1), 3.0))
+        raise last_exc or Exception("parallel HLS segment download failed")
+
+    def _remux_parallel_hls_transport_stream(self, ffmpeg_path, source_ts_path, out_path):
+        startupinfo = None
+        creationflags = 0
+        if platform.system() == "Windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            [
+                ffmpeg_path,
+                "-y",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-fflags",
+                "+genpts",
+                "-i",
+                source_ts_path,
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                out_path,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            timeout=900,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "").strip()
+            raise Exception(f"parallel HLS remux failed: {message[:240]}")
+
+    def _try_parallel_hls_segment_download(self, item_id, url, out_path, temp_out_path, progress_path, headers, ffmpeg_path, ffmpeg_version=""):
+        task = self.tasks.get(item_id, {})
+        if not self._should_try_parallel_hls_segments(url, task):
+            return False
+        if bool(_task_field_value(task, "is_mp3", False)):
+            return False
+        media_url, playlist_text = self._resolve_parallel_hls_media_playlist(url, headers)
+        segments = self._parse_parallel_hls_segments(media_url, playlist_text)
+        if any((segment.get("key") or {}).get("uri") for segment in segments) and CryptoAES is None:
+            return False
+        key_cache = self._fetch_parallel_hls_keys(segments, headers)
+        part_dir = f"{os.path.splitext(temp_out_path)[0]}.segments"
+        os.makedirs(part_dir, exist_ok=True)
+        transport_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ts"
+        merged_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.mp4"
+        stop_event = threading.Event()
+        total_segments = len(segments)
+        total_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in segments)
+        completed_bytes = 0
+        completed_duration = 0.0
+        completed_segments = 0
+        started_at = time.time()
+        completed_lock = threading.Lock()
+        worker_count = min(self._parallel_hls_workers_for_site(_task_source_site_name(task)), total_segments)
+        self._log_ffmpeg_event(
+            "parallel hls download started",
+            Exception("parallel hls started"),
+            task,
+            item_id,
+            media_url,
+            segments=total_segments,
+            workers=worker_count,
+            total_duration=total_duration,
+            **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
+        )
+
+        def _part_path(segment):
+            return os.path.join(part_dir, f"{int(segment['index']):06d}.ts")
+
+        def _download_one(segment):
+            nonlocal completed_bytes, completed_duration, completed_segments
+            task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
+            if self._is_pause_requested_state(task_state) or self._is_delete_requested_state(task_state):
+                stop_event.set()
+                raise StopDownloadException("stop requested")
+            part_size = self._download_parallel_hls_segment(segment, _part_path(segment), headers, key_cache, stop_event)
+            with completed_lock:
+                completed_bytes += int(part_size or 0)
+                completed_duration += max(float(segment.get("duration", 0.0) or 0.0), 0.0)
+                completed_segments += 1
+                elapsed = max(time.time() - started_at, 0.001)
+                speed_bps = completed_bytes / elapsed
+                eta = elapsed / completed_segments * (total_segments - completed_segments) if completed_segments and total_segments > completed_segments else None
+                if total_duration > 0:
+                    percent = min((completed_duration / total_duration) * 100.0, 99.0)
+                    self.update_tree_many(item_id, {
+                        "progress": f"{percent:.1f}%",
+                        "size": f"{completed_segments}/{total_segments}",
+                        "speed_eta": f"{format_transfer_rate(speed_bps)} | {format_eta(eta)}" if eta else format_transfer_rate(speed_bps),
+                    }, force=True)
+                self._save_resume_progress(
+                    progress_path,
+                    completed_duration,
+                    source_url=_normalize_download_url(url) or url,
+                    bytes_done=completed_bytes,
+                    min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
+                    min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
+                )
+            return part_size
+
+        try:
+            with DaemonThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [executor.submit(_download_one, segment) for segment in segments if not self._has_nonempty_file(_part_path(segment))]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+            with open(transport_path, "wb") as merged_f:
+                for segment in segments:
+                    part_path = _part_path(segment)
+                    if not self._has_nonempty_file(part_path):
+                        raise Exception("parallel HLS segment missing after download")
+                    with open(part_path, "rb") as part_f:
+                        shutil.copyfileobj(part_f, merged_f, length=HTTP_FILE_COPY_CHUNK_SIZE)
+            self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
+            final_info = self._probe_media_info(merged_path)
+            if not final_info.get("valid") or int(final_info.get("size", 0) or 0) <= 0:
+                raise Exception("parallel HLS remux produced invalid output")
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with self._resume_artifact_lock_for(merged_path, out_path):
+                if os.path.exists(out_path):
+                    try:
+                        os.remove(out_path)
+                    except OSError:
+                        pass
+                self._move_file_with_retry(merged_path, out_path, attempts=48, delay_seconds=0.5)
+            self._remove_artifact_paths(temp_out_path, transport_path, progress_path)
+            shutil.rmtree(part_dir, ignore_errors=True)
+            self._set_task_named_column_text(item_id, "progress", "100%")
+            self._mark_task_finished(item_id)
+            self._log_ffmpeg_event(
+                "parallel hls download finished",
+                Exception("parallel hls finished"),
+                task,
+                item_id,
+                media_url,
+                output=out_path,
+                bytes=self._get_existing_file_size(out_path),
+                segments=total_segments,
+                workers=worker_count,
+            )
+            return True
+        except StopDownloadException:
+            stop_event.set()
+            raise
+        except Exception as exc:
+            stop_event.set()
+            write_error_log(
+                "parallel hls fallback to ffmpeg",
+                exc,
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                segments=total_segments,
+                workers=worker_count,
+            )
+            return False
+
     def _download_m3u8_with_ytdlp_native(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net"):
         yt_dlp_module = get_yt_dlp_module()
         if yt_dlp_module is None:
@@ -9181,28 +9556,32 @@ class DownloadManagerApp:
         )
         info = None
         pre_existing_output = self._has_nonempty_file(out_path)
-        with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
-            if (
-                _looks_like_manifest_url(url)
-                and _task_source_site_name(task) in YTDLP_DIRECT_MANIFEST_EXTRACT_SITES
-                and _task_source_site_name(task) != "missav"
-            ):
-                info = ydl.extract_info(url, download=True)
-            elif _looks_like_manifest_url(url):
-                protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
-                direct_info = {
-                    "id": safe_name,
-                    "title": safe_name,
-                    "url": url,
-                    "ext": "mp4" if not is_mp3 else "m4a",
-                    "protocol": protocol,
-                    "http_headers": dict(ydl_opts.get("http_headers") or {}),
-                    "webpage_url": referer,
-                    "original_url": url,
-                }
-                info = ydl.process_ie_result(direct_info, download=True)
-            else:
-                info = ydl.extract_info(url, download=True)
+        try:
+            with yt_dlp_module.YoutubeDL(ydl_opts) as ydl:
+                if (
+                    _looks_like_manifest_url(url)
+                    and _task_source_site_name(task) in YTDLP_DIRECT_MANIFEST_EXTRACT_SITES
+                    and _task_source_site_name(task) != "missav"
+                ):
+                    info = ydl.extract_info(url, download=True)
+                elif _looks_like_manifest_url(url):
+                    protocol = "m3u8_native" if ".m3u8" in urllib.parse.urlsplit(url).path.lower() else "http_dash_segments"
+                    direct_info = {
+                        "id": safe_name,
+                        "title": safe_name,
+                        "url": url,
+                        "ext": "mp4" if not is_mp3 else "m4a",
+                        "protocol": protocol,
+                        "http_headers": dict(ydl_opts.get("http_headers") or {}),
+                        "webpage_url": referer,
+                        "original_url": url,
+                    }
+                    info = ydl.process_ie_result(direct_info, download=True)
+                else:
+                    info = ydl.extract_info(url, download=True)
+        except Exception:
+            self._remove_yt_dlp_fragment_artifacts(os.path.splitext(temp_out_path)[0])
+            raise
         actual_output = self._wait_for_yt_dlp_output_path(info, native_work_dir, safe_name, out_path, preferred_ext=ext)
         if actual_output:
             if os.path.normcase(os.path.abspath(actual_output)) != os.path.normcase(os.path.abspath(out_path)):
@@ -9221,7 +9600,11 @@ class DownloadManagerApp:
             final_duration = float(final_info.get("duration", 0.0) or 0.0)
             expected_duration = 0.0
             try:
-                if final_size < 64 * 1024 * 1024 or final_duration <= 0.0:
+                if (
+                    _task_source_site_name(task) == "movieffm"
+                    or final_size < 64 * 1024 * 1024
+                    or final_duration <= 0.0
+                ):
                     expected_duration = self._get_m3u8_duration(
                         url,
                         headers=_make_hls_http_headers(referer=referer, origin=origin),
@@ -9614,6 +9997,32 @@ class DownloadManagerApp:
         headers = _format_ffmpeg_header_lines(manifest_headers)
         total_duration = 0.0
         self._start_daemon_thread(probe_metadata)
+
+        if not is_mp3 and self._should_try_parallel_hls_segments(url, task):
+            try:
+                parallel_finished = self._try_parallel_hls_segment_download(
+                    item_id,
+                    url,
+                    out_path,
+                    temp_out_path,
+                    progress_path,
+                    manifest_headers,
+                    ffmpeg_path,
+                    ffmpeg_version=ffmpeg_version,
+                )
+            except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+                raise
+            except Exception as exc:
+                parallel_finished = False
+                write_error_log(
+                    "parallel hls setup fallback to ffmpeg",
+                    exc,
+                    url=url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                )
+            if parallel_finished:
+                return
 
         ffmpeg_candidate_urls = list(candidate_urls)
         skip_ffmpeg_same_failed_primary = False
@@ -11168,7 +11577,7 @@ class DownloadManagerApp:
             site_config = FORCED_M3U8_SITE_RULES[forced_m3u8_site]
             referer = site_config["referer"]
             origin = site_config["origin"]
-            if forced_m3u8_site in ("missav", "xiaoyakankan"):
+            if forced_m3u8_site in ("missav", "movieffm", "xiaoyakankan"):
                 referer = self._get_task_source_page(task, fallback_url=referer) or referer
                 parsed_ref = urllib.parse.urlparse(referer)
                 if parsed_ref.scheme and parsed_ref.netloc:
@@ -11214,8 +11623,11 @@ class DownloadManagerApp:
         if is_direct_media:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
             filename = os.path.basename(parsed_url.path) or "downloaded_file"
-            if (not os.path.splitext(filename)[1]) and inferred_direct_media_ext:
+            use_task_title_filename = _task_source_site_name(task) == "avjoy" or not os.path.splitext(filename)[1]
+            if use_task_title_filename and inferred_direct_media_ext:
                 name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "downloaded_file" or "").strip()
+                if _task_source_site_name(task) == "avjoy":
+                    name = _clean_avjoy_title(name, fallback_title=default_short_name_for_url(_task_field_value(task, "source_page") or _task_field_value(task, "url") or url))
                 safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip() or "downloaded_file"
                 filename = f"{safe_name}{inferred_direct_media_ext}"
             output_path = os.path.join(save_dir, filename)
