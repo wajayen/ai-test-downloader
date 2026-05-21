@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260521-2981"
+APP_BUILD = "20260521-2990"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -119,11 +119,16 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "xiaoyakankan",
 ))
 FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm",))
-PARALLEL_HLS_SEGMENT_HOST_MARKERS = ("xluuss", "xlzyd.com")
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe"))
+PARALLEL_HLS_SEGMENT_HOST_MARKERS = ("xluuss", "xlzyd.com", "52cute.com", "turboviplay.com")
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 20,
+    "avbebe": 20,
+}
+PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
+    "turbosplayer.com": 8,
+    "turboviplay.com": 8,
 }
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 30
 PARALLEL_HLS_SEGMENT_RETRIES = 5
@@ -239,7 +244,7 @@ YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
     "hohoj",
 ))
 NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv"))
-NATIVE_HLS_NEVER_SITES = frozenset(("njavtv", "3kor"))
+NATIVE_HLS_NEVER_SITES = frozenset(("njavtv", "3kor", "missav"))
 NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "18av": ("streamfastpro",),
     "18jav": ("hshdkshd", "cdnlab.live"),
@@ -284,7 +289,7 @@ GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
 GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
-IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1")
+IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1", "avbebe")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
 STOP_REQUEST_TASK_STATES = frozenset(("PAUSE_REQUESTED", "DELETE_REQUESTED"))
@@ -306,6 +311,9 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg download finished",
     "parallel hls download started",
     "parallel hls download finished",
+    "windows compatible mp4 remuxed",
+    "windows compatible mp4 remux failed",
+    "windows compatible mp4 transcoded",
     "ffmpeg direct audio started",
     "ffmpeg direct audio finished",
     "m3u8 total bytes invalidated",
@@ -2410,15 +2418,41 @@ def _clean_avjoy_title(raw_title, fallback_title="AVJOY"):
     cleaned = re.sub(r"^\[[^\]]+\]\s*", "", cleaned).strip()
     cleaned = re.sub(r"(?i)\b(chinese\s*subtitle|subtitle|subbed)\b", "", cleaned)
     cleaned = cleaned.replace("..", " ").strip(" -|/,._")
-    ascii_prefix = re.match(r"([A-Za-z0-9][A-Za-z0-9 ._-]{2,})", cleaned)
-    if ascii_prefix:
-        candidate = re.sub(r"\s+", " ", ascii_prefix.group(1)).strip(" -|/,._")
-        if candidate:
-            return candidate
-    code_match = re.search(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})\b", cleaned)
-    if code_match:
-        return f"{code_match.group(1).upper()}-{code_match.group(2)}"
+    cleaned = re.sub(
+        r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})\b",
+        lambda m: f"{m.group(1).upper()}-{m.group(2)}",
+        cleaned,
+        count=1,
+    )
     return cleaned.strip(" -|/,") or str(fallback_title or "AVJOY").strip() or "AVJOY"
+
+
+def _clean_avbebe_title(raw_title, fallback_title="Avbebe"):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return str(fallback_title or "Avbebe").strip() or "Avbebe"
+    cleaned = re.sub(r"\s*(?:&#8211;|–|-|\|)\s*Avbebe.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+高清H動畫.*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -|/,") or str(fallback_title or "Avbebe").strip() or "Avbebe"
+
+
+def _avjoy_title_from_url_slug(page_url):
+    parsed = urllib.parse.urlsplit(str(page_url or "").strip())
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if len(segments) < 3 or segments[0].lower() != "video":
+        return ""
+    slug = urllib.parse.unquote(segments[-1]).strip()
+    if not slug:
+        return ""
+    slug = slug.replace("_", " ").strip(" -|/,._")
+    code_match = re.match(r"([A-Za-z]{2,10})-(\d{2,6})(?:-|$)", slug)
+    if code_match:
+        code = f"{code_match.group(1).upper()}-{code_match.group(2)}"
+        tail = slug[code_match.end():].strip(" -|/,._")
+        tail = re.sub(r"[-]+", " ", tail)
+        return _clean_avjoy_title(f"{code} {tail}".strip(), fallback_title=code)
+    slug = re.sub(r"[-]+", " ", slug)
+    return _clean_avjoy_title(slug, fallback_title="AVJOY")
 
 
 def _clean_gimy_title(raw_title):
@@ -3552,6 +3586,20 @@ def default_short_name_for_url(url, is_mp3=False):
     if is_mp3:
         short_name = "[MP3] " + short_name
     return short_name
+
+
+def _safe_output_stem(name, fallback="download", max_chars=150):
+    cleaned = re.sub(r"\s+", " ", str(name or "")).strip()
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    cleaned = cleaned.strip(" .-_")
+    fallback_text = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", str(fallback or "download")).strip(" .-_") or "download"
+    if not cleaned:
+        cleaned = fallback_text
+    max_len = max(int(max_chars or 0), 32)
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len].rstrip(" .-_")
+    return cleaned or fallback_text
 
 
 def is_auto_generated_short_name(url, short_name, is_mp3=False):
@@ -5943,6 +5991,9 @@ class DownloadManagerApp:
         primary_value = str(_task_field_value(task, "filename") or "").strip()
         secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
         filename = primary_value or secondary_value or ""
+        if filename and str(filename).lower().endswith(".mp4") and not bool(_task_field_value(task, "_windows_mp4_compat_done", False)):
+            self._ensure_windows_compatible_mp4(item_id, filename)
+            _set_task_aux_fields(task, _windows_mp4_compat_done=True)
         if filename and os.path.exists(filename):
             try:
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
@@ -6559,7 +6610,7 @@ class DownloadManagerApp:
         save_dir = self.save_dir_var.get()
         possible_exts = [".mp4", ".mkv", ".webm", ".mp3", ".m4a"]
         message = self._ui_text("msg_file_exists", "檔案已存在")
-        safe_name = re.sub(r'[\\\\/:*?"<>|]+', "_", short_name).strip()
+        safe_name = _safe_output_stem(short_name, fallback="download")
         for ext in possible_exts:
             candidate_output = os.path.join(save_dir, f"{safe_name}{ext}")
             if self._can_accept_existing_output(task, item_id, candidate_output):
@@ -7027,7 +7078,7 @@ class DownloadManagerApp:
             normalized_output = os.path.normcase(os.path.abspath(preferred_output))
             return f"output::{normalized_output}"
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or fallback_name or "").strip()
-        safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip() or fallback_name
+        safe_name = _safe_output_stem(name, fallback=fallback_name)
         if not safe_name:
             return ""
         output_dir = save_dir or self.save_dir_var.get() or _APP_DIR
@@ -7209,7 +7260,7 @@ class DownloadManagerApp:
                     "-v",
                     "error",
                     "-show_entries",
-                    "format=duration,size:stream=index,codec_type",
+                    "format=format_name,duration,size:stream=index,codec_type,codec_name,profile,pix_fmt,level,codec_tag_string",
                     "-of",
                     "json",
                     path,
@@ -7243,6 +7294,8 @@ class DownloadManagerApp:
                 "exists": True,
                 "size": size,
                 "duration": duration,
+                "format_name": str(format_info.get("format_name") or ""),
+                "streams": streams,
                 "has_streams": has_streams,
                 "valid": valid,
                 "reason": "ok" if valid else "no-streams",
@@ -7252,10 +7305,198 @@ class DownloadManagerApp:
                 "exists": True,
                 "size": size,
                 "duration": 0.0,
+                "format_name": "",
+                "streams": [],
                 "has_streams": False,
                 "valid": False,
                 "reason": "ffprobe-error",
             }
+
+    def _is_windows_friendly_mp4_info(self, info):
+        if not info or not info.get("valid"):
+            return False
+        streams = info.get("streams") or []
+        video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+        audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+        if not video_streams:
+            return False
+        video = video_streams[0]
+        video_codec = str(video.get("codec_name") or "").lower()
+        pix_fmt = str(video.get("pix_fmt") or "").lower()
+        video_tag = str(video.get("codec_tag_string") or "").lower()
+        if video_codec != "h264" or (pix_fmt and pix_fmt != "yuv420p"):
+            return False
+        if video_tag and video_tag not in ("avc1", "avc3"):
+            return False
+        for audio in audio_streams[:1]:
+            audio_codec = str(audio.get("codec_name") or "").lower()
+            if audio_codec not in ("aac", "mp3"):
+                return False
+        return True
+
+    def _run_mp4_compat_ffmpeg(self, cmd, timeout_seconds=1800):
+        startupinfo = None
+        creationflags = 0
+        if platform.system() == "Windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            timeout=timeout_seconds,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "").strip()
+            raise Exception(message[:400] or f"ffmpeg exited with code {result.returncode}")
+
+    def _replace_file_with_retry(self, src_path, dst_path, attempts=24, delay_seconds=0.25):
+        last_exc = None
+        for _attempt in range(max(int(attempts or 1), 1)):
+            try:
+                os.replace(src_path, dst_path)
+                return
+            except OSError as exc:
+                last_exc = exc
+                time.sleep(max(float(delay_seconds or 0.0), 0.05))
+        raise last_exc or OSError("replace failed")
+
+    def _ensure_windows_compatible_mp4(self, item_id, path):
+        if not path or not str(path).lower().endswith(".mp4") or not os.path.exists(path):
+            return
+        ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
+        if not os.path.exists(ffmpeg_path) and ffmpeg_path == os.path.join(_APP_DIR, "ffmpeg.exe"):
+            return
+        task = self.tasks.get(item_id, {})
+        info = self._probe_media_info(path)
+        if not info.get("valid"):
+            raise Exception("MP4 output is not a valid media file")
+        root, ext = os.path.splitext(path)
+        compat_path = f"{root}.windows_compat.tmp{ext or '.mp4'}"
+        transcode_path = f"{root}.windows_transcode.tmp{ext or '.mp4'}"
+        for stale_path in (compat_path, transcode_path):
+            try:
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+            except OSError:
+                pass
+        copy_cmd = [
+            ffmpeg_path,
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            path,
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-dn",
+            "-sn",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-brand",
+            "mp42",
+            "-tag:v",
+            "avc1",
+            compat_path,
+        ]
+        try:
+            self._run_mp4_compat_ffmpeg(copy_cmd)
+            compat_info = self._probe_media_info(compat_path)
+            original_duration = float(info.get("duration", 0.0) or 0.0)
+            compat_duration = float(compat_info.get("duration", 0.0) or 0.0)
+            if not compat_info.get("valid"):
+                raise Exception("compat remux produced invalid media")
+            if original_duration > 300.0 and compat_duration + max(30.0, original_duration * 0.02) < original_duration:
+                raise Exception(f"compat remux duration mismatch: duration={compat_duration:.3f} expected={original_duration:.3f}")
+            if self._is_windows_friendly_mp4_info(compat_info):
+                self._replace_file_with_retry(compat_path, path)
+                write_error_log(
+                    "windows compatible mp4 remuxed",
+                    Exception("windows compatible mp4 remuxed"),
+                    item_id=item_id,
+                    output=path,
+                    source_site=_task_source_site_name(task) or None,
+                    video_codec=(compat_info.get("streams") or [{}])[0].get("codec_name") if compat_info.get("streams") else None,
+                    bytes=self._get_existing_file_size(path),
+                )
+                return
+        except Exception as exc:
+            write_error_log(
+                "windows compatible mp4 remux failed",
+                exc,
+                item_id=item_id,
+                output=path,
+                source_site=_task_source_site_name(task) or None,
+            )
+            try:
+                if os.path.exists(compat_path):
+                    os.remove(compat_path)
+            except OSError:
+                pass
+        transcode_cmd = [
+            ffmpeg_path,
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            path,
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-dn",
+            "-sn",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.1",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "160k",
+            "-movflags",
+            "+faststart",
+            "-brand",
+            "mp42",
+            transcode_path,
+        ]
+        self._run_mp4_compat_ffmpeg(transcode_cmd, timeout_seconds=7200)
+        transcode_info = self._probe_media_info(transcode_path)
+        if not self._is_windows_friendly_mp4_info(transcode_info):
+            raise Exception("windows compatible transcode failed validation")
+        self._replace_file_with_retry(transcode_path, path)
+        write_error_log(
+            "windows compatible mp4 transcoded",
+            Exception("windows compatible mp4 transcoded"),
+            item_id=item_id,
+            output=path,
+            source_site=_task_source_site_name(task) or None,
+            bytes=self._get_existing_file_size(path),
+        )
 
     def _concat_media_files(self, paths, out_path):
         first_path, second_path = paths
@@ -8061,7 +8302,7 @@ class DownloadManagerApp:
     def _download_direct_media_audio_with_ffmpeg(self, item_id, url, save_dir, referer=None, origin=None):
         task = self.tasks.get(item_id, {})
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Audio" or "").strip()
-        safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip() or "Audio"
+        safe_name = _safe_output_stem(name, fallback="Audio")
         out_path = os.path.join(save_dir, f"{safe_name}.mp3")
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
@@ -8545,7 +8786,7 @@ class DownloadManagerApp:
                             is_mp3=bool(_task_field_value(task, "is_mp3", is_mp3)),
                         )
                 raw_name = raw_name or "mega_download.bin"
-            safe_name = re.sub(r'[\\/:*?"<>|]+', "_", raw_name).strip() or "mega_download.bin"
+            safe_name = _safe_output_stem(raw_name, fallback="mega_download")
             if not os.path.splitext(safe_name)[1]:
                 safe_name += ".bin"
             source_out_path = os.path.join(save_dir, safe_name)
@@ -9026,7 +9267,7 @@ class DownloadManagerApp:
 
     def _resolve_direct_media_output_path(self, media_url, save_dir, display_name, default_ext=".mp4"):
         ext = os.path.splitext(urllib.parse.urlparse(str(media_url or "")).path)[1] or default_ext
-        out_name = re.sub(r'[\\/:*?"<>|]+', "_", str(display_name or "")).strip() or "video"
+        out_name = _safe_output_stem(display_name, fallback="video")
         return os.path.join(save_dir, out_name + ext), out_name + ext
 
     def _download_direct_or_audio_media(self, item_id, media_url, save_dir, display_name, is_mp3=False, referer=None, origin=None, headers=None, session=None, default_ext=".mp4"):
@@ -9071,7 +9312,11 @@ class DownloadManagerApp:
                 if unpacked:
                     candidates.extend(_extract_candidate_media_urls(unpacked, allowed_exts=(".mp4", ".m3u8", ".mpd")))
                 candidates = _dedupe_download_urls(candidates)
-                title = _clean_avjoy_title(_extract_html_title(page_text, fallback_name), fallback_name)
+                slug_title = _avjoy_title_from_url_slug(page_url)
+                title = _clean_avjoy_title(_extract_html_title(page_text, slug_title or fallback_name), slug_title or fallback_name)
+                title_code_only = bool(re.fullmatch(r"[A-Z]{2,10}-\d{2,6}", str(title or "").strip()))
+                if slug_title and (title_code_only or len(str(title or "")) < len(slug_title) * 0.45):
+                    title = slug_title
                 if candidates:
                     return title, candidates
             except Exception as exc:
@@ -9166,9 +9411,16 @@ class DownloadManagerApp:
     def _gimy_direct_media_headers(self, referer, origin):
         return {"Referer": referer, "Origin": origin, "User-Agent": DEFAULT_USER_AGENT}
 
-    def _parallel_hls_workers_for_site(self, source_site):
+    def _parallel_hls_workers_for_site(self, source_site, url=""):
         site = (source_site or "").strip().lower()
-        return max(int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, PARALLEL_HLS_SEGMENT_WORKERS)), 1)
+        workers = int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, PARALLEL_HLS_SEGMENT_WORKERS))
+        normalized_url = _normalize_download_url(url)
+        host = urllib.parse.urlsplit(normalized_url).netloc.lower() if normalized_url else ""
+        for marker, host_workers in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST.items():
+            if marker in host:
+                workers = min(workers, int(host_workers))
+                break
+        return max(workers, 1)
 
     def _should_try_parallel_hls_segments(self, url, task):
         source_site = _task_source_site_name(task)
@@ -9325,7 +9577,10 @@ class DownloadManagerApp:
                 raise
             except Exception as exc:
                 last_exc = exc
-                time.sleep(min(0.5 * (attempt + 1), 3.0))
+                if int(getattr(exc, "code", 0) or 0) == 429:
+                    time.sleep(min(2.0 * (attempt + 1), 12.0))
+                else:
+                    time.sleep(min(0.5 * (attempt + 1), 3.0))
         raise last_exc or Exception("parallel HLS segment download failed")
 
     def _remux_parallel_hls_transport_stream(self, ffmpeg_path, source_ts_path, out_path):
@@ -9389,7 +9644,7 @@ class DownloadManagerApp:
         completed_segments = 0
         started_at = time.time()
         completed_lock = threading.Lock()
-        worker_count = min(self._parallel_hls_workers_for_site(_task_source_site_name(task)), total_segments)
+        worker_count = min(self._parallel_hls_workers_for_site(_task_source_site_name(task), media_url), total_segments)
         self._log_ffmpeg_event(
             "parallel hls download started",
             Exception("parallel hls started"),
@@ -9537,7 +9792,7 @@ class DownloadManagerApp:
             "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(source_site, True)),
         }
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Video" or "").strip()
-        safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip() or "Video"
+        safe_name = _safe_output_stem(name, fallback="Video")
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
@@ -9676,7 +9931,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id, {})
         source_site = _task_source_site_name(task)
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Video" or "").strip()
-        safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip() or "Video"
+        safe_name = _safe_output_stem(name, fallback="Video")
         ext = "mp3" if is_mp3 else "mp4"
         out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
@@ -11351,7 +11606,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id, {})
         short_name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or (t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目") or "").strip()
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or short_name or "").strip()
-        safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip() or short_name
+        safe_name = _safe_output_stem(name, fallback=short_name)
         possible_exts = (".mp4", ".mkv", ".webm", ".m4a")
         if is_mp3:
             possible_exts = (".mp3", ".m4a")
@@ -11469,14 +11724,35 @@ class DownloadManagerApp:
                 )
                 return
             if selected_route == "native":
-                self._download_m3u8_with_ytdlp_native(
-                    item_id,
-                    target_url,
-                    save_dir,
-                    is_mp3=is_mp3,
-                    referer=referer,
-                    origin=origin,
-                )
+                try:
+                    self._download_m3u8_with_ytdlp_native(
+                        item_id,
+                        target_url,
+                        save_dir,
+                        is_mp3=is_mp3,
+                        referer=referer,
+                        origin=origin,
+                    )
+                except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+                    raise
+                except Exception as native_exc:
+                    write_error_log(
+                        "native hls handoff to ffmpeg",
+                        native_exc,
+                        url=target_url,
+                        item_id=item_id,
+                        source_site=_task_source_site_name(task) or None,
+                        selected_route=selected_route,
+                    )
+                    self._download_m3u8_with_ffmpeg(
+                        item_id,
+                        target_url,
+                        save_dir,
+                        is_mp3=is_mp3,
+                        referer=referer,
+                        origin=origin,
+                        _native_fallback_done=True,
+                    )
                 return
             _download_manifest_with_generic_ytdlp(target_url, referer=referer, origin=origin)
 
@@ -11504,6 +11780,73 @@ class DownloadManagerApp:
                 updates["fallback_urls"] = normalized_urls
             if updates:
                 self._update_task_state_entry(task, **updates)
+
+        def _dispatch_extracted_media_candidates(
+            candidate_urls,
+            display_name,
+            source_site,
+            source_page=None,
+            referer=None,
+            origin=None,
+            direct_filter=None,
+            manifest_default_route="ffmpeg",
+            headers=None,
+            session=None,
+            missing_message="media URL missing",
+        ):
+            manifest_candidates, direct_media_candidates = _split_stream_and_direct_candidates(
+                candidate_urls,
+                direct_filter=direct_filter,
+            )
+            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
+            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
+            if stream_url:
+                _set_task_identity(
+                    name=display_name,
+                    source_site=source_site,
+                    source_page=source_page or url,
+                    fallback_urls=stream_fallback_urls,
+                )
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    stream_url,
+                    save_dir,
+                    display_name,
+                    is_mp3=is_mp3,
+                    source_site=source_site,
+                    fallback_urls=stream_fallback_urls,
+                    referer=referer or url,
+                    origin=origin,
+                    manifest_downloader=_download_manifest_with_site_strategy,
+                    manifest_default_route=manifest_default_route,
+                    headers=headers,
+                    session=session,
+                )
+                return True
+            if media_url:
+                _set_task_identity(
+                    name=display_name,
+                    source_site=source_site,
+                    source_page=source_page or url,
+                    fallback_urls=media_fallback_urls,
+                )
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    media_url,
+                    save_dir,
+                    display_name,
+                    is_mp3=is_mp3,
+                    source_site=source_site,
+                    fallback_urls=media_fallback_urls,
+                    referer=referer or url,
+                    origin=origin,
+                    headers=headers,
+                    session=session,
+                )
+                return True
+            raise Exception(missing_message)
 
         def _add_m3u8_candidate(candidates, value, base_url=""):
             if isinstance(value, (list, tuple, set)):
@@ -11648,7 +11991,7 @@ class DownloadManagerApp:
                 name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "downloaded_file" or "").strip()
                 if _task_source_site_name(task) == "avjoy":
                     name = _clean_avjoy_title(name, fallback_title=default_short_name_for_url(_task_field_value(task, "source_page") or _task_field_value(task, "url") or url))
-                safe_name = "".join(ch for ch in name if ch not in '\\/:*?"<>|').strip() or "downloaded_file"
+                safe_name = _safe_output_stem(name, fallback="downloaded_file")
                 filename = f"{safe_name}{inferred_direct_media_ext}"
             output_path = os.path.join(save_dir, filename)
             _set_task_aux_fields(task, filename=output_path)
@@ -11841,6 +12184,8 @@ class DownloadManagerApp:
                 candidates[0],
                 referer=url,
                 origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                default_route="ffmpeg",
+                force_ffmpeg=True,
             )
             return
 
@@ -13029,6 +13374,95 @@ class DownloadManagerApp:
             )
             return
 
+        if "avbebe.com" in parsed_url.netloc and "/archives/" in parsed_url.path:
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="正在解析 Avbebe...")
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+            page_headers = _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root)
+            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=page_headers)
+            page_title = _clean_avbebe_title(_extract_html_title(resp.text, short_name or "Avbebe"), short_name or "Avbebe")
+            media_candidates = _dedupe_download_urls(_extract_candidate_media_urls(resp.text, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+            candidate_referers = {_normalize_download_url(candidate): url for candidate in media_candidates}
+            iframe_candidates = []
+            for iframe_src in re.findall(r"<iframe[^>]+src=[\"']([^\"']+)[\"']", resp.text, re.IGNORECASE):
+                iframe_url = _normalize_download_url(urllib.parse.urljoin(url, html.unescape(iframe_src).replace("\\/", "/")))
+                if iframe_url and not any(ad_marker in iframe_url.lower() for ad_marker in ("adserver", "widgets", "juicyads")):
+                    iframe_candidates.append(iframe_url)
+            for iframe_url in iframe_candidates:
+                try:
+                    iframe_headers = _make_ytdlp_http_headers(referer=url, origin=site_root)
+                    iframe_resp = c_req.get(iframe_url, impersonate="chrome120", timeout=20, headers=iframe_headers)
+                    iframe_media_candidates = _extract_candidate_media_urls(
+                        iframe_resp.text,
+                        allowed_exts=(".mp4", ".m3u8", ".mpd"),
+                    )
+                    for candidate in iframe_media_candidates:
+                        normalized_candidate = _normalize_download_url(candidate)
+                        if not normalized_candidate:
+                            continue
+                        media_candidates.append(normalized_candidate)
+                        candidate_referers[normalized_candidate] = iframe_url
+                except Exception as exc:
+                    write_error_log(
+                        "avbebe iframe parser failed",
+                        exc,
+                        item_id=item_id,
+                        url=url,
+                        iframe_url=iframe_url,
+                    )
+            media_candidates = _dedupe_download_urls(media_candidates)
+            stream_candidates = [candidate for candidate in media_candidates if _looks_like_manifest_url(candidate)]
+            direct_candidates = [candidate for candidate in media_candidates if _looks_like_http_media_url(candidate) and not _looks_like_manifest_url(candidate)]
+            stream_url = next((candidate for candidate in stream_candidates if "52cute.com" in urllib.parse.urlsplit(candidate).netloc.lower()), "")
+            stream_url = stream_url or (stream_candidates[0] if stream_candidates else "")
+            if stream_url:
+                fallback_urls = _dedupe_download_urls(stream_candidates[1:] + direct_candidates + iframe_candidates, primary_url=stream_url)
+                stream_referer = candidate_referers.get(_normalize_download_url(stream_url), url) or url
+                referer_parts = urllib.parse.urlsplit(stream_referer)
+                stream_origin = f"{referer_parts.scheme}://{referer_parts.netloc}" if referer_parts.scheme and referer_parts.netloc else site_root
+                _set_task_identity(name=page_title, source_site="avbebe", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=stream_referer,
+                    origin=stream_origin,
+                    default_route="ffmpeg",
+                    force_ffmpeg=True,
+                )
+                return
+            if direct_candidates:
+                direct_url = direct_candidates[0]
+                fallback_urls = _dedupe_download_urls(direct_candidates[1:] + iframe_candidates, primary_url=direct_url)
+                direct_referer = candidate_referers.get(_normalize_download_url(direct_url), url) or url
+                direct_parts = urllib.parse.urlsplit(direct_referer)
+                direct_origin = f"{direct_parts.scheme}://{direct_parts.netloc}" if direct_parts.scheme and direct_parts.netloc else site_root
+                _set_task_identity(name=page_title, source_site="avbebe", source_page=url, fallback_urls=fallback_urls)
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    direct_url,
+                    save_dir,
+                    page_title,
+                    is_mp3=is_mp3,
+                    source_site="avbebe",
+                    fallback_urls=fallback_urls,
+                    referer=direct_referer,
+                    origin=direct_origin,
+                    headers=page_headers,
+                )
+                return
+            write_error_log(
+                "avbebe parser candidates missing",
+                Exception("Avbebe parser found no usable media candidates"),
+                item_id=item_id,
+                url=url,
+                **_http_response_log_fields(resp),
+                has_flowplayer="flowplayer" in (resp.text or "").lower(),
+                has_data_item="data-item" in (resp.text or "").lower(),
+                iframe_count=len(iframe_candidates),
+            )
+            raise Exception("Failed to extract Avbebe stream URL")
+
         if "missav" in parsed_url.netloc:
             self._set_task_parse_ui(item_id, key="eta_site_missav", fallback="正在解析 MissAV 頁面...")
             c_req = get_curl_cffi_requests()
@@ -13082,32 +13516,17 @@ class DownloadManagerApp:
                 page_title = re.sub(r"\s*-\s*PPP\.Porn\s*\|.*$", "", page_title, flags=re.IGNORECASE)
                 page_title = page_title.strip(" -|/") or str(_extract_html_title(resp.text, short_name or "PPP.Porn") or "").strip()
             candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
-            manifest_candidates, direct_media_candidates = _split_stream_and_direct_candidates(candidate_urls)
-            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
-            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
-            if stream_url:
-                _set_task_identity(name=page_title, source_site="ppp.porn", source_page=url, fallback_urls=stream_fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="ppp.porn", fallback_urls=stream_fallback_urls)
-                _download_manifest_with_site_strategy(
-                    stream_url,
-                    referer=url,
-                    origin=site_root,
-                    default_route="ffmpeg",
-                )
-                return
-            if media_url:
-                _set_task_identity(name=page_title, source_site="ppp.porn", source_page=url, fallback_urls=media_fallback_urls)
-                self._download_direct_or_audio_media(
-                    item_id,
-                    media_url,
-                    save_dir,
-                    page_title,
-                    is_mp3=is_mp3,
-                    referer=url,
-                    origin=site_root,
-                )
-                return
-            raise Exception("PPP.Porn media URL missing")
+            _dispatch_extracted_media_candidates(
+                candidate_urls,
+                page_title,
+                "ppp.porn",
+                source_page=url,
+                referer=url,
+                origin=site_root,
+                manifest_default_route="ffmpeg",
+                missing_message="PPP.Porn media URL missing",
+            )
+            return
 
         if "hohoj.tv" in parsed_url.netloc and parsed_url.path.startswith("/video"):
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
@@ -13133,32 +13552,17 @@ class DownloadManagerApp:
                 headers=_make_site_root_headers(site_root, referer=url),
             )
             candidate_urls = _extract_candidate_media_urls(embed_resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
-            manifest_candidates, direct_media_candidates = _split_stream_and_direct_candidates(candidate_urls)
-            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
-            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
-            if stream_url:
-                _set_task_identity(name=page_title, source_site="hohoj", source_page=url, fallback_urls=stream_fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="hohoj", fallback_urls=stream_fallback_urls)
-                _download_manifest_with_site_strategy(
-                    stream_url,
-                    referer=embed_url,
-                    origin=site_root,
-                    default_route="generic",
-                )
-                return
-            if media_url:
-                _set_task_identity(name=page_title, source_site="hohoj", source_page=url, fallback_urls=media_fallback_urls)
-                self._download_direct_or_audio_media(
-                    item_id,
-                    media_url,
-                    save_dir,
-                    page_title,
-                    is_mp3=is_mp3,
-                    referer=embed_url,
-                    origin=site_root,
-                )
-                return
-            raise Exception("HoHoJ media URL missing")
+            _dispatch_extracted_media_candidates(
+                candidate_urls,
+                page_title,
+                "hohoj",
+                source_page=url,
+                referer=embed_url,
+                origin=site_root,
+                manifest_default_route="generic",
+                missing_message="HoHoJ media URL missing",
+            )
+            return
 
         if "goodav17.com" in parsed_url.netloc and ("/vr_html/" in parsed_url.path or "/html/" in parsed_url.path):
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
@@ -13190,38 +13594,21 @@ class DownloadManagerApp:
                         )
                     except Exception:
                         pass
-            manifest_candidates, direct_media_candidates = _split_stream_and_direct_candidates(
+            _dispatch_extracted_media_candidates(
                 candidate_urls,
+                page_title,
+                "goodav17",
+                source_page=url,
+                referer=url,
+                origin=site_root,
                 direct_filter=lambda candidate: (
                     "vr.goodav17.com/media/" in candidate.lower()
                     or ("ggjav.com" in urllib.parse.urlparse(candidate).netloc.lower() and candidate.lower().endswith(".mp4"))
                 ),
+                manifest_default_route="generic",
+                missing_message="GoodAV media URL missing",
             )
-            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
-            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
-            if stream_url:
-                _set_task_identity(name=page_title, source_site="goodav17", source_page=url, fallback_urls=stream_fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="goodav17", fallback_urls=stream_fallback_urls)
-                _download_manifest_with_site_strategy(
-                    stream_url,
-                    referer=url,
-                    origin=site_root,
-                    default_route="generic",
-                )
-                return
-            if media_url:
-                _set_task_identity(name=page_title, source_site="goodav17", source_page=url, fallback_urls=media_fallback_urls)
-                self._download_direct_or_audio_media(
-                    item_id,
-                    media_url,
-                    save_dir,
-                    page_title,
-                    is_mp3=is_mp3,
-                    referer=url,
-                    origin=site_root,
-                )
-                return
-            raise Exception("GoodAV media URL missing")
+            return
 
         if "javfilms.com" in parsed_url.netloc and "/video/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
@@ -13348,34 +13735,17 @@ class DownloadManagerApp:
                 page_title = re.sub(r"\s*[-|]\s*18JAV.*$", "", page_title, flags=re.IGNORECASE)
                 page_title = page_title.strip(" -|/") or str(_extract_html_title(resp.text, short_name or "18JAV") or "").strip()
             candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
-            manifest_candidates, direct_media_candidates = _split_stream_and_direct_candidates(
+            _dispatch_extracted_media_candidates(
                 candidate_urls,
+                page_title,
+                "18jav",
+                source_page=url,
+                referer=url,
+                origin=site_root,
                 direct_filter=lambda candidate: not _is_18av_preview_media_url(candidate),
+                missing_message="18JAV media URL missing",
             )
-            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
-            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
-            if stream_url:
-                _set_task_identity(name=page_title, source_site="18jav", source_page=url, fallback_urls=stream_fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18jav", fallback_urls=stream_fallback_urls)
-                _download_manifest_with_site_strategy(
-                    stream_url,
-                    referer=url,
-                    origin=site_root,
-                )
-                return
-            if media_url:
-                _set_task_identity(name=page_title, source_site="18jav", source_page=url, fallback_urls=media_fallback_urls)
-                self._download_direct_or_audio_media(
-                    item_id,
-                    media_url,
-                    save_dir,
-                    page_title,
-                    is_mp3=is_mp3,
-                    referer=url,
-                    origin=site_root,
-                )
-                return
-            raise Exception("18JAV media URL missing")
+            return
 
         if "18av.mm-cg.com" in parsed_url.netloc and (
             "/animation_content/" in parsed_url.path
@@ -13493,29 +13863,16 @@ class DownloadManagerApp:
                 display_name = page_title
             candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
             candidate_urls.extend(_extract_pikpak_media_candidates(share_entries))
-            manifest_candidates, direct_media_candidates = _split_stream_and_direct_candidates(candidate_urls)
-            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
-            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
-            if stream_url:
-                _set_task_identity(name=display_name, source_site="pikpak", source_page=url, fallback_urls=stream_fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="pikpak", fallback_urls=stream_fallback_urls)
-                _download_manifest_with_site_strategy(
-                    stream_url,
-                    referer=url,
-                    origin=site_root,
-                    default_route="ffmpeg",
-                )
-                return
-            if media_url:
-                _set_task_identity(name=display_name, source_site="pikpak", source_page=url, fallback_urls=media_fallback_urls)
-                self._download_direct_or_audio_media(
-                    item_id,
-                    media_url,
-                    save_dir,
+            if candidate_urls:
+                _dispatch_extracted_media_candidates(
+                    candidate_urls,
                     display_name,
-                    is_mp3=is_mp3,
+                    "pikpak",
+                    source_page=url,
                     referer=url,
                     origin=site_root,
+                    manifest_default_route="ffmpeg",
+                    missing_message="PikPak media URL missing",
                 )
                 return
             _set_task_identity(name=display_name, source_site="pikpak", source_page=url, fallback_urls=[])
