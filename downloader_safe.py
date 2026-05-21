@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260521-2980"
+APP_BUILD = "20260521-2981"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -9276,6 +9276,21 @@ class DownloadManagerApp:
             return bytes.fromhex(raw_iv.zfill(32)[-32:])
         return int(sequence).to_bytes(16, byteorder="big", signed=False)
 
+    def _remove_parallel_hls_aes_padding(self, data):
+        if not data:
+            return data
+        pad_len = data[-1]
+        if not (1 <= int(pad_len) <= 16):
+            return data
+        if len(data) < pad_len or data[-pad_len:] != bytes([pad_len]) * pad_len:
+            return data
+        unpadded = data[:-pad_len]
+        # MPEG-TS packets are 188 bytes. Only strip AES PKCS#7 padding when it
+        # restores packet alignment; otherwise preserve the decrypted bytes.
+        if unpadded and len(unpadded) % 188 == 0:
+            return unpadded
+        return data
+
     def _download_parallel_hls_segment(self, segment, part_path, headers, key_cache, stop_event):
         if stop_event.is_set() or self._shutdown_started:
             raise StopDownloadException("stop requested")
@@ -9300,7 +9315,7 @@ class DownloadManagerApp:
                         CryptoAES.MODE_CBC,
                         self._parallel_hls_iv_for_segment(key_info, segment.get("sequence", segment.get("index", 0))),
                     )
-                    data = cipher.decrypt(data)
+                    data = self._remove_parallel_hls_aes_padding(cipher.decrypt(data))
                 temp_part_path = f"{part_path}.tmp"
                 with open(temp_part_path, "wb") as out_f:
                     out_f.write(data)
@@ -9435,8 +9450,13 @@ class DownloadManagerApp:
                         shutil.copyfileobj(part_f, merged_f, length=HTTP_FILE_COPY_CHUNK_SIZE)
             self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
             final_info = self._probe_media_info(merged_path)
+            final_duration = float(final_info.get("duration", 0.0) or 0.0)
             if not final_info.get("valid") or int(final_info.get("size", 0) or 0) <= 0:
                 raise Exception("parallel HLS remux produced invalid output")
+            if total_duration > 300.0 and final_duration > 0.0 and final_duration + max(60.0, total_duration * 0.02) < total_duration:
+                raise Exception(f"parallel HLS output duration mismatch: duration={final_duration:.3f} expected={total_duration:.3f}")
+            if total_duration > 300.0 and final_duration <= 0.0:
+                raise Exception(f"parallel HLS output duration missing: expected={total_duration:.3f}")
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             with self._resume_artifact_lock_for(merged_path, out_path):
                 if os.path.exists(out_path):
