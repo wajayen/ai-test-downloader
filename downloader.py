@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260521-2990"
+APP_BUILD = "20260521-3000"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -72,12 +72,14 @@ CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
 STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
 ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
-MAX_DOWNLOADS_PER_DOMAIN = 3
+MAX_DOWNLOADS_PER_DOMAIN = 4
 MAX_DOWNLOADS_PER_SOURCE_PAGE = MAX_DOWNLOADS_PER_DOMAIN
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
+    "avbebe": 4,
     "movieffm": 3,
 }
 MAX_DOWNLOADS_PER_SOURCE_SITE = {
+    "avbebe": 4,
     "movieffm": 3,
 }
 LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
@@ -129,9 +131,12 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
 PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
+    "googleusercontent.com": 1,
 }
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 30
 PARALLEL_HLS_SEGMENT_RETRIES = 5
+PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES = 20
+PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "gimy": 15.0,
@@ -311,6 +316,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg download finished",
     "parallel hls download started",
     "parallel hls download finished",
+    "parallel hls purged invalid resume segments",
+    "parallel hls skipped missing leading resume segments",
     "windows compatible mp4 remuxed",
     "windows compatible mp4 remux failed",
     "windows compatible mp4 transcoded",
@@ -800,6 +807,14 @@ class StopDownloadException(BaseException):
 
 class ResumeLowSpeedReanalysisException(Exception):
     """Trigger one source-page reanalysis when a resumed transfer stays too slow."""
+
+
+class ParallelHlsRetryLaterException(Exception):
+    """Keep problematic HLS sources out of ffmpeg fallback when segments are rate-limited."""
+
+
+class ParallelHlsUnsupportedSegmentContentException(Exception):
+    """Raised when an HLS playlist points at non-video segment payloads."""
 
 
 def t(key, **kwargs):
@@ -2434,6 +2449,101 @@ def _clean_avbebe_title(raw_title, fallback_title="Avbebe"):
     cleaned = re.sub(r"\s*(?:&#8211;|–|-|\|)\s*Avbebe.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+高清H動畫.*$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/,") or str(fallback_title or "Avbebe").strip() or "Avbebe"
+
+
+def _avbebe_iframe_priority(url):
+    host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
+    if "turbovidhls.com" in host or "turboviplay.com" in host:
+        return 0
+    if "hgcloud.to" in host:
+        return 30
+    return 10
+
+
+def _avbebe_can_retry_iframe_directly(url):
+    host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
+    if "hgcloud.to" in host:
+        return False
+    return bool(host)
+
+
+def _avbebe_stream_priority(url):
+    host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
+    if "52cute.com" in host:
+        return 0
+    if "turboviplay.com" in host or "turbosplayer.com" in host:
+        return 10
+    if "hgcloud.to" in host:
+        return 50
+    return 10
+
+
+def _is_non_video_probe_payload(data, content_type=""):
+    lowered_type = str(content_type or "").lower()
+    if any(marker in lowered_type for marker in ("text/html", "image/", "application/json")):
+        return True
+    prefix = (data or b"")[:128].lstrip()
+    return prefix.startswith((b"<!DOCTYPE", b"<html", b"{", b"\x89PNG", b"GIF8", b"\xff\xd8\xff"))
+
+
+def _avbebe_manifest_looks_downloadable(manifest_url, referer=None, origin=None, timeout=12):
+    normalized = _normalize_download_url(manifest_url)
+    if not normalized:
+        return False
+    manifest_host = urllib.parse.urlsplit(normalized).netloc.lower()
+    strict_probe = any(marker in manifest_host for marker in ("turboviplay.com", "turbosplayer.com"))
+    headers = _make_hls_http_headers(referer=referer, origin=origin)
+    try:
+        req = urllib.request.Request(normalized, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            manifest_text = resp.read(512 * 1024).decode("utf-8", "ignore")
+    except Exception:
+        return not strict_probe
+    if "#EXTM3U" not in manifest_text:
+        return False
+    base_url = normalized
+    lines = [line.strip() for line in manifest_text.splitlines() if line.strip()]
+    variant_url = ""
+    for index, line in enumerate(lines):
+        if line.startswith("#EXT-X-STREAM-INF"):
+            for next_line in lines[index + 1:]:
+                if not next_line.startswith("#"):
+                    variant_url = urllib.parse.urljoin(base_url, next_line)
+                    break
+        if variant_url:
+            break
+    if variant_url:
+        try:
+            req = urllib.request.Request(variant_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                manifest_text = resp.read(512 * 1024).decode("utf-8", "ignore")
+            base_url = variant_url
+            lines = [line.strip() for line in manifest_text.splitlines() if line.strip()]
+        except Exception:
+            return not strict_probe
+    segment_url = ""
+    for line in lines:
+        if line.startswith("#"):
+            continue
+        if ".m3u8" in line.lower():
+            continue
+        segment_url = urllib.parse.urljoin(base_url, line)
+        break
+    if not segment_url:
+        return True
+    probe_headers = dict(headers)
+    probe_headers.setdefault("Range", "bytes=0-511")
+    try:
+        req = urllib.request.Request(segment_url, headers=probe_headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content_type = str(resp.headers.get("Content-Type") or "").lower()
+            data = resp.read(512)
+    except Exception:
+        segment_host = urllib.parse.urlsplit(_normalize_download_url(segment_url)).netloc.lower()
+        if strict_probe or "googleusercontent.com" in segment_host:
+            return False
+        return True
+    return not _is_non_video_probe_payload(data, content_type)
 
 
 def _avjoy_title_from_url_slug(page_url):
@@ -9390,7 +9500,13 @@ class DownloadManagerApp:
                     default_ext=default_ext,
                 )
                 return
-            except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+            except (
+                StopDownloadException,
+                KeyboardInterrupt,
+                ResumeLowSpeedReanalysisException,
+                ParallelHlsRetryLaterException,
+                ParallelHlsUnsupportedSegmentContentException,
+            ):
                 raise
             except Exception as exc:
                 last_error = exc
@@ -9420,6 +9536,17 @@ class DownloadManagerApp:
             if marker in host:
                 workers = min(workers, int(host_workers))
                 break
+        return max(workers, 1)
+
+    def _parallel_hls_workers_for_segments(self, source_site, media_url, segments):
+        workers = self._parallel_hls_workers_for_site(source_site, media_url)
+        segment_hosts = {
+            urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower()
+            for segment in (segments or [])
+        }
+        for marker, host_workers in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST.items():
+            if any(marker in host for host in segment_hosts):
+                workers = min(workers, int(host_workers))
         return max(workers, 1)
 
     def _should_try_parallel_hls_segments(self, url, task):
@@ -9452,14 +9579,32 @@ class DownloadManagerApp:
         playlist_url = _normalize_download_url(url)
         playlist_text = self._fetch_hls_text_for_parallel(playlist_url, headers)
         lines = [line.strip() for line in playlist_text.splitlines() if line.strip()]
+        variants = []
         for index, line in enumerate(lines):
             if not line.startswith("#EXT-X-STREAM-INF"):
                 continue
+            attrs = self._parse_hls_attribute_list(line.split(":", 1)[1] if ":" in line else "")
             for next_line in lines[index + 1:]:
                 if next_line.startswith("#"):
                     continue
                 media_url = urllib.parse.urljoin(playlist_url, next_line)
-                return media_url, self._fetch_hls_text_for_parallel(media_url, headers)
+                try:
+                    bandwidth = int(attrs.get("AVERAGE-BANDWIDTH") or attrs.get("BANDWIDTH") or 0)
+                except Exception:
+                    bandwidth = 0
+                resolution = str(attrs.get("RESOLUTION") or "")
+                resolution_match = re.search(r"(\d+)\s*x\s*(\d+)", resolution, re.IGNORECASE)
+                pixel_count = 0
+                if resolution_match:
+                    try:
+                        pixel_count = int(resolution_match.group(1) or 0) * int(resolution_match.group(2) or 0)
+                    except Exception:
+                        pixel_count = 0
+                variants.append((bandwidth, pixel_count, media_url))
+                break
+        if variants:
+            _bandwidth, _pixel_count, media_url = max(variants, key=lambda item: (item[0], item[1]))
+            return media_url, self._fetch_hls_text_for_parallel(media_url, headers)
         return playlist_url, playlist_text
 
     def _parse_parallel_hls_segments(self, playlist_url, playlist_text):
@@ -9520,6 +9665,143 @@ class DownloadManagerApp:
             key_cache[key_url] = key_data
         return key_cache
 
+    def _is_valid_parallel_hls_segment_data(self, data, content_type=""):
+        if not data or len(data) < 16:
+            return False
+        lowered_type = str(content_type or "").lower()
+        if self._is_unsupported_parallel_hls_segment_payload(data, lowered_type):
+            return False
+        if data[0] == 0x47:
+            return True
+        if data[4:8] in (b"ftyp", b"moof", b"mdat", b"styp"):
+            return True
+        prefix = data[:128].lstrip()
+        return "video/" in lowered_type or "application/octet-stream" in lowered_type
+
+    def _is_unsupported_parallel_hls_segment_payload(self, data, content_type=""):
+        lowered_type = str(content_type or "").lower()
+        if any(marker in lowered_type for marker in ("text/html", "image/", "application/json")):
+            return True
+        prefix = (data or b"")[:128].lstrip()
+        return prefix.startswith((b"<!DOCTYPE", b"<html", b"{", b"\x89PNG", b"GIF8", b"\xff\xd8\xff"))
+
+    def _is_valid_parallel_hls_part_file(self, path):
+        if not self._has_nonempty_file(path):
+            return False
+        try:
+            with open(path, "rb") as part_f:
+                head = part_f.read(512)
+            return self._is_valid_parallel_hls_segment_data(head, content_type="application/octet-stream")
+        except Exception:
+            return False
+
+    def _preflight_parallel_hls_segments(self, segments, headers):
+        google_segments = [
+            segment
+            for segment in (segments or [])
+            if "googleusercontent.com" in urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower()
+        ]
+        if not google_segments:
+            return
+        request_headers = dict(headers or {})
+        request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        for segment in google_segments[:3]:
+            segment_url = _normalize_download_url(segment.get("url", ""))
+            if not segment_url:
+                continue
+            try:
+                req = urllib.request.Request(segment_url, headers=request_headers, method="HEAD")
+                with urllib.request.urlopen(req, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                    content_type = str(resp.headers.get("Content-Type") or "").lower()
+            except Exception:
+                continue
+            if "image/" in content_type:
+                raise ParallelHlsUnsupportedSegmentContentException(
+                    f"Google-backed HLS returned non-video segment content: {content_type}"
+                )
+
+    def _probe_unsupported_parallel_hls_segment(self, segment, headers):
+        segment_url = _normalize_download_url((segment or {}).get("url", ""))
+        if not segment_url:
+            return False
+        segment_host = urllib.parse.urlsplit(segment_url).netloc.lower()
+        if "googleusercontent.com" not in segment_host:
+            return False
+        request_headers = dict(headers or {})
+        request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        request_headers.setdefault("Range", "bytes=0-511")
+        try:
+            with urllib.request.urlopen(urllib.request.Request(segment_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                content_type = str(resp.headers.get("Content-Type") or "").lower()
+                data = resp.read(512)
+        except Exception:
+            return False
+        return self._is_unsupported_parallel_hls_segment_payload(data, content_type)
+
+    def _drop_unsupported_edge_parallel_hls_segments(self, segments, headers, max_probe=5):
+        ordered = list(segments or [])
+        if not ordered:
+            return ordered, 0, 0
+        start = 0
+        end = len(ordered)
+        probe_limit = max(int(max_probe or 0), 0)
+        while start < end and start < probe_limit and self._probe_unsupported_parallel_hls_segment(ordered[start], headers):
+            start += 1
+        trailing_checked = 0
+        while end > start and trailing_checked < probe_limit and self._probe_unsupported_parallel_hls_segment(ordered[end - 1], headers):
+            end -= 1
+            trailing_checked += 1
+        return ordered[start:end], start, len(ordered) - end
+
+    def _drop_missing_leading_resume_hls_segments(self, segments, part_dir, max_skip=5, min_existing_after=10):
+        ordered = list(segments or [])
+        if not ordered or not part_dir or not os.path.isdir(part_dir):
+            return ordered, 0
+        probe_limit = min(max(int(max_skip or 0), 0), len(ordered))
+        required_existing = max(int(min_existing_after or 0), 1)
+        for skip_count in range(1, probe_limit + 1):
+            skipped = ordered[:skip_count]
+            if any(
+                self._is_valid_parallel_hls_part_file(os.path.join(part_dir, f"{int(segment['index']):06d}.ts"))
+                for segment in skipped
+            ):
+                break
+            following = ordered[skip_count: skip_count + required_existing]
+            if len(following) < required_existing:
+                break
+            if all(
+                self._is_valid_parallel_hls_part_file(os.path.join(part_dir, f"{int(segment['index']):06d}.ts"))
+                for segment in following
+            ):
+                return ordered[skip_count:], skip_count
+        return ordered, 0
+
+    def _purge_invalid_parallel_hls_resume_parts(self, part_dir, sample_limit=24):
+        if not part_dir or not os.path.isdir(part_dir):
+            return 0
+        try:
+            part_files = sorted(
+                os.path.join(part_dir, name)
+                for name in os.listdir(part_dir)
+                if name.lower().endswith(".ts")
+            )
+        except OSError:
+            return 0
+        if not part_files:
+            return 0
+        sampled_files = part_files[:max(int(sample_limit or 0), 1)]
+        for path in sampled_files:
+            try:
+                with open(path, "rb") as part_f:
+                    head = part_f.read(512)
+            except OSError:
+                continue
+            if self._is_unsupported_parallel_hls_segment_payload(head, "application/octet-stream"):
+                count = len(part_files)
+                shutil.rmtree(part_dir, ignore_errors=True)
+                return count
+        return 0
+
     def _parallel_hls_iv_for_segment(self, key_info, sequence):
         raw_iv = str((key_info or {}).get("iv", "") or "").strip()
         if raw_iv:
@@ -9546,17 +9828,33 @@ class DownloadManagerApp:
     def _download_parallel_hls_segment(self, segment, part_path, headers, key_cache, stop_event):
         if stop_event.is_set() or self._shutdown_started:
             raise StopDownloadException("stop requested")
-        if self._has_nonempty_file(part_path):
+        if self._is_valid_parallel_hls_part_file(part_path):
             return os.path.getsize(part_path)
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
         request_headers = dict(headers or {})
         request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        segment_url = str(segment.get("url") or "")
+        segment_host = urllib.parse.urlsplit(_normalize_download_url(segment_url) or "").netloc.lower()
+        is_google_segment = "googleusercontent.com" in segment_host
+        retry_count = PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES if is_google_segment else PARALLEL_HLS_SEGMENT_RETRIES
         last_exc = None
-        for attempt in range(PARALLEL_HLS_SEGMENT_RETRIES):
+        for attempt in range(retry_count):
             try:
                 if stop_event.is_set() or self._shutdown_started:
                     raise StopDownloadException("stop requested")
                 with urllib.request.urlopen(urllib.request.Request(segment["url"], headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                    content_type = str(resp.headers.get("Content-Type") or "").lower()
                     data = resp.read()
+                if not self._is_valid_parallel_hls_segment_data(data, content_type=content_type):
+                    if is_google_segment and self._is_unsupported_parallel_hls_segment_payload(data, content_type):
+                        raise ParallelHlsUnsupportedSegmentContentException(
+                            f"Google-backed HLS returned non-video segment content: {content_type or 'unknown'}"
+                        )
+                    raise Exception(f"invalid HLS segment content: {content_type or 'unknown'}")
                 key_info = segment.get("key") or {}
                 key_url = key_info.get("uri")
                 if key_url:
@@ -9575,9 +9873,14 @@ class DownloadManagerApp:
                 return len(data)
             except StopDownloadException:
                 raise
+            except ParallelHlsUnsupportedSegmentContentException:
+                raise
             except Exception as exc:
                 last_exc = exc
-                if int(getattr(exc, "code", 0) or 0) == 429:
+                if is_google_segment:
+                    delay = PARALLEL_HLS_GOOGLE_RETRY_DELAYS[min(attempt, len(PARALLEL_HLS_GOOGLE_RETRY_DELAYS) - 1)]
+                    time.sleep(delay)
+                elif int(getattr(exc, "code", 0) or 0) == 429:
                     time.sleep(min(2.0 * (attempt + 1), 12.0))
                 else:
                     time.sleep(min(0.5 * (attempt + 1), 3.0))
@@ -9629,22 +9932,95 @@ class DownloadManagerApp:
             return False
         media_url, playlist_text = self._resolve_parallel_hls_media_playlist(url, headers)
         segments = self._parse_parallel_hls_segments(media_url, playlist_text)
+        original_segment_count = len(segments)
+        segments, skipped_leading_segments, skipped_trailing_segments = self._drop_unsupported_edge_parallel_hls_segments(segments, headers)
+        if skipped_leading_segments or skipped_trailing_segments:
+            write_error_log(
+                "parallel hls skipped unsupported edge segments",
+                Exception("parallel HLS skipped non-video edge segments"),
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                original_segments=original_segment_count,
+                skipped_leading_segments=skipped_leading_segments,
+                skipped_trailing_segments=skipped_trailing_segments,
+                remaining_segments=len(segments),
+            )
+            self._set_task_parse_ui(
+                item_id,
+                message=f"已跳過來源非影片片段，開始下載 {len(segments)}/{original_segment_count} 段...",
+            )
+        if not segments:
+            raise ParallelHlsUnsupportedSegmentContentException("HLS playlist contains no usable video segments")
+        part_dir = f"{os.path.splitext(temp_out_path)[0]}.segments"
+        os.makedirs(part_dir, exist_ok=True)
+        if _task_source_site_name(task) == "avbebe":
+            purged_invalid_parts = self._purge_invalid_parallel_hls_resume_parts(part_dir)
+            if purged_invalid_parts:
+                os.makedirs(part_dir, exist_ok=True)
+                write_error_log(
+                    "parallel hls purged invalid resume segments",
+                    Exception("parallel HLS purged invalid resume segments"),
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    purged_segments=purged_invalid_parts,
+                    part_dir=part_dir,
+                )
+                self._set_task_parse_ui(
+                    item_id,
+                    message=f"已清除錯誤續傳片段 {purged_invalid_parts} 段，重新開始下載...",
+                )
+            segments, skipped_missing_leading_segments = self._drop_missing_leading_resume_hls_segments(segments, part_dir)
+            if skipped_missing_leading_segments:
+                write_error_log(
+                    "parallel hls skipped missing leading resume segments",
+                    Exception("parallel HLS skipped missing leading resume segments"),
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    original_segments=original_segment_count,
+                    skipped_missing_leading_segments=skipped_missing_leading_segments,
+                    remaining_segments=len(segments),
+                    part_dir=part_dir,
+                )
+                self._set_task_parse_ui(
+                    item_id,
+                    message=f"續傳缺少開頭 {skipped_missing_leading_segments} 段，已跳過並開始合併...",
+                )
+        if not segments:
+            raise ParallelHlsUnsupportedSegmentContentException("HLS playlist contains no usable resume segments")
         if any((segment.get("key") or {}).get("uri") for segment in segments) and CryptoAES is None:
             return False
         key_cache = self._fetch_parallel_hls_keys(segments, headers)
-        part_dir = f"{os.path.splitext(temp_out_path)[0]}.segments"
-        os.makedirs(part_dir, exist_ok=True)
         transport_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ts"
         merged_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.mp4"
         stop_event = threading.Event()
         total_segments = len(segments)
+        has_google_segments = any(
+            "googleusercontent.com" in urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower()
+            for segment in segments
+        )
+        try:
+            self._preflight_parallel_hls_segments(segments, headers)
+        except ParallelHlsUnsupportedSegmentContentException as exc:
+            write_error_log(
+                "parallel hls unsupported segment content",
+                exc,
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                segments=total_segments,
+                google_segments=has_google_segments,
+            )
+            raise
         total_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in segments)
         completed_bytes = 0
         completed_duration = 0.0
         completed_segments = 0
         started_at = time.time()
         completed_lock = threading.Lock()
-        worker_count = min(self._parallel_hls_workers_for_site(_task_source_site_name(task), media_url), total_segments)
+        worker_count = min(self._parallel_hls_workers_for_segments(_task_source_site_name(task), media_url, segments), total_segments)
         self._log_ffmpeg_event(
             "parallel hls download started",
             Exception("parallel hls started"),
@@ -9659,6 +10035,26 @@ class DownloadManagerApp:
 
         def _part_path(segment):
             return os.path.join(part_dir, f"{int(segment['index']):06d}.ts")
+
+        existing_segments = [segment for segment in segments if self._is_valid_parallel_hls_part_file(_part_path(segment))]
+        if existing_segments:
+            completed_bytes = sum(self._get_existing_file_size(_part_path(segment)) for segment in existing_segments)
+            completed_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in existing_segments)
+            completed_segments = len(existing_segments)
+            if total_duration > 0:
+                percent = min((completed_duration / total_duration) * 100.0, 99.0)
+                self.update_tree_many(item_id, {
+                    "progress": f"{percent:.1f}%",
+                    "size": f"{completed_segments}/{total_segments}",
+                    "speed_eta": f"續傳已載入 {completed_segments}/{total_segments} 段",
+                }, force=True)
+            self._save_resume_progress(
+                progress_path,
+                completed_duration,
+                source_url=_normalize_download_url(url) or url,
+                bytes_done=completed_bytes,
+                total_bytes=completed_bytes,
+            )
 
         def _download_one(segment):
             nonlocal completed_bytes, completed_duration, completed_segments
@@ -9693,13 +10089,13 @@ class DownloadManagerApp:
 
         try:
             with DaemonThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = [executor.submit(_download_one, segment) for segment in segments if not self._has_nonempty_file(_part_path(segment))]
+                futures = [executor.submit(_download_one, segment) for segment in segments if not self._is_valid_parallel_hls_part_file(_part_path(segment))]
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
             with open(transport_path, "wb") as merged_f:
                 for segment in segments:
                     part_path = _part_path(segment)
-                    if not self._has_nonempty_file(part_path):
+                    if not self._is_valid_parallel_hls_part_file(part_path):
                         raise Exception("parallel HLS segment missing after download")
                     with open(part_path, "rb") as part_f:
                         shutil.copyfileobj(part_f, merged_f, length=HTTP_FILE_COPY_CHUNK_SIZE)
@@ -9741,15 +10137,19 @@ class DownloadManagerApp:
             raise
         except Exception as exc:
             stop_event.set()
+            log_title = "parallel hls google retry later" if has_google_segments else "parallel hls fallback to ffmpeg"
             write_error_log(
-                "parallel hls fallback to ffmpeg",
+                log_title,
                 exc,
                 url=media_url,
                 item_id=item_id,
                 source_site=_task_source_site_name(task) or None,
                 segments=total_segments,
                 workers=worker_count,
+                google_segments=has_google_segments,
             )
+            if has_google_segments:
+                raise ParallelHlsRetryLaterException(str(exc)[:240] or "Google-backed HLS segments are temporarily rate-limited")
             return False
 
     def _download_m3u8_with_ytdlp_native(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net"):
@@ -10285,7 +10685,13 @@ class DownloadManagerApp:
                     ffmpeg_path,
                     ffmpeg_version=ffmpeg_version,
                 )
-            except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+            except (
+                StopDownloadException,
+                KeyboardInterrupt,
+                ResumeLowSpeedReanalysisException,
+                ParallelHlsRetryLaterException,
+                ParallelHlsUnsupportedSegmentContentException,
+            ):
                 raise
             except Exception as exc:
                 parallel_finished = False
@@ -11487,7 +11893,29 @@ class DownloadManagerApp:
         try:
             self._download_task_internal(cached_resolved_url, item_id, save_dir, use_impersonate, is_mp3)
             return True
-        except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+        except (ParallelHlsRetryLaterException, ParallelHlsUnsupportedSegmentContentException) as cached_exc:
+            write_error_log(
+                "cached resolved url rejected",
+                cached_exc,
+                item_id=item_id,
+                source_url=source_url,
+                resolved_url=cached_resolved_url,
+                source_site=_task_source_site_name(task) or None,
+            )
+            self._set_cached_resolved_link_state(
+                task,
+                resolved_url="",
+                resolved_url_saved_at=0.0,
+                page_refresh_candidates=[],
+                clear_source_refresh_history=True,
+            )
+            self._set_task_parse_ui(item_id, message="已清除錯誤下載連結，請重新加入或重試來源頁...")
+            raise
+        except (
+            StopDownloadException,
+            KeyboardInterrupt,
+            ResumeLowSpeedReanalysisException,
+        ):
             raise
         except Exception as cached_exc:
             write_error_log(
@@ -11792,6 +12220,7 @@ class DownloadManagerApp:
             manifest_default_route="ffmpeg",
             headers=None,
             session=None,
+            prefer_direct=False,
             missing_message="media URL missing",
         ):
             manifest_candidates, direct_media_candidates = _split_stream_and_direct_candidates(
@@ -11800,6 +12229,28 @@ class DownloadManagerApp:
             )
             stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
             media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
+            if prefer_direct and media_url:
+                _set_task_identity(
+                    name=display_name,
+                    source_site=source_site,
+                    source_page=source_page or url,
+                    fallback_urls=media_fallback_urls + manifest_candidates,
+                )
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    media_url,
+                    save_dir,
+                    display_name,
+                    is_mp3=is_mp3,
+                    source_site=source_site,
+                    fallback_urls=media_fallback_urls + manifest_candidates,
+                    referer=referer or url,
+                    origin=origin,
+                    headers=headers,
+                    session=session,
+                )
+                return True
             if stream_url:
                 _set_task_identity(
                     name=display_name,
@@ -13374,6 +13825,36 @@ class DownloadManagerApp:
             )
             return
 
+        if ("turbovidhls.com" in parsed_url.netloc or "turboviplay.com" in parsed_url.netloc) and ("/t/" in parsed_url.path or "/embed/" in parsed_url.path):
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="Parsing Avbebe playable iframe...")
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+            iframe_headers = _make_ytdlp_http_headers(referer=task.get("source_page") or "https://avbebe.com/", origin=site_root)
+            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=iframe_headers)
+            stream_candidates = _dedupe_download_urls(_extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mpd")))
+            stream_url = stream_candidates[0] if stream_candidates else ""
+            if not stream_url:
+                write_error_log(
+                    "avbebe playable iframe candidates missing",
+                    Exception("Avbebe playable iframe did not expose a manifest URL"),
+                    item_id=item_id,
+                    url=url,
+                    **_http_response_log_fields(resp),
+                )
+                raise Exception("Failed to extract Avbebe playable iframe stream URL")
+            page_title = _clean_avbebe_title(_extract_html_title(resp.text, task.get("name") or short_name or "Avbebe"), task.get("name") or short_name or "Avbebe")
+            fallback_urls = _dedupe_download_urls(stream_candidates[1:], primary_url=stream_url)
+            _set_task_identity(name=page_title, source_site="avbebe", source_page=task.get("source_page") or url, fallback_urls=fallback_urls)
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
+            _download_manifest_with_site_strategy(
+                stream_url,
+                referer=url,
+                origin=site_root,
+                default_route="ffmpeg",
+                force_ffmpeg=True,
+            )
+            return
+
         if "avbebe.com" in parsed_url.netloc and "/archives/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="正在解析 Avbebe...")
             c_req = get_curl_cffi_requests()
@@ -13388,6 +13869,7 @@ class DownloadManagerApp:
                 iframe_url = _normalize_download_url(urllib.parse.urljoin(url, html.unescape(iframe_src).replace("\\/", "/")))
                 if iframe_url and not any(ad_marker in iframe_url.lower() for ad_marker in ("adserver", "widgets", "juicyads")):
                     iframe_candidates.append(iframe_url)
+            iframe_candidates = sorted(_dedupe_download_urls(iframe_candidates), key=_avbebe_iframe_priority)
             for iframe_url in iframe_candidates:
                 try:
                     iframe_headers = _make_ytdlp_http_headers(referer=url, origin=site_root)
@@ -13411,10 +13893,29 @@ class DownloadManagerApp:
                         iframe_url=iframe_url,
                     )
             media_candidates = _dedupe_download_urls(media_candidates)
-            stream_candidates = [candidate for candidate in media_candidates if _looks_like_manifest_url(candidate)]
+            stream_candidates = sorted(
+                [candidate for candidate in media_candidates if _looks_like_manifest_url(candidate)],
+                key=_avbebe_stream_priority,
+            )
             direct_candidates = [candidate for candidate in media_candidates if _looks_like_http_media_url(candidate) and not _looks_like_manifest_url(candidate)]
-            stream_url = next((candidate for candidate in stream_candidates if "52cute.com" in urllib.parse.urlsplit(candidate).netloc.lower()), "")
-            stream_url = stream_url or (stream_candidates[0] if stream_candidates else "")
+            valid_stream_candidates = []
+            for candidate in stream_candidates:
+                candidate_referer = candidate_referers.get(_normalize_download_url(candidate), url) or url
+                candidate_parts = urllib.parse.urlsplit(candidate_referer)
+                candidate_origin = f"{candidate_parts.scheme}://{candidate_parts.netloc}" if candidate_parts.scheme and candidate_parts.netloc else site_root
+                if _avbebe_manifest_looks_downloadable(candidate, referer=candidate_referer, origin=candidate_origin):
+                    valid_stream_candidates.append(candidate)
+                    continue
+                write_error_log(
+                    "avbebe rejected non-video stream candidate",
+                    Exception("Avbebe stream candidate returned non-video segment content"),
+                    item_id=item_id,
+                    url=url,
+                    candidate_url=candidate,
+                    candidate_referer=candidate_referer,
+                )
+            stream_candidates = valid_stream_candidates
+            stream_url = stream_candidates[0] if stream_candidates else ""
             if stream_url:
                 fallback_urls = _dedupe_download_urls(stream_candidates[1:] + direct_candidates + iframe_candidates, primary_url=stream_url)
                 stream_referer = candidate_referers.get(_normalize_download_url(stream_url), url) or url
@@ -13450,6 +13951,23 @@ class DownloadManagerApp:
                     origin=direct_origin,
                     headers=page_headers,
                 )
+                return
+            if iframe_candidates:
+                retryable_iframe_candidates = [candidate for candidate in iframe_candidates if _avbebe_can_retry_iframe_directly(candidate)]
+                iframe_url = retryable_iframe_candidates[0] if retryable_iframe_candidates else ""
+                if not iframe_url:
+                    write_error_log(
+                        "avbebe iframe candidates unsupported",
+                        Exception("Avbebe iframe fallback only found unsupported host pages"),
+                        item_id=item_id,
+                        url=url,
+                        iframe_candidates=iframe_candidates,
+                    )
+                    raise Exception("Failed to extract Avbebe stream URL")
+                fallback_urls = _dedupe_download_urls(retryable_iframe_candidates[1:], primary_url=iframe_url)
+                _set_task_identity(name=page_title, source_site="avbebe", source_page=url, fallback_urls=fallback_urls)
+                self._set_task_parse_ui(item_id, message="Avbebe 直連不可用，改用網頁可播放分流...")
+                self._download_task_internal(iframe_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
                 return
             write_error_log(
                 "avbebe parser candidates missing",
@@ -13993,24 +14511,17 @@ class DownloadManagerApp:
                 for page_text in page_variants
             ):
                 raise Exception("EvoLoad source unavailable")
-            if not media_url:
-                raise Exception("EvoLoad media URL missing")
             page_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or short_name or "").strip() or short_name or "MovieFFM"
-            fallback_urls = [candidate for candidate in media_candidates if candidate != media_url]
-            _set_task_identity(name=page_title, source_site=_task_source_site_name(task) or "movieffm", source_page=url, fallback_urls=fallback_urls)
-            self._download_routed_media_url(
-                task,
-                item_id,
-                media_url,
-                save_dir,
+            _dispatch_extracted_media_candidates(
+                media_candidates,
                 page_title,
-                is_mp3=is_mp3,
-                source_site=_task_source_site_name(task) or "movieffm",
-                fallback_urls=fallback_urls,
+                _task_source_site_name(task) or "movieffm",
+                source_page=url,
                 referer=url,
                 origin=evoload_origin,
-                manifest_downloader=_download_manifest_with_site_strategy,
+                manifest_default_route="ffmpeg",
                 session=evoload_session,
+                missing_message="EvoLoad media URL missing",
             )
             return
 
@@ -14023,27 +14534,18 @@ class DownloadManagerApp:
             mixdrop_session = self._track_network_session(c_req.Session(impersonate="chrome120"))
             resp = mixdrop_session.get(watch_url, timeout=20, headers=_make_ytdlp_http_headers(referer=source_page_referer))
             candidates = _extract_mixdrop_media_candidates(resp.text)
-            media_url = next((candidate for candidate in candidates if _looks_like_http_media_url(candidate)), None)
-            if not media_url:
-                media_url = next((candidate for candidate in candidates if _looks_like_manifest_url(candidate)), None)
-            if not media_url:
-                raise Exception("MixDrop media URL missing")
             page_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or short_name or "").strip() or short_name or _extract_html_title(resp.text, short_name)
-            fallback_urls = [candidate for candidate in candidates if candidate != media_url]
-            _set_task_identity(name=page_title, source_site=_task_source_site_name(task) or "movieffm", source_page=watch_url, fallback_urls=fallback_urls)
-            self._download_routed_media_url(
-                task,
-                item_id,
-                media_url,
-                save_dir,
+            _dispatch_extracted_media_candidates(
+                candidates,
                 page_title,
-                is_mp3=is_mp3,
-                source_site=_task_source_site_name(task) or "movieffm",
-                fallback_urls=fallback_urls,
+                _task_source_site_name(task) or "movieffm",
+                source_page=watch_url,
                 referer=watch_url,
                 origin=mixdrop_origin,
-                manifest_downloader=_download_manifest_with_site_strategy,
+                manifest_default_route="ffmpeg",
                 session=mixdrop_session,
+                prefer_direct=True,
+                missing_message="MixDrop media URL missing",
             )
             return
 
