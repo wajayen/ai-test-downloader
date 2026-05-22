@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260522-3020"
+APP_BUILD = "20260522-3030"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -188,19 +188,41 @@ def _looks_like_code_only_title(value):
     return bool(re.fullmatch(r"[A-Za-z]{2,10}[-_. ]?\d{2,6}", text))
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe"))
-PARALLEL_HLS_SEGMENT_HOST_MARKERS = ("xluuss", "xlzyd.com", "52cute.com", "turboviplay.com", "premilkyway.com")
+def _looks_like_numeric_only_title(value):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return bool(re.fullmatch(r"\d{3,10}", text))
+
+
+def _extract_jav_code(value):
+    text = html.unescape(str(value or "")).strip()
+    match = re.search(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})\b", text)
+    if not match:
+        return ""
+    return f"{match.group(1).upper()}-{match.group(2)}"
+
+
+def _normalize_jav_code_for_compare(value):
+    code = _extract_jav_code(value)
+    return re.sub(r"[^A-Z0-9]", "", code.upper()) if code else ""
+
+
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj"))
+PARALLEL_HLS_SEGMENT_HOST_MARKERS = ("xluuss", "xlzyd.com", "52cute.com", "turboviplay.com", "premilkyway.com", "ggjav.com")
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 20,
     "avbebe": 24,
+    "goodav17": 16,
+    "hohoj": 16,
 }
 PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "premilkyway.com": 24,
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
+    "ggjav.com": 16,
     "googleusercontent.com": 1,
 }
+PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 30
 PARALLEL_HLS_SEGMENT_RETRIES = 5
 PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES = 20
@@ -321,6 +343,7 @@ YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
 ))
 NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv"))
 NATIVE_HLS_NEVER_SITES = frozenset(("njavtv", "3kor", "missav"))
+NATIVE_HLS_DISABLED_HOST_MARKERS = ("ggjav",)
 NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "18av": ("streamfastpro",),
     "18jav": ("hshdkshd", "cdnlab.live"),
@@ -345,6 +368,8 @@ YTDLP_PROGRESS_UI_UPDATE_INTERVAL_SECONDS = 2.25
 YTDLP_PROGRESS_UI_MIN_BYTES_DELTA = 1 * 1024 * 1024
 FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS = 5.0
 FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA = 8 * 1024 * 1024
+FFMPEG_NEAR_COMPLETE_RESUME_SECONDS = 30.0
+FFMPEG_NEAR_COMPLETE_RESUME_RATIO = 0.01
 HLS_RESUME_REWIND_MIN_SECONDS = 6.0
 HLS_RESUME_REWIND_MAX_SECONDS = 20.0
 HLS_RESUME_REWIND_SEGMENT_MULTIPLIER = 2.5
@@ -387,6 +412,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg download finished",
     "parallel hls download started",
     "parallel hls download finished",
+    "parallel hls skipped fmp4 playlist",
+    "parallel hls skipped huge playlist",
     "parallel hls purged invalid resume segments",
     "parallel hls skipped missing leading resume segments",
     "windows compatible mp4 remuxed",
@@ -405,6 +432,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "native hls handoff to ffmpeg",
     "gimy native hls handoff to ffmpeg",
     "native hls failed output removed",
+    "ffmpeg near complete resume accepted",
+    "resume invalid partial reset",
     "resume low speed reanalysis requested",
     "missav parser retry recovered",
     "xiaoyakankan parse start",
@@ -2488,13 +2517,16 @@ def _is_18av_preview_media_url(url):
     )
 
 
-def _clean_hohoj_title(raw_title):
+def _clean_hohoj_title(raw_title, fallback_title="HoHoJ"):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
-        return cleaned
+        return str(fallback_title or "").strip()
     cleaned = re.sub(r"^\[\]\s*", "", cleaned)
     cleaned = re.sub(r"\s+HoHoJ(?:\.TV)?\s+.*$", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+    cleaned = cleaned.strip(" -|/,")
+    if not cleaned or _looks_like_garbled_text(cleaned):
+        return str(fallback_title or "").strip()
+    return cleaned
 
 
 def _clean_javfilms_title(raw_title):
@@ -2544,7 +2576,7 @@ def _clean_avbebe_title(raw_title, fallback_title="Avbebe"):
 def _extract_avbebe_page_title(page_text, fallback_title="Avbebe"):
     text = str(page_text or "")
     title_candidates = []
-    for attr_name in ("og:title", "twitter:title", "name", "headline"):
+    for attr_name in ("twitter:title", "name", "headline", "og:title"):
         pattern = (
             r"<meta\b(?=[^>]*(?:property|name|itemprop)=['\"]"
             + re.escape(attr_name)
@@ -2558,9 +2590,24 @@ def _extract_avbebe_page_title(page_text, fallback_title="Avbebe"):
     for json_match in re.finditer(r'"(?:name|headline)"\s*:\s*"([^"]{3,300})"', text, re.IGNORECASE):
         title_candidates.append(json_match.group(1))
     title_candidates.append(_extract_html_title(text, fallback_title))
+    fallback_is_placeholder = (
+        _looks_like_numeric_only_title(fallback_title)
+        or _looks_like_code_only_title(fallback_title)
+        or str(fallback_title or "").strip().lower() in ("avbebe", "video")
+    )
     for candidate in title_candidates:
+        if _looks_like_garbled_text(candidate):
+            continue
         cleaned = _clean_avbebe_title(candidate, fallback_title)
-        if cleaned and cleaned.lower() != "avbebe" and not _looks_like_garbled_text(cleaned):
+        if not cleaned or cleaned.lower() == "avbebe" or _looks_like_garbled_text(cleaned):
+            continue
+        if _looks_like_numeric_only_title(cleaned) and fallback_is_placeholder:
+            continue
+        if _looks_like_code_only_title(cleaned) and fallback_is_placeholder:
+            continue
+        if cleaned == str(fallback_title or "").strip() and fallback_is_placeholder:
+            continue
+        if cleaned:
             return cleaned
     return _clean_avbebe_title(fallback_title, "Avbebe")
 
@@ -2856,6 +2903,44 @@ def _goodav_title_for_display(raw_title):
     cleaned = re.sub(r"\s*-\s*正妹AV.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^\s*VR線上成人影片.*?-\s*", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+
+
+def _clean_ggjav_title_for_display(raw_title, fallback_title=""):
+    cleaned = re.sub(r"<[^>]+>", " ", str(raw_title or ""))
+    cleaned = html.unescape(cleaned).replace("\xa0", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return str(fallback_title or "").strip()
+    cleaned = re.sub(r"\s*-\s*GGJAV\s*\|.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*-\s*搜尋\s*-\s*第\d+頁\s*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" -|/,")
+    return cleaned or str(fallback_title or "").strip()
+
+
+def _extract_ggjav_search_title(page_text, jav_code, fallback_title=""):
+    code_key = _normalize_jav_code_for_compare(jav_code)
+    if not code_key:
+        return ""
+    text = str(page_text or "")
+    candidates = []
+    for match in re.finditer(
+        r'<div\b[^>]*class=["\'][^"\']*\bitem_title\b[^"\']*["\'][^>]*>.*?<a\b[^>]*>(.*?)</a>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        candidates.append(match.group(1))
+    for match in re.finditer(r'<img\b[^>]*\balt=["\']([^"\']+)["\']', text, re.IGNORECASE | re.DOTALL):
+        candidates.append(match.group(1))
+    for candidate in candidates:
+        cleaned = _clean_ggjav_title_for_display(candidate, fallback_title)
+        if not cleaned or _looks_like_garbled_text(cleaned):
+            continue
+        if _normalize_jav_code_for_compare(cleaned) != code_key:
+            continue
+        if _looks_like_code_only_title(cleaned):
+            continue
+        return cleaned
+    return ""
 
 
 def _decode_goodav_embed_media_url(embed_url):
@@ -3709,6 +3794,8 @@ def _should_prefer_native_hls(url, task=None):
     parsed = urllib.parse.urlparse(str(url or ""))
     host = str(parsed.netloc or "").strip().lower()
     source_site = _task_source_site_name(task)
+    if any(marker in host for marker in NATIVE_HLS_DISABLED_HOST_MARKERS):
+        return False
     if source_site == "movieffm" and _should_use_ffmpeg_for_movieffm_manifest(url):
         return False
     if source_site in NATIVE_HLS_ALWAYS_SITES:
@@ -5583,7 +5670,7 @@ class DownloadManagerApp:
                 )
                 fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "HoHoJ"
                 page_text = _response_text_utf8(resp)
-                page_title = _clean_hohoj_title(_extract_html_title(page_text, fallback_title))
+                page_title = _clean_hohoj_title(_extract_html_title(page_text, fallback_title), fallback_title)
                 self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="hohoj")
             except Exception as exc:
                 write_error_log("hohoj parse failure", exc, url=new_url)
@@ -5728,6 +5815,15 @@ class DownloadManagerApp:
             self._clear_url_entry()
             return
         short_name = custom_name if custom_name else default_short_name_for_url(url, is_mp3=is_mp3)
+        if _looks_like_garbled_text(short_name):
+            write_error_log(
+                "garbled initial task title ignored",
+                Exception("garbled initial task title ignored"),
+                url=url,
+                source_site=source_site or None,
+                rejected_title=short_name,
+            )
+            short_name = default_short_name_for_url(url, is_mp3=is_mp3)
         add_to_state(url, short_name, is_mp3, source_site=source_site, extra_task_data=extra_task_data)
         self._start_download_thread(url, short_name, is_mp3=is_mp3, source_site=source_site, extra_task_data=extra_task_data)
         self._clear_url_entry()
@@ -6502,6 +6598,24 @@ class DownloadManagerApp:
     def _set_task_display_name(self, task, item_id, name, source_site=None, source_page=None):
         normalized_name = re.sub(r"\s+", " ", str(name or "")).strip()
         if not normalized_name:
+            return ""
+        if _looks_like_garbled_text(normalized_name):
+            current_name = re.sub(
+                r"\s+",
+                " ",
+                str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip(),
+            )
+            if current_name and not _looks_like_garbled_text(current_name):
+                write_error_log(
+                    "garbled task title ignored",
+                    Exception("garbled task title ignored"),
+                    item_id=item_id,
+                    source_site=source_site or _task_source_site_name(task) or None,
+                    rejected_title=normalized_name,
+                    kept_title=current_name,
+                    source_page=source_page or self._get_task_source_page(task, fallback_url=""),
+                )
+                return current_name
             return ""
         task["short_name"] = normalized_name
         task["name"] = normalized_name
@@ -8066,6 +8180,79 @@ class DownloadManagerApp:
             except OSError:
                 continue
 
+    def _near_complete_resume_threshold_seconds(self, total_duration):
+        try:
+            duration_value = max(float(total_duration or 0.0), 0.0)
+        except (TypeError, ValueError):
+            duration_value = 0.0
+        if duration_value <= 0.0:
+            return FFMPEG_NEAR_COMPLETE_RESUME_SECONDS
+        return max(FFMPEG_NEAR_COMPLETE_RESUME_SECONDS, duration_value * FFMPEG_NEAR_COMPLETE_RESUME_RATIO)
+
+    def _finalize_near_complete_hls_resume_base(
+        self,
+        task,
+        item_id,
+        media_url,
+        temp_out_path,
+        out_path,
+        resume_out_path,
+        merged_out_path,
+        progress_path,
+        total_duration,
+        resume_anchor_seconds,
+        base_bytes,
+    ):
+        if not temp_out_path or not out_path or not self._has_nonempty_file(temp_out_path):
+            return False
+        try:
+            duration_value = max(float(total_duration or 0.0), 0.0)
+            anchor_value = max(float(resume_anchor_seconds or 0.0), 0.0)
+        except (TypeError, ValueError):
+            return False
+        if duration_value <= 0.0 or anchor_value <= 0.0:
+            return False
+        threshold_seconds = self._near_complete_resume_threshold_seconds(duration_value)
+        anchor_remaining = max(duration_value - anchor_value, 0.0)
+        if anchor_remaining > threshold_seconds:
+            return False
+        base_info = self._probe_media_info(temp_out_path)
+        base_duration = max(float(base_info.get("duration", 0.0) or 0.0), 0.0)
+        base_size = max(int(base_info.get("size", 0) or 0), int(base_bytes or 0))
+        if not base_info.get("valid") or base_duration <= 0.0 or base_size < 5 * 1024 * 1024:
+            return False
+        base_remaining = duration_value - base_duration
+        if base_remaining < -threshold_seconds or base_remaining > threshold_seconds:
+            return False
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with self._resume_artifact_lock_for(temp_out_path, out_path):
+            if os.path.abspath(temp_out_path) != os.path.abspath(out_path):
+                if os.path.exists(out_path):
+                    try:
+                        os.remove(out_path)
+                    except OSError:
+                        pass
+                self._move_file_with_retry(temp_out_path, out_path, attempts=48, delay_seconds=0.5)
+        self._remove_artifact_paths(
+            *(path for path in (resume_out_path, merged_out_path, progress_path) if path != out_path)
+        )
+        self._set_task_named_column_text(item_id, "progress", "100%")
+        self._mark_task_finished(item_id)
+        self._log_ffmpeg_event(
+            "ffmpeg near complete resume accepted",
+            Exception("near complete HLS resume base accepted"),
+            task,
+            item_id,
+            media_url,
+            output=out_path,
+            base_duration=base_duration,
+            total_duration=duration_value,
+            remaining_seconds=max(base_remaining, 0.0),
+            threshold_seconds=threshold_seconds,
+            bytes=base_size,
+        )
+        return True
+
     def _remove_yt_dlp_fragment_artifacts(self, output_root):
         root = str(output_root or "").strip()
         if not root:
@@ -8153,6 +8340,27 @@ class DownloadManagerApp:
         self._remove_artifact_paths(*paths)
         return 0, 0.0
 
+    def _clear_resume_artifacts_for_url(self, task, media_url, save_dir, is_mp3=False):
+        ext = "mp3" if is_mp3 else "mp4"
+        try:
+            temp_out_path, _resume_key, _resume_keys = self._resolve_resume_artifact_base(
+                task,
+                media_url,
+                ext=ext,
+                save_dir=save_dir,
+                fallback_name="Audio" if is_mp3 else "Video",
+            )
+        except Exception:
+            return
+        temp_root, temp_ext = os.path.splitext(temp_out_path)
+        artifact_paths = (
+            temp_out_path,
+            f"{temp_root}.resume{temp_ext}",
+            f"{temp_root}.merged{temp_ext}",
+            temp_out_path + ".progress.json",
+        )
+        self._remove_artifact_paths(*artifact_paths)
+
     def _load_resume_progress_info(self, progress_path):
         if not progress_path or not os.path.exists(progress_path):
             return {"seconds": 0, "bytes": 0, "source_url": "", "resume_id": ""}
@@ -8214,6 +8422,8 @@ class DownloadManagerApp:
         if old_seconds_value - new_seconds_value < 15.0:
             return False
         byte_tolerance = max(16 * 1024 * 1024, int(old_bytes_value * 0.05))
+        if old_bytes_value > 0 and new_bytes_value > 0 and new_bytes_value + byte_tolerance < old_bytes_value:
+            return False
         if new_bytes_value > old_bytes_value + byte_tolerance:
             return False
         return True
@@ -8226,6 +8436,7 @@ class DownloadManagerApp:
         bytes_done=None,
         min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
         min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
+        force=False,
     ):
         if not progress_path:
             return
@@ -8237,62 +8448,63 @@ class DownloadManagerApp:
         min_bytes_delta = max(int(min_bytes_delta or 0), 0)
         now = time.time()
         cached = None
-        with self._resume_progress_lock:
-            cached = self._resume_progress_cache.get(progress_path)
+        if not force:
+            with self._resume_progress_lock:
+                cached = self._resume_progress_cache.get(progress_path)
+                if cached:
+                    last_seconds = float(cached.get("seconds", 0.0) or 0.0)
+                    last_bytes = int(cached.get("bytes", 0) or 0)
+                    last_source = str(cached.get("source_url", "") or "")
+                    last_resume_id = str(cached.get("resume_id", "") or "")
+                    last_saved_at = float(cached.get("saved_at", 0.0) or 0.0)
+                    same_resume_target = (
+                        (source_value and source_value == last_source)
+                        or (resume_id_value and resume_id_value == last_resume_id)
+                    )
+                    if same_resume_target:
+                        if self._should_prefer_lower_resume_progress(seconds_value, bytes_value, last_seconds, last_bytes):
+                            pass
+                        else:
+                            seconds_value = max(seconds_value, last_seconds)
+                            bytes_value = max(bytes_value, last_bytes)
+                    if (
+                        same_resume_target
+                        and now - last_saved_at < min_interval_seconds
+                        and abs(seconds_value - last_seconds) < min_interval_seconds
+                        and abs(bytes_value - last_bytes) < min_bytes_delta
+                    ):
+                        self._resume_progress_cache[progress_path] = {
+                            "seconds": seconds_value,
+                            "bytes": bytes_value,
+                            "source_url": source_value,
+                            "resume_id": resume_id_value,
+                            "saved_at": last_saved_at,
+                        }
+                        return
+            should_load_persisted = True
             if cached:
-                last_seconds = float(cached.get("seconds", 0.0) or 0.0)
-                last_bytes = int(cached.get("bytes", 0) or 0)
-                last_source = str(cached.get("source_url", "") or "")
-                last_resume_id = str(cached.get("resume_id", "") or "")
-                last_saved_at = float(cached.get("saved_at", 0.0) or 0.0)
-                same_resume_target = (
-                    (source_value and source_value == last_source)
-                    or (resume_id_value and resume_id_value == last_resume_id)
-                )
-                if same_resume_target:
-                    if self._should_prefer_lower_resume_progress(seconds_value, bytes_value, last_seconds, last_bytes):
+                cached_source = str(cached.get("source_url", "") or "")
+                cached_resume_id = str(cached.get("resume_id", "") or "")
+                if (
+                    (not source_value or source_value == cached_source)
+                    or (resume_id_value and resume_id_value == cached_resume_id)
+                ):
+                    should_load_persisted = False
+            if should_load_persisted:
+                persisted = self._load_resume_progress_info(progress_path)
+                persisted_source = str(persisted.get("source_url", "") or "")
+                persisted_resume_id = str(persisted.get("resume_id", "") or "")
+                if (
+                    (source_value and persisted_source == source_value)
+                    or (resume_id_value and persisted_resume_id == resume_id_value)
+                ):
+                    persisted_seconds = float(persisted.get("seconds", 0.0) or 0.0)
+                    persisted_bytes = int(persisted.get("bytes", 0) or 0)
+                    if self._should_prefer_lower_resume_progress(seconds_value, bytes_value, persisted_seconds, persisted_bytes):
                         pass
                     else:
-                        seconds_value = max(seconds_value, last_seconds)
-                        bytes_value = max(bytes_value, last_bytes)
-                if (
-                    same_resume_target
-                    and now - last_saved_at < min_interval_seconds
-                    and abs(seconds_value - last_seconds) < min_interval_seconds
-                    and abs(bytes_value - last_bytes) < min_bytes_delta
-                ):
-                    self._resume_progress_cache[progress_path] = {
-                        "seconds": seconds_value,
-                        "bytes": bytes_value,
-                        "source_url": source_value,
-                        "resume_id": resume_id_value,
-                        "saved_at": last_saved_at,
-                    }
-                    return
-        should_load_persisted = True
-        if cached:
-            cached_source = str(cached.get("source_url", "") or "")
-            cached_resume_id = str(cached.get("resume_id", "") or "")
-            if (
-                (not source_value or source_value == cached_source)
-                or (resume_id_value and resume_id_value == cached_resume_id)
-            ):
-                should_load_persisted = False
-        if should_load_persisted:
-            persisted = self._load_resume_progress_info(progress_path)
-            persisted_source = str(persisted.get("source_url", "") or "")
-            persisted_resume_id = str(persisted.get("resume_id", "") or "")
-            if (
-                (source_value and persisted_source == source_value)
-                or (resume_id_value and persisted_resume_id == resume_id_value)
-            ):
-                persisted_seconds = float(persisted.get("seconds", 0.0) or 0.0)
-                persisted_bytes = int(persisted.get("bytes", 0) or 0)
-                if self._should_prefer_lower_resume_progress(seconds_value, bytes_value, persisted_seconds, persisted_bytes):
-                    pass
-                else:
-                    seconds_value = max(seconds_value, persisted_seconds)
-                    bytes_value = max(bytes_value, persisted_bytes)
+                        seconds_value = max(seconds_value, persisted_seconds)
+                        bytes_value = max(bytes_value, persisted_bytes)
         payload = {
             "seconds": seconds_value,
             "bytes": bytes_value,
@@ -10249,8 +10461,28 @@ class DownloadManagerApp:
         if bool(_task_field_value(task, "is_mp3", False)):
             return False
         media_url, playlist_text = self._resolve_parallel_hls_media_playlist(url, headers)
+        if "#EXT-X-MAP" in str(playlist_text or "").upper():
+            write_error_log(
+                "parallel hls skipped fmp4 playlist",
+                Exception("parallel HLS skipped fragmented MP4 playlist"),
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+            )
+            return False
         segments = self._parse_parallel_hls_segments(media_url, playlist_text)
         original_segment_count = len(segments)
+        if original_segment_count > PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE:
+            write_error_log(
+                "parallel hls skipped huge playlist",
+                Exception("parallel HLS skipped huge playlist"),
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                segments=original_segment_count,
+                max_segments=PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE,
+            )
+            return False
         segments, skipped_leading_segments, skipped_trailing_segments = self._drop_unsupported_edge_parallel_hls_segments(segments, headers)
         if skipped_leading_segments or skipped_trailing_segments:
             write_error_log(
@@ -11068,7 +11300,16 @@ class DownloadManagerApp:
             partial_reason = partial_info.get("reason")
             partial_valid = bool(partial_info.get("valid"))
             size_consistent = partial_size > 0 and stored_bytes > 0 and abs(partial_size - stored_bytes) <= max(1024 * 1024, int(max(partial_size, stored_bytes) * 0.35))
-            usable_sidecar_only_partial = partial_size > 0 and same_resume_target and (partial_valid or partial_reason == "ffprobe-error")
+            strict_resume_requires_valid_partial = _task_source_site_name(task) in STRICT_RESUMED_FFMPEG_ARTIFACT_SITES
+            invalid_strict_partial = partial_size > 0 and same_resume_target and strict_resume_requires_valid_partial and not partial_valid
+            usable_sidecar_only_partial = (
+                partial_size > 0
+                and same_resume_target
+                and (
+                    partial_valid
+                    or (partial_reason == "ffprobe-error" and not strict_resume_requires_valid_partial)
+                )
+            )
             if partial_valid and partial_duration > 0:
                 base_bytes = partial_size
                 resume_seconds = partial_duration
@@ -11082,15 +11323,17 @@ class DownloadManagerApp:
                         partial_duration,
                         source_url=resume_key,
                         bytes_done=partial_size,
+                        force=True,
                     )
             elif usable_sidecar_only_partial:
                 base_bytes = partial_size
                 resume_seconds = stored_seconds
                 resume_mode = "sidecar_only"
             else:
-                if partial_size > 0 and (not same_resume_target or (stored_bytes > 0 and not size_consistent)):
+                if partial_size > 0 and (invalid_strict_partial or not same_resume_target or (stored_bytes > 0 and not size_consistent)):
+                    reset_context = "resume invalid partial reset" if invalid_strict_partial else "resume state reset"
                     write_error_log(
-                        "resume state reset",
+                        reset_context,
                         Exception("resume metadata mismatch"),
                         url=candidate_url,
                         item_id=item_id,
@@ -11104,6 +11347,7 @@ class DownloadManagerApp:
                         stored_progress=stored_seconds,
                         stored_bytes=stored_bytes,
                         stored_source_url=stored_source_url,
+                        strict_resume_requires_valid_partial=strict_resume_requires_valid_partial,
                     )
                     if same_resume_target and partial_valid and partial_duration > 0:
                         base_bytes = partial_size
@@ -11114,6 +11358,7 @@ class DownloadManagerApp:
                             partial_duration,
                             source_url=resume_key,
                             bytes_done=partial_size,
+                            force=True,
                         )
                     else:
                         base_bytes, resume_seconds = self._reset_resume_artifacts(temp_out_path, resume_out_path, merged_out_path, progress_path)
@@ -11141,6 +11386,25 @@ class DownloadManagerApp:
             if total_duration > 0 and resume_seconds > 0:
                 resume_seconds = self._sanitize_resume_seconds(resume_seconds, total_duration)
             resume_anchor_seconds = resume_seconds
+            if (
+                not is_mp3
+                and resume_anchor_seconds > 0
+                and total_duration > 0
+                and self._finalize_near_complete_hls_resume_base(
+                    task,
+                    item_id,
+                    candidate_url,
+                    temp_out_path,
+                    out_path,
+                    resume_out_path,
+                    merged_out_path,
+                    progress_path,
+                    total_duration,
+                    resume_anchor_seconds,
+                    base_bytes,
+                )
+            ):
+                return
             resume_seek_seconds = resume_anchor_seconds
             resume_overlap_seconds = 0.0
             if resume_anchor_seconds > 0:
@@ -11478,11 +11742,12 @@ class DownloadManagerApp:
                                 base_offset_seconds=(resume_seek_seconds if resume_anchor_seconds > 0 else 0.0),
                                 trim_initial_seconds=(resume_overlap_seconds if resume_anchor_seconds > 0 else 0.0),
                             )
+                            checkpoint_bytes_done = current_bytes
                             self._save_resume_progress(
                                 progress_path,
                                 checkpoint_seconds,
                                 source_url=resume_key,
-                                bytes_done=current_bytes,
+                                bytes_done=checkpoint_bytes_done,
                                 min_interval_seconds=FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
                                 min_bytes_delta=FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA,
                             )
@@ -11572,7 +11837,25 @@ class DownloadManagerApp:
                             duration=final_duration,
                             total_duration=total_duration,
                         )
-                        self._remove_artifact_paths(temp_out_path, resume_out_path, merged_out_path, progress_path, final_source)
+                        if resume_anchor_seconds > 0 and base_exists and self._has_nonempty_file(temp_out_path):
+                            base_info = self._probe_media_info(temp_out_path)
+                            recovered_seconds = max(float(base_info.get("duration", 0.0) or 0.0), 0.0)
+                            recovered_bytes = max(int(base_info.get("size", 0) or 0), int(base_bytes or 0))
+                            if base_info.get("valid") and recovered_seconds > 0.0:
+                                self._remove_artifact_paths(resume_out_path, merged_out_path)
+                                self._save_resume_progress(
+                                    progress_path,
+                                    recovered_seconds,
+                                    source_url=resume_key,
+                                    bytes_done=recovered_bytes,
+                                    min_interval_seconds=0,
+                                    min_bytes_delta=0,
+                                    force=True,
+                                )
+                            else:
+                                self._remove_artifact_paths(temp_out_path, resume_out_path, merged_out_path, progress_path, final_source)
+                        else:
+                            self._remove_artifact_paths(temp_out_path, resume_out_path, merged_out_path, progress_path, final_source)
                         continue
                 if is_mp3 and final_size < 64 * 1024:
                     last_error = Exception(f"FFmpeg produced an unexpectedly tiny audio artifact: size={final_size}")
@@ -12201,7 +12484,9 @@ class DownloadManagerApp:
         )
         return True
 
-    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False):
+    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False, failed_resolved_url=""):
+        if failed_resolved_url:
+            self._clear_resume_artifacts_for_url(task, failed_resolved_url, save_dir, is_mp3=is_mp3)
         self._set_cached_resolved_link_state(
             task,
             resolved_url="",
@@ -12214,7 +12499,7 @@ class DownloadManagerApp:
         else:
             self._set_task_parse_ui(item_id, message="已記錄連結失效，重新分析頁面...")
         retry_url = self._get_task_source_page(task, fallback_url=source_url)
-        if _task_source_site_name(task) == "movieffm" and retry_url and retry_url != source_url:
+        if retry_url and retry_url != source_url:
             self._download_task_internal(retry_url, item_id, save_dir, use_impersonate, is_mp3)
             return
         self._download_task_internal(source_url, item_id, save_dir, use_impersonate, is_mp3)
@@ -12269,13 +12554,41 @@ class DownloadManagerApp:
         current_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
         if not current_title:
             return True
-        if _looks_like_garbled_text(current_title) or _looks_like_code_only_title(current_title):
+        if _looks_like_garbled_text(current_title) or _looks_like_code_only_title(current_title) or _looks_like_numeric_only_title(current_title):
             return True
         current_stem = os.path.splitext(os.path.basename(current_title))[0].strip()
-        return _looks_like_garbled_text(current_stem) or _looks_like_code_only_title(current_stem)
+        return _looks_like_garbled_text(current_stem) or _looks_like_code_only_title(current_stem) or _looks_like_numeric_only_title(current_stem)
+
+    def _refresh_goodav_title_from_ggjav_search(self, title_or_url, fallback_title=""):
+        jav_code = _extract_jav_code(title_or_url) or _extract_jav_code(fallback_title)
+        if not jav_code:
+            return ""
+        try:
+            c_req = get_curl_cffi_requests()
+            search_url = "https://ggjav.com/main/search?string=" + urllib.parse.quote(jav_code)
+            resp = c_req.get(
+                search_url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=_make_site_root_headers("https://ggjav.com", referer="https://ggjav.com/"),
+            )
+            refreshed_title = _extract_ggjav_search_title(_response_text_utf8(resp), jav_code, fallback_title or jav_code)
+            if refreshed_title and not _looks_like_code_only_title(refreshed_title):
+                return _goodav_title_for_display(refreshed_title)
+        except Exception as exc:
+            write_error_log(
+                "goodav title search refresh failed",
+                exc,
+                source_site="goodav17",
+                jav_code=jav_code,
+            )
+        return ""
 
     def _refresh_task_title_before_output_name(self, task, item_id, source_url):
         source_site = _task_source_site_name(task)
+        source_host = urllib.parse.urlparse(str(source_url or "")).netloc.lower()
+        if not source_site and ("ggjav.com" in source_host or "goodav17.com" in source_host):
+            source_site = "goodav17"
         if source_site not in ("avbebe", "goodav17", "hohoj"):
             return ""
         if not self._task_display_name_needs_source_refresh(task):
@@ -12285,7 +12598,15 @@ class DownloadManagerApp:
                 source_page_url = self._get_task_source_page(task, fallback_url=source_url)
                 parsed_page = urllib.parse.urlparse(source_page_url or "")
                 if not parsed_page.scheme or not parsed_page.netloc:
-                    return ""
+                    if source_site == "hohoj":
+                        return ""
+                    current_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
+                    refreshed_title = self._refresh_goodav_title_from_ggjav_search(current_title or source_url, current_title)
+                    if not refreshed_title:
+                        refreshed_title = self._refresh_goodav_title_from_ggjav_search(source_url, current_title)
+                    if not refreshed_title or _looks_like_garbled_text(refreshed_title) or _looks_like_code_only_title(refreshed_title):
+                        return ""
+                    return self._set_task_display_name(task, item_id, refreshed_title, source_site=source_site)
                 c_req = get_curl_cffi_requests()
                 site_root = f"{parsed_page.scheme}://{parsed_page.netloc}"
                 resp = c_req.get(
@@ -12297,9 +12618,13 @@ class DownloadManagerApp:
                 page_text = _response_text_utf8(resp)
                 fallback_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or source_site or "").strip()
                 if source_site == "hohoj":
-                    refreshed_title = _clean_hohoj_title(_extract_html_title(page_text, fallback_title or "HoHoJ"))
+                    refreshed_title = _clean_hohoj_title(_extract_html_title(page_text, fallback_title or "HoHoJ"), fallback_title or "HoHoJ")
                 else:
                     refreshed_title = _goodav_title_for_display(_extract_html_title(page_text, fallback_title or "GoodAV"))
+                    if _looks_like_code_only_title(refreshed_title):
+                        search_title = self._refresh_goodav_title_from_ggjav_search(refreshed_title, fallback_title)
+                        if search_title:
+                            refreshed_title = search_title
                 if not refreshed_title or _looks_like_garbled_text(refreshed_title) or _looks_like_code_only_title(refreshed_title):
                     return ""
                 return self._set_task_display_name(
@@ -12308,6 +12633,20 @@ class DownloadManagerApp:
                     refreshed_title,
                     source_site=source_site,
                     source_page=source_page_url,
+                )
+            if source_site == "goodav17":
+                current_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
+                refreshed_title = self._refresh_goodav_title_from_ggjav_search(current_title or source_url, current_title)
+                if not refreshed_title:
+                    refreshed_title = self._refresh_goodav_title_from_ggjav_search(source_url, current_title)
+                if not refreshed_title or _looks_like_garbled_text(refreshed_title) or _looks_like_code_only_title(refreshed_title):
+                    return ""
+                return self._set_task_display_name(
+                    task,
+                    item_id,
+                    refreshed_title,
+                    source_site=source_site,
+                    source_page=self._get_task_source_page(task, fallback_url=source_url),
                 )
             return self._refresh_avbebe_task_title_from_source_page(task, item_id, source_url)
         except Exception as exc:
@@ -12374,7 +12713,16 @@ class DownloadManagerApp:
                 resolved_url=cached_resolved_url,
                 source_site=_task_source_site_name(task) or None,
             )
-            self._retry_source_after_cached_link_failure(task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=True)
+            self._retry_source_after_cached_link_failure(
+                task,
+                item_id,
+                source_url,
+                save_dir,
+                use_impersonate,
+                is_mp3,
+                expired=True,
+                failed_resolved_url=cached_resolved_url,
+            )
             return True
         if not _url_host_resolves(cached_resolved_url):
             write_error_log(
@@ -12385,7 +12733,16 @@ class DownloadManagerApp:
                 resolved_url=cached_resolved_url,
                 source_site=_task_source_site_name(task) or None,
             )
-            self._retry_source_after_cached_link_failure(task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False)
+            self._retry_source_after_cached_link_failure(
+                task,
+                item_id,
+                source_url,
+                save_dir,
+                use_impersonate,
+                is_mp3,
+                expired=False,
+                failed_resolved_url=cached_resolved_url,
+            )
             return True
         try:
             self._download_task_internal(cached_resolved_url, item_id, save_dir, use_impersonate, is_mp3)
@@ -12423,7 +12780,16 @@ class DownloadManagerApp:
                 resolved_url=cached_resolved_url,
                 source_site=_task_source_site_name(task) or None,
             )
-            self._retry_source_after_cached_link_failure(task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False)
+            self._retry_source_after_cached_link_failure(
+                task,
+                item_id,
+                source_url,
+                save_dir,
+                use_impersonate,
+                is_mp3,
+                expired=False,
+                failed_resolved_url=cached_resolved_url,
+            )
             return True
 
     def _should_resume_with_cached_resolved_link(self, task, source_url, save_dir, is_mp3=False):
@@ -14681,7 +15047,7 @@ class DownloadManagerApp:
                 headers=_make_site_root_headers(site_root),
             )
             page_text = _response_text_utf8(resp)
-            page_title = _clean_hohoj_title(_extract_html_title(page_text, short_name or "HoHoJ"))
+            page_title = _clean_hohoj_title(_extract_html_title(page_text, short_name or "HoHoJ"), short_name or "HoHoJ")
             embed_url = urllib.parse.urljoin(url, f"/embed?{parsed_url.query}") if parsed_url.query else ""
             embed_match = re.search(r'<iframe[^>]+class=["\']player["\'][^>]+src=["\']([^"\']+)', page_text, re.IGNORECASE)
             if embed_match:
