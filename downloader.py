@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260522-3010"
+APP_BUILD = "20260522-3020"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -111,7 +111,6 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "18jav",
     "777tv",
     "99itv",
-    "goodav17",
     "hohoj",
     "jable",
     "missav",
@@ -129,13 +128,15 @@ FFMPEG_AUDIO_TRANSCODE_RETRY_MARKERS = (
 STRICT_HLS_ARTIFACT_SITES = frozenset((
     "avbebe",
     "gimy",
+    "goodav17",
+    "hohoj",
     "movieffm",
     "missav",
     "njavtv",
     "xiaoyakankan",
     "99itv",
 ))
-STRICT_RESUMED_FFMPEG_ARTIFACT_SITES = frozenset(("avbebe", "gimy"))
+STRICT_RESUMED_FFMPEG_ARTIFACT_SITES = frozenset(("avbebe", "gimy", "goodav17", "hohoj"))
 
 
 def _ffmpeg_should_retry_with_audio_transcode(message):
@@ -151,6 +152,40 @@ def _response_text_utf8(response):
         except Exception:
             pass
     return str(getattr(response, "text", "") or "")
+
+
+def _looks_like_garbled_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return False
+    bad_count = 0
+    for char in text:
+        codepoint = ord(char)
+        if char == "\ufffd" or codepoint == 0xFFFD or 0xE000 <= codepoint <= 0xF8FF:
+            bad_count += 1
+    markers = (
+        "嚙",
+        "�",
+        "\ufeff",
+        "銝",
+        "嚗",
+        "蝘",
+        "瘝",
+        "摮",
+        "閬",
+        "憟",
+        "甇",
+        "撌",
+        "隞",
+    )
+    if any(marker in text for marker in markers):
+        return True
+    return (bad_count / max(len(text), 1)) > 0.04
+
+
+def _looks_like_code_only_title(value):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return bool(re.fullmatch(r"[A-Za-z]{2,10}[-_. ]?\d{2,6}", text))
 
 
 PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe"))
@@ -173,6 +208,7 @@ PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "gimy": 15.0,
+    "goodav17": 15.0,
     "99itv": 15.0,
     "777tv": 15.0,
     "18jav": 15.0,
@@ -189,7 +225,8 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "777tv": 18,
     "18jav": 24,
     "gimy": 32,
-    "hohoj": 12,
+    "goodav17": 20,
+    "hohoj": 20,
     "jable": 18,
     "missav": 24,
     "nnyy": 24,
@@ -201,6 +238,7 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "777tv": False,
     "18jav": False,
     "gimy": True,
+    "goodav17": False,
     "hohoj": False,
     "jable": False,
     "movieffm": False,
@@ -287,7 +325,7 @@ NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "18av": ("streamfastpro",),
     "18jav": ("hshdkshd", "cdnlab.live"),
     "gimy": ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd", "phimgood", "ryiplay"),
-    "hohoj": ("ggjav", "cdnlab.live"),
+    "hohoj": ("cdnlab.live",),
     "jable": ("mushroomtrack", "hls.sb-cd.com", "cdn77.org"),
     "movieffm": ("xluuss", "lzcdn", "letvoss", "subokk", "bdzybf", "ukubf", "ijycnd", "qsstvw", "gsuus", "hhuus", "huyall", "bfllvip"),
     "nnyy": ("lz-cdn", "lzcdn", "ppqrrs", "qqqrst", "surrit"),
@@ -363,6 +401,10 @@ TRACE_LOG_CONTEXTS = frozenset((
     "avjoy media refresh retry",
     "yt-dlp native hls fallback started",
     "yt-dlp native hls fallback finished",
+    "native hls artifact rejected",
+    "native hls handoff to ffmpeg",
+    "gimy native hls handoff to ffmpeg",
+    "native hls failed output removed",
     "resume low speed reanalysis requested",
     "missav parser retry recovered",
     "xiaoyakankan parse start",
@@ -878,7 +920,8 @@ def _normalize_state_entry(entry):
         not stripped_name
         or (stripped_name.count("?") / max(len(stripped_name), 1)) > 0.4
         or stripped_name in {"???", "??????"}
-        or "�" in stripped_name
+        or _looks_like_garbled_text(stripped_name)
+        or _looks_like_code_only_title(stripped_name)
     )
     if suspicious_name:
         normalized_name_url = _normalize_download_url(url)
@@ -910,6 +953,10 @@ def _normalize_state_entry(entry):
     page_refresh_candidates = normalized.get("page_refresh_candidates", [])
     normalized["page_refresh_candidates"] = [u for u in page_refresh_candidates if isinstance(u, str) and u.strip()] if isinstance(page_refresh_candidates, list) else []
     normalized["filename"] = str(normalized.get("filename", "") or "").strip()
+    if normalized["filename"]:
+        filename_stem = os.path.splitext(os.path.basename(normalized["filename"]))[0]
+        if _looks_like_garbled_text(filename_stem) or _looks_like_code_only_title(filename_stem):
+            normalized["filename"] = ""
     normalized["temp_filename"] = str(normalized.get("temp_filename", "") or "").strip()
     return normalized
 
@@ -2477,29 +2524,29 @@ def _clean_avjoy_title(raw_title, fallback_title="AVJOY"):
 
 def _clean_avbebe_title(raw_title, fallback_title="Avbebe"):
     cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
-    if not cleaned:
-        return str(fallback_title or "Avbebe").strip() or "Avbebe"
-    cleaned = re.sub(r"\s*(?:-|–|—|\|)\s*Avbebe.*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^\s*【[^】]+】\s*", "", cleaned)
-    code_match = re.search(r"[\[(（]?([A-Za-z]{2,10})[-_. ]?(\d{2,6})[\])）]?", cleaned)
+    fallback = str(fallback_title or "Avbebe").strip() or "Avbebe"
+    if not cleaned or _looks_like_garbled_text(cleaned):
+        return fallback
+    cleaned = re.sub(r"\s*(?:-|--|\||\u2013|\u2014|&#8211;)\s*Avbebe.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+Watch\s+HD\s+.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*(?:\u3010[^\u3011]{1,40}\u3011|\[[^\]]{1,40}\]|\([^\)]{1,40}\)|\uFF08[^\uFF09]{1,40}\uFF09)\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|/,._")
+    code_match = re.search(r"(?<![A-Za-z0-9])([A-Za-z]{2,10})[-_. ]?(\d{2,6})(?![A-Za-z0-9])", cleaned)
     if code_match:
         code = f"{code_match.group(1).upper()}-{code_match.group(2)}"
         title_tail = (cleaned[:code_match.start()] + " " + cleaned[code_match.end():]).strip()
-        title_tail = re.sub(r"^\s*【[^】]+】\s*", "", title_tail)
-        title_tail = re.sub(r"^\s*[\[(（][^\])）]{1,32}[\])）]\s*", "", title_tail).strip()
+        title_tail = re.sub(r"^\s*(?:\u3010[^\u3011]{1,40}\u3011|\[[^\]]{1,40}\]|\([^\)]{1,40}\)|\uFF08[^\uFF09]{1,40}\uFF09)\s*", "", title_tail)
         title_tail = re.sub(r"\s+", " ", title_tail).strip(" -|/,._")
         return f"{code} {title_tail}".strip() if title_tail else code
-    cleaned = re.sub(r"\s*(?:&#8211;|–|-|\|)\s*Avbebe.*$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+高清H動畫.*$", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/,") or str(fallback_title or "Avbebe").strip() or "Avbebe"
+    return cleaned or fallback
 
 
 def _extract_avbebe_page_title(page_text, fallback_title="Avbebe"):
     text = str(page_text or "")
     title_candidates = []
-    for attr_name in ("og:title", "twitter:title"):
+    for attr_name in ("og:title", "twitter:title", "name", "headline"):
         pattern = (
-            r"<meta\b(?=[^>]*(?:property|name)=['\"]"
+            r"<meta\b(?=[^>]*(?:property|name|itemprop)=['\"]"
             + re.escape(attr_name)
             + r"['\"])(?=[^>]*content=['\"]([^'\"]+)['\"])[^>]*>"
         )
@@ -2508,10 +2555,12 @@ def _extract_avbebe_page_title(page_text, fallback_title="Avbebe"):
         re.sub(r"<[^>]+>", " ", match.group(1))
         for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", text, re.IGNORECASE | re.DOTALL)
     )
+    for json_match in re.finditer(r'"(?:name|headline)"\s*:\s*"([^"]{3,300})"', text, re.IGNORECASE):
+        title_candidates.append(json_match.group(1))
     title_candidates.append(_extract_html_title(text, fallback_title))
     for candidate in title_candidates:
         cleaned = _clean_avbebe_title(candidate, fallback_title)
-        if cleaned and cleaned.lower() != "avbebe":
+        if cleaned and cleaned.lower() != "avbebe" and not _looks_like_garbled_text(cleaned):
             return cleaned
     return _clean_avbebe_title(fallback_title, "Avbebe")
 
@@ -5533,7 +5582,8 @@ class DownloadManagerApp:
                     headers=_make_site_root_headers(site_root),
                 )
                 fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "HoHoJ"
-                page_title = _clean_hohoj_title(_extract_html_title(resp.text, fallback_title))
+                page_text = _response_text_utf8(resp)
+                page_title = _clean_hohoj_title(_extract_html_title(page_text, fallback_title))
                 self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="hohoj")
             except Exception as exc:
                 write_error_log("hohoj parse failure", exc, url=new_url)
@@ -5551,7 +5601,8 @@ class DownloadManagerApp:
                     headers=_make_site_root_headers(site_root),
                 )
                 fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "GoodAV"
-                page_title = _goodav_title_for_display(_extract_html_title(resp.text, fallback_title))
+                page_text = _response_text_utf8(resp)
+                page_title = _goodav_title_for_display(_extract_html_title(page_text, fallback_title))
                 self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="goodav17")
             except Exception as exc:
                 write_error_log("goodav17 parse failure", exc, url=new_url)
@@ -6696,6 +6747,10 @@ class DownloadManagerApp:
             filename = primary_value or secondary_value or ""
         else:
             filename = ""
+        if filename and str(filename).lower().endswith(".mp4") and not bool(_task_field_value(task or {}, "_windows_mp4_compat_done", False)):
+            self._ensure_windows_compatible_mp4(item_id, filename)
+            if task:
+                _set_task_aux_fields(task, _windows_mp4_compat_done=True)
         if filename and os.path.exists(filename):
             try:
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
@@ -6819,7 +6874,8 @@ class DownloadManagerApp:
         return True
 
     def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None):
-        if _task_source_site_name(task) not in STRICT_HLS_ARTIFACT_SITES:
+        source_site = _task_source_site_name(task)
+        if source_site not in STRICT_HLS_ARTIFACT_SITES:
             return False
         if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
             return False
@@ -8028,6 +8084,70 @@ class DownloadManagerApp:
                         os.remove(artifact_path)
                 except OSError:
                     continue
+
+    def _cleanup_failed_native_hls_output(self, task, item_id, media_url, save_dir, is_mp3=False):
+        if is_mp3 or str(_task_field_value(task, "state", "") or "") == "FINISHED":
+            return
+        candidates = []
+        try:
+            _name, _safe_name, out_path = self._resolve_task_output_name_and_path(
+                task,
+                item_id,
+                media_url,
+                save_dir,
+                ext="mp4",
+                fallback_name="Video",
+            )
+            candidates.append(out_path)
+        except Exception:
+            pass
+        for field_name in ("filename", "temp_filename"):
+            value = str(_task_field_value(task, field_name, "") or "").strip()
+            if value:
+                candidates.append(value)
+        try:
+            temp_out_path, _resume_key, _resume_keys = self._resolve_resume_artifact_base(
+                task,
+                media_url,
+                ext="mp4",
+                save_dir=save_dir,
+                fallback_name="Video",
+            )
+            temp_root, temp_ext = os.path.splitext(temp_out_path)
+            candidates.extend((temp_out_path, f"{temp_root}.resume{temp_ext}", f"{temp_root}.merged{temp_ext}"))
+            self._remove_yt_dlp_fragment_artifacts(temp_root)
+        except Exception:
+            pass
+        seen = set()
+        for candidate_path in candidates:
+            path = str(candidate_path or "").strip()
+            if not path:
+                continue
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen or not os.path.exists(path):
+                continue
+            seen.add(key)
+            info = self._probe_media_info(path)
+            size = int(info.get("size", 0) or 0)
+            duration = float(info.get("duration", 0.0) or 0.0)
+            should_remove = (not info.get("valid")) or (size < 1024 * 1024 and duration < 60.0)
+            if not should_remove:
+                continue
+            try:
+                os.remove(path)
+                write_error_log(
+                    "native hls failed output removed",
+                    Exception("removed invalid native hls output before ffmpeg fallback"),
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    output=path,
+                    size=size,
+                    duration=duration,
+                    valid=bool(info.get("valid")),
+                )
+            except OSError:
+                continue
 
     def _reset_resume_artifacts(self, *paths):
         self._remove_artifact_paths(*paths)
@@ -9626,7 +9746,7 @@ class DownloadManagerApp:
         if _looks_like_manifest_url(media_url):
             self._log_m3u8_route_selected(task, item_id, media_url, source_site=site, fallback_urls=fallbacks)
             if manifest_downloader is None:
-                self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=referer, origin=origin)
+                self._download_m3u8_with_ffmpeg(item_id, media_url, save_dir, is_mp3=is_mp3, referer=referer, origin=origin, _native_fallback_done=True)
             else:
                 manifest_downloader(
                     media_url,
@@ -9648,7 +9768,7 @@ class DownloadManagerApp:
                 if _looks_like_manifest_url(candidate_url):
                     self._log_m3u8_route_selected(task, item_id, candidate_url, source_site=site, fallback_urls=direct_candidates[index + 1 :])
                     if manifest_downloader is None:
-                        self._download_m3u8_with_ffmpeg(item_id, candidate_url, save_dir, is_mp3=is_mp3, referer=referer, origin=origin)
+                        self._download_m3u8_with_ffmpeg(item_id, candidate_url, save_dir, is_mp3=is_mp3, referer=referer, origin=origin, _native_fallback_done=True)
                     else:
                         manifest_downloader(
                             candidate_url,
@@ -10357,6 +10477,15 @@ class DownloadManagerApp:
             raise RuntimeError("yt-dlp module is not available")
         task = self.tasks.get(item_id, {})
         source_site = _task_source_site_name(task)
+        ext = "mp3" if is_mp3 else "mp4"
+        name, safe_name, out_path = self._resolve_task_output_name_and_path(
+            task,
+            item_id,
+            url,
+            save_dir,
+            ext=ext,
+            fallback_name="Audio" if is_mp3 else "Video",
+        )
         if source_site == "gimy":
             referer = self._get_task_source_page(task, fallback_url=referer) or referer
             parsed_ref = urllib.parse.urlsplit(referer)
@@ -10390,10 +10519,6 @@ class DownloadManagerApp:
             "concurrent_fragment_downloads": _ytdlp_native_concurrency_for_site(source_site),
             "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(source_site, True)),
         }
-        name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Video" or "").strip()
-        safe_name = _safe_output_stem(name, fallback="Video")
-        ext = "mp3" if is_mp3 else "mp4"
-        out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
 
@@ -10529,10 +10654,15 @@ class DownloadManagerApp:
     def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False, _audio_transcode_retry=False):
         task = self.tasks.get(item_id, {})
         source_site = _task_source_site_name(task)
-        name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Video" or "").strip()
-        safe_name = _safe_output_stem(name, fallback="Video")
         ext = "mp3" if is_mp3 else "mp4"
-        out_path = os.path.join(save_dir, f"{safe_name}.{ext}")
+        name, safe_name, out_path = self._resolve_task_output_name_and_path(
+            task,
+            item_id,
+            url,
+            save_dir,
+            ext=ext,
+            fallback_name="Audio" if is_mp3 else "Video",
+        )
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
         temp_out_path, resume_key, resume_keys = self._resolve_resume_artifact_base(
@@ -10819,6 +10949,7 @@ class DownloadManagerApp:
                         item_id=item_id,
                         source_site=source_site,
                     )
+                    self._cleanup_failed_native_hls_output(task, item_id, url, save_dir, is_mp3=is_mp3)
                     _native_fallback_done = True
                 else:
                     write_error_log(
@@ -10828,6 +10959,7 @@ class DownloadManagerApp:
                         item_id=item_id,
                         source_site=source_site,
                     )
+                    self._cleanup_failed_native_hls_output(task, item_id, url, save_dir, is_mp3=is_mp3)
                     _native_fallback_done = True
 
         duration_box = {}
@@ -11404,13 +11536,17 @@ class DownloadManagerApp:
                     last_error = Exception("FFmpeg produced an empty output artifact")
                     continue
                 if not is_mp3:
+                    strict_hls_artifact = _task_source_site_name(task) in STRICT_HLS_ARTIFACT_SITES
                     looks_truncated = total_duration > 30 and final_duration > 0 and final_duration < min(5.0, total_duration * 0.01)
                     looks_invalid = (not final_info.get("valid")) and final_size < 1024 * 1024
-                    if _task_source_site_name(task) in ("avbebe", "gimy"):
+                    if strict_hls_artifact:
                         looks_truncated = looks_truncated or (
                             total_duration > 300.0
                             and final_duration > 0.0
                             and final_duration < total_duration * 0.8
+                        )
+                        looks_invalid = looks_invalid or (
+                            not final_info.get("valid")
                         )
                         looks_invalid = looks_invalid or (
                             final_size < 5 * 1024 * 1024 and final_duration < 300.0
@@ -12106,6 +12242,21 @@ class DownloadManagerApp:
         refreshed_title = _extract_avbebe_page_title(_response_text_utf8(resp), fallback_title)
         if not refreshed_title:
             return ""
+        current_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
+        if (
+            current_title
+            and refreshed_title == current_title
+            and not _looks_like_garbled_text(current_title)
+            and not _looks_like_code_only_title(current_title)
+        ):
+            return current_title
+        if (
+            current_title
+            and not _looks_like_garbled_text(current_title)
+            and not _looks_like_code_only_title(current_title)
+            and len(refreshed_title) + 4 < len(current_title)
+        ):
+            return current_title
         return self._set_task_display_name(
             task,
             item_id,
@@ -12113,6 +12264,70 @@ class DownloadManagerApp:
             source_site="avbebe",
             source_page=source_page_url,
         )
+
+    def _task_display_name_needs_source_refresh(self, task):
+        current_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
+        if not current_title:
+            return True
+        if _looks_like_garbled_text(current_title) or _looks_like_code_only_title(current_title):
+            return True
+        current_stem = os.path.splitext(os.path.basename(current_title))[0].strip()
+        return _looks_like_garbled_text(current_stem) or _looks_like_code_only_title(current_stem)
+
+    def _refresh_task_title_before_output_name(self, task, item_id, source_url):
+        source_site = _task_source_site_name(task)
+        if source_site not in ("avbebe", "goodav17", "hohoj"):
+            return ""
+        if not self._task_display_name_needs_source_refresh(task):
+            return str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
+        try:
+            if source_site in ("goodav17", "hohoj"):
+                source_page_url = self._get_task_source_page(task, fallback_url=source_url)
+                parsed_page = urllib.parse.urlparse(source_page_url or "")
+                if not parsed_page.scheme or not parsed_page.netloc:
+                    return ""
+                c_req = get_curl_cffi_requests()
+                site_root = f"{parsed_page.scheme}://{parsed_page.netloc}"
+                resp = c_req.get(
+                    source_page_url,
+                    impersonate="chrome110",
+                    timeout=20,
+                    headers=_make_site_root_headers(site_root),
+                )
+                page_text = _response_text_utf8(resp)
+                fallback_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or source_site or "").strip()
+                if source_site == "hohoj":
+                    refreshed_title = _clean_hohoj_title(_extract_html_title(page_text, fallback_title or "HoHoJ"))
+                else:
+                    refreshed_title = _goodav_title_for_display(_extract_html_title(page_text, fallback_title or "GoodAV"))
+                if not refreshed_title or _looks_like_garbled_text(refreshed_title) or _looks_like_code_only_title(refreshed_title):
+                    return ""
+                return self._set_task_display_name(
+                    task,
+                    item_id,
+                    refreshed_title,
+                    source_site=source_site,
+                    source_page=source_page_url,
+                )
+            return self._refresh_avbebe_task_title_from_source_page(task, item_id, source_url)
+        except Exception as exc:
+            write_error_log(
+                "task title refresh before output failed",
+                exc,
+                item_id=item_id,
+                source_site=source_site,
+                source_url=source_url,
+                source_page=self._get_task_source_page(task, fallback_url=source_url),
+            )
+            return ""
+
+    def _resolve_task_output_name_and_path(self, task, item_id, source_url, save_dir, ext="mp4", fallback_name="Video"):
+        self._refresh_task_title_before_output_name(task, item_id, source_url)
+        name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or fallback_name or "").strip()
+        safe_name = _safe_output_stem(name, fallback=fallback_name)
+        normalized_ext = str(ext or "mp4").lstrip(".") or "mp4"
+        output_path = os.path.join(save_dir, f"{safe_name}.{normalized_ext}")
+        return name, safe_name, output_path
 
     def _download_with_cached_resolved_link(self, task, item_id, source_url, cached_resolved_url, save_dir, use_impersonate, is_mp3):
         self._set_task_parse_ui(item_id, message="使用已記錄下載連結續傳...")
@@ -12314,6 +12529,7 @@ class DownloadManagerApp:
 
     def _download_task_internal(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         task = self.tasks.get(item_id, {})
+        self._refresh_task_title_before_output_name(task, item_id, url)
         short_name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or (t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目") or "").strip()
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or short_name or "").strip()
         safe_name = _safe_output_stem(name, fallback=short_name)
@@ -12431,6 +12647,7 @@ class DownloadManagerApp:
                     is_mp3=is_mp3,
                     referer=referer,
                     origin=origin,
+                    _native_fallback_done=True,
                 )
                 return
             if selected_route == "native":
@@ -12454,6 +12671,7 @@ class DownloadManagerApp:
                         source_site=_task_source_site_name(task) or None,
                         selected_route=selected_route,
                     )
+                    self._cleanup_failed_native_hls_output(task, item_id, target_url, save_dir, is_mp3=is_mp3)
                     self._download_m3u8_with_ffmpeg(
                         item_id,
                         target_url,
@@ -12718,12 +12936,23 @@ class DownloadManagerApp:
             filename = os.path.basename(parsed_url.path) or "downloaded_file"
             use_task_title_filename = _task_source_site_name(task) == "avjoy" or not os.path.splitext(filename)[1]
             if use_task_title_filename and inferred_direct_media_ext:
-                name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "downloaded_file" or "").strip()
                 if _task_source_site_name(task) == "avjoy":
+                    name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "downloaded_file" or "").strip()
                     name = _clean_avjoy_title(name, fallback_title=default_short_name_for_url(_task_field_value(task, "source_page") or _task_field_value(task, "url") or url))
-                safe_name = _safe_output_stem(name, fallback="downloaded_file")
-                filename = f"{safe_name}{inferred_direct_media_ext}"
-            output_path = os.path.join(save_dir, filename)
+                    safe_name = _safe_output_stem(name, fallback="downloaded_file")
+                    output_path = os.path.join(save_dir, f"{safe_name}{inferred_direct_media_ext}")
+                else:
+                    _name, _safe_name, output_path = self._resolve_task_output_name_and_path(
+                        task,
+                        item_id,
+                        url,
+                        save_dir,
+                        ext=inferred_direct_media_ext,
+                        fallback_name="downloaded_file",
+                    )
+                filename = os.path.basename(output_path)
+            else:
+                output_path = os.path.join(save_dir, filename)
             _set_task_aux_fields(task, filename=output_path)
             self._set_task_named_column_text(item_id, "name", filename)
             direct_headers = {"User-Agent": DEFAULT_USER_AGENT}
@@ -14113,6 +14342,7 @@ class DownloadManagerApp:
             embed_referer = task.get("source_page") or "https://avbebe.com/"
             embed_headers = _make_ytdlp_http_headers(referer=embed_referer, origin=embed_origin)
             resp = c_req.get(hgcloud_embed_url, impersonate="chrome120", timeout=20, headers=embed_headers)
+            self._refresh_task_title_before_output_name(task, item_id, embed_referer or url)
             current_title = str(task.get("name") or short_name or "Avbebe").strip() or "Avbebe"
             embed_referer_parts = urllib.parse.urlsplit(_normalize_download_url(embed_referer) or "")
             if "avbebe.com" in embed_referer_parts.netloc.lower() and "/archives/" in embed_referer_parts.path:
@@ -14450,9 +14680,10 @@ class DownloadManagerApp:
                 timeout=20,
                 headers=_make_site_root_headers(site_root),
             )
-            page_title = _clean_hohoj_title(_extract_html_title(resp.text, short_name or "HoHoJ"))
+            page_text = _response_text_utf8(resp)
+            page_title = _clean_hohoj_title(_extract_html_title(page_text, short_name or "HoHoJ"))
             embed_url = urllib.parse.urljoin(url, f"/embed?{parsed_url.query}") if parsed_url.query else ""
-            embed_match = re.search(r'<iframe[^>]+class=["\']player["\'][^>]+src=["\']([^"\']+)', resp.text, re.IGNORECASE)
+            embed_match = re.search(r'<iframe[^>]+class=["\']player["\'][^>]+src=["\']([^"\']+)', page_text, re.IGNORECASE)
             if embed_match:
                 embed_url = urllib.parse.urljoin(url, embed_match.group(1))
             if not embed_url:
@@ -14486,9 +14717,10 @@ class DownloadManagerApp:
                 timeout=20,
                 headers=_make_site_root_headers(site_root),
             )
-            page_title = _goodav_title_for_display(_extract_html_title(resp.text, short_name or "GoodAV"))
-            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
-            for iframe_src in re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', resp.text, re.IGNORECASE):
+            page_text = _response_text_utf8(resp)
+            page_title = _goodav_title_for_display(_extract_html_title(page_text, short_name or "GoodAV"))
+            candidate_urls = _extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            for iframe_src in re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', page_text, re.IGNORECASE):
                 iframe_url = urllib.parse.urljoin(url, iframe_src)
                 decoded_embed_media = _decode_goodav_embed_media_url(iframe_url)
                 if decoded_embed_media:
