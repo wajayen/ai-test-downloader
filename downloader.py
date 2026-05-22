@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260521-3000"
+APP_BUILD = "20260522-3010"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -121,14 +121,47 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "xiaoyakankan",
 ))
 FFMPEG_UNEXPECTED_RETRY_DELAYS = (1.0, 3.0, 6.0)
+FFMPEG_AUDIO_TRANSCODE_RETRY_MARKERS = (
+    "aac_adtstoasc",
+    "adts frame header",
+    "bitstream filters to an output packet",
+)
+STRICT_HLS_ARTIFACT_SITES = frozenset((
+    "avbebe",
+    "gimy",
+    "movieffm",
+    "missav",
+    "njavtv",
+    "xiaoyakankan",
+    "99itv",
+))
+STRICT_RESUMED_FFMPEG_ARTIFACT_SITES = frozenset(("avbebe", "gimy"))
+
+
+def _ffmpeg_should_retry_with_audio_transcode(message):
+    lowered = str(message or "").lower()
+    return any(marker in lowered for marker in FFMPEG_AUDIO_TRANSCODE_RETRY_MARKERS)
+
+
+def _response_text_utf8(response):
+    content = getattr(response, "content", None)
+    if isinstance(content, (bytes, bytearray)) and content:
+        try:
+            return bytes(content).decode("utf-8")
+        except Exception:
+            pass
+    return str(getattr(response, "text", "") or "")
+
+
 PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe"))
-PARALLEL_HLS_SEGMENT_HOST_MARKERS = ("xluuss", "xlzyd.com", "52cute.com", "turboviplay.com")
+PARALLEL_HLS_SEGMENT_HOST_MARKERS = ("xluuss", "xlzyd.com", "52cute.com", "turboviplay.com", "premilkyway.com")
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 20,
-    "avbebe": 20,
+    "avbebe": 24,
 }
 PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
+    "premilkyway.com": 24,
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
     "googleusercontent.com": 1,
@@ -2443,33 +2476,151 @@ def _clean_avjoy_title(raw_title, fallback_title="AVJOY"):
 
 
 def _clean_avbebe_title(raw_title, fallback_title="Avbebe"):
-    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
     if not cleaned:
         return str(fallback_title or "Avbebe").strip() or "Avbebe"
+    cleaned = re.sub(r"\s*(?:-|–|—|\|)\s*Avbebe.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\s*【[^】]+】\s*", "", cleaned)
+    code_match = re.search(r"[\[(（]?([A-Za-z]{2,10})[-_. ]?(\d{2,6})[\])）]?", cleaned)
+    if code_match:
+        code = f"{code_match.group(1).upper()}-{code_match.group(2)}"
+        title_tail = (cleaned[:code_match.start()] + " " + cleaned[code_match.end():]).strip()
+        title_tail = re.sub(r"^\s*【[^】]+】\s*", "", title_tail)
+        title_tail = re.sub(r"^\s*[\[(（][^\])）]{1,32}[\])）]\s*", "", title_tail).strip()
+        title_tail = re.sub(r"\s+", " ", title_tail).strip(" -|/,._")
+        return f"{code} {title_tail}".strip() if title_tail else code
     cleaned = re.sub(r"\s*(?:&#8211;|–|-|\|)\s*Avbebe.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+高清H動畫.*$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/,") or str(fallback_title or "Avbebe").strip() or "Avbebe"
 
 
+def _extract_avbebe_page_title(page_text, fallback_title="Avbebe"):
+    text = str(page_text or "")
+    title_candidates = []
+    for attr_name in ("og:title", "twitter:title"):
+        pattern = (
+            r"<meta\b(?=[^>]*(?:property|name)=['\"]"
+            + re.escape(attr_name)
+            + r"['\"])(?=[^>]*content=['\"]([^'\"]+)['\"])[^>]*>"
+        )
+        title_candidates.extend(match.group(1) for match in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL))
+    title_candidates.extend(
+        re.sub(r"<[^>]+>", " ", match.group(1))
+        for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", text, re.IGNORECASE | re.DOTALL)
+    )
+    title_candidates.append(_extract_html_title(text, fallback_title))
+    for candidate in title_candidates:
+        cleaned = _clean_avbebe_title(candidate, fallback_title)
+        if cleaned and cleaned.lower() != "avbebe":
+            return cleaned
+    return _clean_avbebe_title(fallback_title, "Avbebe")
+
+
 def _avbebe_iframe_priority(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
-    if "turbovidhls.com" in host or "turboviplay.com" in host:
+    if "hgcloud.to" in host or "masukestin.com" in host:
         return 0
-    if "hgcloud.to" in host:
+    if "turbovidhls.com" in host or "turboviplay.com" in host:
         return 30
     return 10
 
 
 def _avbebe_can_retry_iframe_directly(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
-    if "hgcloud.to" in host:
+    if "hgcloud.to" in host or "masukestin.com" in host:
+        return True
+    if "turbovidhls.com" in host or "turboviplay.com" in host:
         return False
     return bool(host)
+
+
+def _avbebe_is_playable_iframe(url):
+    host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
+    return "turbovidhls.com" in host or "turboviplay.com" in host
+
+
+def _avbebe_hgcloud_embed_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized)
+    host = parsed.netloc.lower()
+    if "masukestin.com" in host:
+        return normalized
+    if "hgcloud.to" not in host:
+        return ""
+    return urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path or "/", parsed.query, ""))
+
+
+def _base36_token(value):
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+    value = int(value)
+    if value == 0:
+        return "0"
+    digits = []
+    while value:
+        value, remainder = divmod(value, 36)
+        digits.append(alphabet[remainder])
+    return "".join(reversed(digits))
+
+
+def _unpack_javascript_packer_blocks(text):
+    if not isinstance(text, str) or "eval(function(p,a,c,k,e,d)" not in text:
+        return []
+    unpacked_blocks = []
+    pattern = re.compile(
+        r"eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(?P<p>(?:\\.|[^'])*)',(?P<a>\d+),(?P<c>\d+),'(?P<k>(?:\\.|[^'])*)'\.split\('\|'\)\)\)",
+        re.DOTALL,
+    )
+    for match in pattern.finditer(text):
+        packed = match.group("p").replace("\\'", "'").replace("\\\\", "\\")
+        symbols = match.group("k").split("|")
+        try:
+            base = int(match.group("a"))
+            count = int(match.group("c"))
+        except Exception:
+            continue
+        if base != 36:
+            continue
+        unpacked = packed
+        for index in range(count - 1, -1, -1):
+            if index >= len(symbols) or not symbols[index]:
+                continue
+            token = _base36_token(index)
+            unpacked = re.sub(r"\b" + re.escape(token) + r"\b", lambda _m, value=symbols[index]: value, unpacked)
+        unpacked_blocks.append(unpacked)
+    return unpacked_blocks
+
+
+def _extract_avbebe_hgcloud_stream_candidates(page_text, page_url):
+    candidates = []
+    for source_text in [page_text] + _unpack_javascript_packer_blocks(page_text):
+        for key, raw_url in re.findall(r'["\'](hls\d+)["\']\s*:\s*["\']([^"\']+)["\']', str(source_text or ""), re.IGNORECASE):
+            cleaned = html.unescape(raw_url).replace("\\/", "/").strip()
+            if not cleaned or ".m3u8" not in cleaned.lower():
+                continue
+            full_url = _normalize_download_url(urllib.parse.urljoin(page_url, cleaned))
+            if full_url:
+                priority = 0 if key.lower() == "hls4" else 10 if key.lower() == "hls2" else 20
+                candidates.append((priority, full_url))
+        for candidate in _extract_candidate_media_urls(source_text, allowed_exts=(".m3u8", ".mpd")):
+            full_url = _normalize_download_url(urllib.parse.urljoin(page_url, candidate))
+            if full_url:
+                candidates.append((50, full_url))
+    ordered = []
+    seen = set()
+    for _priority, candidate in sorted(candidates, key=lambda item: item[0]):
+        if candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
 
 
 def _avbebe_stream_priority(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
     if "52cute.com" in host:
+        return 0
+    if "masukestin.com" in host:
         return 0
     if "turboviplay.com" in host or "turbosplayer.com" in host:
         return 10
@@ -6297,6 +6448,21 @@ class DownloadManagerApp:
         if updates:
             update_state_entry(url, **updates)
 
+    def _set_task_display_name(self, task, item_id, name, source_site=None, source_page=None):
+        normalized_name = re.sub(r"\s+", " ", str(name or "")).strip()
+        if not normalized_name:
+            return ""
+        task["short_name"] = normalized_name
+        task["name"] = normalized_name
+        self._set_task_named_column_text(item_id, "name", normalized_name)
+        update_fields = {"name": normalized_name}
+        if source_site:
+            update_fields["source_site"] = source_site
+        if source_page:
+            update_fields["source_page"] = source_page
+        self._update_task_state_entry(task, **update_fields)
+        return normalized_name
+
     def _set_cached_resolved_link_state(self, task, resolved_url=None, resolved_url_saved_at=None, page_refresh_candidates=None, clear_source_refresh_history=False):
         if not task:
             return
@@ -6653,7 +6819,7 @@ class DownloadManagerApp:
         return True
 
     def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None):
-        if _task_source_site_name(task) not in ("gimy", "movieffm", "missav", "njavtv", "xiaoyakankan", "99itv"):
+        if _task_source_site_name(task) not in STRICT_HLS_ARTIFACT_SITES:
             return False
         if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
             return False
@@ -6665,6 +6831,8 @@ class DownloadManagerApp:
         duration = float(info.get("duration", 0.0) or 0.0)
         size = int(info.get("size", 0) or 0)
         if size < 1024 * 1024 and duration < 60.0:
+            return True
+        if size < 10 * 1024 * 1024 and duration < 600.0:
             return True
         try:
             expected_total_bytes = max(int(task.get("total_bytes", 0) or 0), 0)
@@ -6694,6 +6862,8 @@ class DownloadManagerApp:
         if expected_seconds > 300.0 and duration > 0.0 and duration + max(60.0, expected_seconds * 0.2) < expected_seconds:
             return True
         if expected_seconds > 300.0 and duration <= 0.0:
+            return True
+        if expected_seconds > 1800.0 and size < 25 * 1024 * 1024:
             return True
         return False
 
@@ -8131,7 +8301,7 @@ class DownloadManagerApp:
             total_duration_value = max(float(total_duration or 0.0), 0.0)
         except (TypeError, ValueError):
             return False
-        if _task_source_site_name(task) != "gimy":
+        if _task_source_site_name(task) not in STRICT_RESUMED_FFMPEG_ARTIFACT_SITES:
             return False
         if base_bytes_value <= 0 or final_size_value <= 0:
             return False
@@ -9894,8 +10064,7 @@ class DownloadManagerApp:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        result = subprocess.run(
-            [
+        base_cmd = [
                 ffmpeg_path,
                 "-y",
                 "-nostdin",
@@ -9906,12 +10075,16 @@ class DownloadManagerApp:
                 "+genpts",
                 "-i",
                 source_ts_path,
+        ]
+        copy_cmd = base_cmd + [
                 "-c",
                 "copy",
                 "-movflags",
                 "+faststart",
                 out_path,
-            ],
+        ]
+        result = subprocess.run(
+            copy_cmd,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -9922,6 +10095,31 @@ class DownloadManagerApp:
         )
         if result.returncode != 0:
             message = (result.stderr or result.stdout or "").strip()
+            if _ffmpeg_should_retry_with_audio_transcode(message):
+                transcode_cmd = base_cmd + [
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-movflags",
+                    "+faststart",
+                    out_path,
+                ]
+                result = subprocess.run(
+                    transcode_cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    startupinfo=startupinfo,
+                    creationflags=creationflags,
+                    timeout=900,
+                )
+                if result.returncode == 0:
+                    return
+                message = (result.stderr or result.stdout or message or "").strip()
             raise Exception(f"parallel HLS remux failed: {message[:240]}")
 
     def _try_parallel_hls_segment_download(self, item_id, url, out_path, temp_out_path, progress_path, headers, ffmpeg_path, ffmpeg_version=""):
@@ -10053,7 +10251,6 @@ class DownloadManagerApp:
                 completed_duration,
                 source_url=_normalize_download_url(url) or url,
                 bytes_done=completed_bytes,
-                total_bytes=completed_bytes,
             )
 
         def _download_one(segment):
@@ -10104,6 +10301,8 @@ class DownloadManagerApp:
             final_duration = float(final_info.get("duration", 0.0) or 0.0)
             if not final_info.get("valid") or int(final_info.get("size", 0) or 0) <= 0:
                 raise Exception("parallel HLS remux produced invalid output")
+            if self._is_incomplete_hls_video_artifact(task, merged_path, expected_duration=total_duration):
+                raise Exception("parallel HLS remux produced incomplete output")
             if total_duration > 300.0 and final_duration > 0.0 and final_duration + max(60.0, total_duration * 0.02) < total_duration:
                 raise Exception(f"parallel HLS output duration mismatch: duration={final_duration:.3f} expected={total_duration:.3f}")
             if total_duration > 300.0 and final_duration <= 0.0:
@@ -10327,7 +10526,7 @@ class DownloadManagerApp:
         )
         raise FileNotFoundError("yt-dlp native HLS fallback did not produce an output file")
 
-    def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False):
+    def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False, _audio_transcode_retry=False):
         task = self.tasks.get(item_id, {})
         source_site = _task_source_site_name(task)
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Video" or "").strip()
@@ -10854,6 +11053,7 @@ class DownloadManagerApp:
                     retry_count=_unexpected_retry_count,
                     ffmpeg_version=ffmpeg_version,
                 ),
+                audio_transcode_retry=_audio_transcode_retry,
             )
 
             cmd = [
@@ -10907,6 +11107,8 @@ class DownloadManagerApp:
             cmd += ["-i", candidate_url]
             if is_mp3:
                 cmd += ["-vn", "-acodec", "libmp3lame", "-b:a", "192k"]
+            elif _audio_transcode_retry:
+                cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]
             else:
                 cmd += ["-c", "copy"]
             cmd += [active_output_path]
@@ -11204,7 +11406,7 @@ class DownloadManagerApp:
                 if not is_mp3:
                     looks_truncated = total_duration > 30 and final_duration > 0 and final_duration < min(5.0, total_duration * 0.01)
                     looks_invalid = (not final_info.get("valid")) and final_size < 1024 * 1024
-                    if _task_source_site_name(task) == "gimy":
+                    if _task_source_site_name(task) in ("avbebe", "gimy"):
                         looks_truncated = looks_truncated or (
                             total_duration > 300.0
                             and final_duration > 0.0
@@ -11303,6 +11505,7 @@ class DownloadManagerApp:
                     origin=origin,
                     _unexpected_retry_count=_unexpected_retry_count + 1,
                     _native_fallback_done=_native_fallback_done,
+                    _audio_transcode_retry=_audio_transcode_retry,
                 )
 
             if return_code == 15 and not _native_fallback_done and _task_source_site_name(current_task) == "gimy":
@@ -11343,6 +11546,40 @@ class DownloadManagerApp:
 
             _remember_gimy_failed_stream(candidate_url)
             last_error = Exception(f"FFmpeg exited with code {return_code}: {' | '.join(recent_lines)[:240]}")
+            if (
+                not is_mp3
+                and not _audio_transcode_retry
+                and _ffmpeg_should_retry_with_audio_transcode(last_error)
+            ):
+                self._log_ffmpeg_event(
+                    "ffmpeg audio transcode retry",
+                    last_error,
+                    current_task,
+                    item_id,
+                    candidate_url,
+                    return_code=return_code,
+                    state=current_state,
+                    stop_reason=stop_reason,
+                    recent_output=" | ".join(recent_lines)[:240],
+                    **self._build_ffmpeg_runtime_fields(
+                        ffmpeg_path,
+                        retry_count=_unexpected_retry_count,
+                        cmd=cmd,
+                        ffmpeg_version=ffmpeg_version,
+                    ),
+                )
+                self._remove_artifact_paths(temp_out_path, resume_out_path, merged_out_path, progress_path, active_output_path)
+                return self._download_m3u8_with_ffmpeg(
+                    item_id,
+                    candidate_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
+                    _unexpected_retry_count=_unexpected_retry_count,
+                    _native_fallback_done=_native_fallback_done,
+                    _audio_transcode_retry=True,
+                )
         if last_error and source_site == "gimy":
             refreshed = _gimy_refresh_after_stream_failure(last_error)
             if refreshed is not None:
@@ -11846,12 +12083,54 @@ class DownloadManagerApp:
             return
         self._download_task_internal(source_url, item_id, save_dir, use_impersonate, is_mp3)
 
+    def _refresh_avbebe_task_title_from_source_page(self, task, item_id, source_url):
+        if _task_source_site_name(task) != "avbebe":
+            return ""
+        source_page_url = self._get_task_source_page(task, fallback_url=source_url)
+        parsed_source_page = urllib.parse.urlparse(source_page_url or "")
+        if not (
+            source_page_url
+            and "avbebe.com" in parsed_source_page.netloc.lower()
+            and "/archives/" in parsed_source_page.path
+        ):
+            return ""
+        c_req = get_curl_cffi_requests()
+        site_root = f"{parsed_source_page.scheme or 'https'}://{parsed_source_page.netloc}"
+        resp = c_req.get(
+            source_page_url,
+            impersonate="chrome120",
+            timeout=20,
+            headers=_make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
+        )
+        fallback_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Avbebe").strip() or "Avbebe"
+        refreshed_title = _extract_avbebe_page_title(_response_text_utf8(resp), fallback_title)
+        if not refreshed_title:
+            return ""
+        return self._set_task_display_name(
+            task,
+            item_id,
+            refreshed_title,
+            source_site="avbebe",
+            source_page=source_page_url,
+        )
+
     def _download_with_cached_resolved_link(self, task, item_id, source_url, cached_resolved_url, save_dir, use_impersonate, is_mp3):
         self._set_task_parse_ui(item_id, message="使用已記錄下載連結續傳...")
         normalized_source_url = _normalize_download_url(source_url)
         if normalized_source_url and not self._get_task_source_page(task, fallback_url=""):
             _set_task_aux_fields(task, source_page=normalized_source_url)
             self._update_task_state_entry(task, source_page=normalized_source_url)
+        if _task_source_site_name(task) == "avbebe":
+            try:
+                self._refresh_avbebe_task_title_from_source_page(task, item_id, source_url)
+            except Exception as exc:
+                write_error_log(
+                    "avbebe cached title refresh failed",
+                    exc,
+                    item_id=item_id,
+                    source_url=source_url,
+                    source_page=self._get_task_source_page(task, fallback_url=source_url),
+                )
         if _task_source_site_name(task) == "99itv":
             source_page_url = self._get_task_source_page(task, fallback_url=source_url)
             parsed_source_page = urllib.parse.urlparse(source_page_url or "")
@@ -11862,10 +12141,13 @@ class DownloadManagerApp:
                     resp = c_req.get(source_page_url, impersonate="chrome110", timeout=20, headers={"Referer": site_root + "/"})
                     refreshed_title = _clean_99itv_title(_extract_html_title(resp.text, str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "99iTV" or "").strip() or "99iTV"))
                     if refreshed_title:
-                        task["short_name"] = refreshed_title
-                        task["name"] = refreshed_title
-                        self._set_task_named_column_text(item_id, "name", refreshed_title)
-                        self._update_task_state_entry(task, name=refreshed_title, source_site="99itv", source_page=source_page_url)
+                        self._set_task_display_name(
+                            task,
+                            item_id,
+                            refreshed_title,
+                            source_site="99itv",
+                            source_page=source_page_url,
+                        )
                 except Exception:
                     pass
         if _is_expired_signed_media_url(cached_resolved_url):
@@ -12187,11 +12469,8 @@ class DownloadManagerApp:
         def _set_task_identity(name=None, source_site=None, source_page=None, fallback_urls=None):
             updates = {}
             if name:
-                normalized_name = str(name or "").strip()
+                normalized_name = self._set_task_display_name(task, item_id, name)
                 if normalized_name:
-                    task["short_name"] = normalized_name
-                    task["name"] = normalized_name
-                    self._set_task_named_column_text(item_id, "name", normalized_name)
                     updates["name"] = normalized_name
             if source_site:
                 normalized_site = str(source_site).strip().lower()
@@ -13825,6 +14104,59 @@ class DownloadManagerApp:
             )
             return
 
+        hgcloud_embed_url = _avbebe_hgcloud_embed_url(url)
+        if hgcloud_embed_url and "/e/" in urllib.parse.urlsplit(hgcloud_embed_url).path:
+            self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="正在解析 Avbebe 第一分流...")
+            c_req = get_curl_cffi_requests()
+            embed_parts = urllib.parse.urlsplit(hgcloud_embed_url)
+            embed_origin = f"{embed_parts.scheme or 'https'}://{embed_parts.netloc}"
+            embed_referer = task.get("source_page") or "https://avbebe.com/"
+            embed_headers = _make_ytdlp_http_headers(referer=embed_referer, origin=embed_origin)
+            resp = c_req.get(hgcloud_embed_url, impersonate="chrome120", timeout=20, headers=embed_headers)
+            current_title = str(task.get("name") or short_name or "Avbebe").strip() or "Avbebe"
+            embed_referer_parts = urllib.parse.urlsplit(_normalize_download_url(embed_referer) or "")
+            if "avbebe.com" in embed_referer_parts.netloc.lower() and "/archives/" in embed_referer_parts.path:
+                page_title = _clean_avbebe_title(current_title, current_title)
+            else:
+                page_title = _clean_avbebe_title(
+                    _extract_html_title(_response_text_utf8(resp), current_title),
+                    current_title,
+                )
+            stream_candidates = _extract_avbebe_hgcloud_stream_candidates(resp.text, hgcloud_embed_url)
+            valid_stream_candidates = []
+            for candidate in stream_candidates:
+                if _avbebe_manifest_looks_downloadable(candidate, referer=hgcloud_embed_url, origin=embed_origin):
+                    valid_stream_candidates.append(candidate)
+                    continue
+                write_error_log(
+                    "avbebe hgcloud rejected stream candidate",
+                    Exception("Avbebe hgcloud stream candidate returned non-video segment content"),
+                    item_id=item_id,
+                    url=hgcloud_embed_url,
+                    candidate_url=candidate,
+                )
+            stream_url = valid_stream_candidates[0] if valid_stream_candidates else ""
+            if not stream_url:
+                write_error_log(
+                    "avbebe hgcloud candidates missing",
+                    Exception("Avbebe hgcloud page did not expose a downloadable video manifest URL"),
+                    item_id=item_id,
+                    url=hgcloud_embed_url,
+                    **_http_response_log_fields(resp),
+                )
+                raise Exception("Failed to extract Avbebe hgcloud stream URL")
+            fallback_urls = _dedupe_download_urls(valid_stream_candidates[1:], primary_url=stream_url)
+            _set_task_identity(name=page_title, source_site="avbebe", source_page=task.get("source_page") or url, fallback_urls=fallback_urls)
+            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
+            _download_manifest_with_site_strategy(
+                stream_url,
+                referer=hgcloud_embed_url,
+                origin=embed_origin,
+                default_route="ffmpeg",
+                force_ffmpeg=True,
+            )
+            return
+
         if ("turbovidhls.com" in parsed_url.netloc or "turboviplay.com" in parsed_url.netloc) and ("/t/" in parsed_url.path or "/embed/" in parsed_url.path):
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="Parsing Avbebe playable iframe...")
             c_req = get_curl_cffi_requests()
@@ -13832,18 +14164,30 @@ class DownloadManagerApp:
             iframe_headers = _make_ytdlp_http_headers(referer=task.get("source_page") or "https://avbebe.com/", origin=site_root)
             resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=iframe_headers)
             stream_candidates = _dedupe_download_urls(_extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mpd")))
-            stream_url = stream_candidates[0] if stream_candidates else ""
+            valid_stream_candidates = []
+            for candidate in stream_candidates:
+                if _avbebe_manifest_looks_downloadable(candidate, referer=url, origin=site_root):
+                    valid_stream_candidates.append(candidate)
+                    continue
+                write_error_log(
+                    "avbebe rejected playable iframe stream",
+                    Exception("Avbebe playable iframe stream returned non-video segment content"),
+                    item_id=item_id,
+                    url=url,
+                    candidate_url=candidate,
+                )
+            stream_url = valid_stream_candidates[0] if valid_stream_candidates else ""
             if not stream_url:
                 write_error_log(
                     "avbebe playable iframe candidates missing",
-                    Exception("Avbebe playable iframe did not expose a manifest URL"),
+                    Exception("Avbebe playable iframe did not expose a downloadable video manifest URL"),
                     item_id=item_id,
                     url=url,
                     **_http_response_log_fields(resp),
                 )
                 raise Exception("Failed to extract Avbebe playable iframe stream URL")
             page_title = _clean_avbebe_title(_extract_html_title(resp.text, task.get("name") or short_name or "Avbebe"), task.get("name") or short_name or "Avbebe")
-            fallback_urls = _dedupe_download_urls(stream_candidates[1:], primary_url=stream_url)
+            fallback_urls = _dedupe_download_urls(valid_stream_candidates[1:], primary_url=stream_url)
             _set_task_identity(name=page_title, source_site="avbebe", source_page=task.get("source_page") or url, fallback_urls=fallback_urls)
             self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
             _download_manifest_with_site_strategy(
@@ -13861,11 +14205,12 @@ class DownloadManagerApp:
             site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
             page_headers = _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root)
             resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=page_headers)
-            page_title = _clean_avbebe_title(_extract_html_title(resp.text, short_name or "Avbebe"), short_name or "Avbebe")
-            media_candidates = _dedupe_download_urls(_extract_candidate_media_urls(resp.text, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+            page_text = _response_text_utf8(resp)
+            page_title = _extract_avbebe_page_title(page_text, short_name or "Avbebe")
+            media_candidates = _dedupe_download_urls(_extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd")))
             candidate_referers = {_normalize_download_url(candidate): url for candidate in media_candidates}
             iframe_candidates = []
-            for iframe_src in re.findall(r"<iframe[^>]+src=[\"']([^\"']+)[\"']", resp.text, re.IGNORECASE):
+            for iframe_src in re.findall(r"<iframe[^>]+src=[\"']([^\"']+)[\"']", page_text, re.IGNORECASE):
                 iframe_url = _normalize_download_url(urllib.parse.urljoin(url, html.unescape(iframe_src).replace("\\/", "/")))
                 if iframe_url and not any(ad_marker in iframe_url.lower() for ad_marker in ("adserver", "widgets", "juicyads")):
                     iframe_candidates.append(iframe_url)
@@ -13892,6 +14237,55 @@ class DownloadManagerApp:
                         url=url,
                         iframe_url=iframe_url,
                     )
+            playable_iframe_streams = []
+            for iframe_url in iframe_candidates:
+                if not _avbebe_is_playable_iframe(iframe_url):
+                    continue
+                for candidate in media_candidates:
+                    normalized_candidate = _normalize_download_url(candidate)
+                    if (
+                        normalized_candidate
+                        and _looks_like_manifest_url(normalized_candidate)
+                        and candidate_referers.get(normalized_candidate) == iframe_url
+                    ):
+                        playable_iframe_streams.append(normalized_candidate)
+            playable_iframe_streams = _dedupe_download_urls(playable_iframe_streams)
+            if playable_iframe_streams:
+                valid_playable_iframe_streams = []
+                for candidate in sorted(playable_iframe_streams, key=_avbebe_stream_priority):
+                    candidate_referer = candidate_referers.get(_normalize_download_url(candidate), url) or url
+                    candidate_parts = urllib.parse.urlsplit(candidate_referer)
+                    candidate_origin = f"{candidate_parts.scheme}://{candidate_parts.netloc}" if candidate_parts.scheme and candidate_parts.netloc else site_root
+                    if _avbebe_manifest_looks_downloadable(candidate, referer=candidate_referer, origin=candidate_origin):
+                        valid_playable_iframe_streams.append(candidate)
+                        continue
+                    write_error_log(
+                        "avbebe rejected playable iframe stream",
+                        Exception("Avbebe playable iframe stream returned non-video segment content"),
+                        item_id=item_id,
+                        url=url,
+                        candidate_url=candidate,
+                        candidate_referer=candidate_referer,
+                    )
+                stream_url = valid_playable_iframe_streams[0] if valid_playable_iframe_streams else ""
+            if playable_iframe_streams and stream_url:
+                stream_referer = candidate_referers.get(_normalize_download_url(stream_url), url) or url
+                referer_parts = urllib.parse.urlsplit(stream_referer)
+                stream_origin = f"{referer_parts.scheme}://{referer_parts.netloc}" if referer_parts.scheme and referer_parts.netloc else site_root
+                fallback_urls = _dedupe_download_urls(
+                    [candidate for candidate in valid_playable_iframe_streams if candidate != stream_url],
+                    primary_url=stream_url,
+                )
+                _set_task_identity(name=page_title, source_site="avbebe", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=stream_referer,
+                    origin=stream_origin,
+                    default_route="ffmpeg",
+                    force_ffmpeg=True,
+                )
+                return
             media_candidates = _dedupe_download_urls(media_candidates)
             stream_candidates = sorted(
                 [candidate for candidate in media_candidates if _looks_like_manifest_url(candidate)],
