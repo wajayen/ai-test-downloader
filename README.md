@@ -1,58 +1,40 @@
 # Downloader
 
-Windows GUI 下載器，使用 `tkinter` 製作介面，整合 `yt-dlp`、`curl_cffi`、HTTP 直連下載與 `ffmpeg` / `ffprobe`。
+Windows 圖形化影音下載工具，使用 `tkinter` 提供操作介面，整合 `yt-dlp`、`curl_cffi`、`requests`、`ffmpeg` 與 `ffprobe`，支援一般影片網址、串流清單、指定網站解析、檔名/番號搜尋、續傳與 Windows 相容 MP4 輸出。
 
-## Open Source
+## 開源授權
 
-本專案採用 **MIT License**。
+本專案以 **MIT License** 釋出。
 
-## Source Provenance
+## 主要功能
 
-- 現行主程式為 Python 專案。
-- 專案已經歷多輪持續維護、重構、除錯與站點相容性修正。
-- 目前維護流程包含人工調整與 **OpenAI Codex** 協作修正，但最終以 repo 內實際原始碼與 build 產物為準。
+- Windows GUI 下載器，支援輸入網址、拖放網址、批次任務與下載佇列。
+- 支援多語言介面：繁體中文、簡體中文、English、日本語。
+- 支援影片下載、音訊/MP3 下載、封面與基本資訊擷取。
+- 支援檔名與番號搜尋，可先顯示搜尋結果確認視窗，再選擇是否下載。
+- 搜尋排序會綜合檔名/番號吻合度、畫質、中文字幕與預估下載速度。
+- 支援直接影片網址、HTTP 檔案、HLS `m3u8`、多段串流、iframe 與常見 CDN 解析。
+- 下載完成後會檢查 MP4 相容性，必要時 remux 或轉碼為 Windows 預設播放器較容易播放的格式。
+- `activity.log` 與 `error.log` 只保留最近紀錄，避免記錄檔無限制變大。
 
-## 目前功能
+## 續傳與下載流程
 
-- Windows GUI 下載器
-- 多語系介面
-  - 繁體中文
-  - 簡體中文
-  - English
-  - 日本語
-- 支援影片與 MP3 下載
-- 支援拖放網址
-- 支援未完成任務保存、暫停、續傳、刪除
-- 支援磁碟空間不足時自動暫停
-- 支援同網域與同來源頁的下載佇列限制
-- 支援依站點選擇不同下載路徑
-  - native HLS
-  - generic `yt-dlp`
-  - `ffmpeg`
-  - HTTP 直連 / multipart
+- 下載狀態會寫入 `downloads.json`，包含來源網址、輸出檔、暫存檔、進度與站台資訊。
+- 支援 HTTP Range、HLS 分段、`yt-dlp` 與 `ffmpeg` 流程的續傳或重試。
+- 重新啟動軟體後會優先讀取既有任務狀態，避免已下載檔案歸零重來。
+- 下載流程會依序嘗試站台專用解析、直接媒體連結、HLS 平行分段、`yt-dlp`、`ffmpeg` 與通用 HTTP fallback。
+- 對可平行下載的 HLS 來源，會使用多 worker 分段下載以提高速度。
 
-## 續傳機制
+## 支援來源
 
-- 所有已支援網站只要最後落到 manifest 下載，現在都先走共用的續傳決策流程。
-- `downloads.json` 會保存任務狀態、輸出檔名、暫存檔名與部份續傳資訊。
-- 程式重新開啟後，會優先沿用既有 resume artifact，而不是重新猜新的暫存檔路徑。
-- 若續傳任務在開始後長時間低速，會依目前策略自動回原頁重分析下載點。
-- 個別站點仍可能因上游播放器差異，採用較保守的續傳路徑。
+以下為目前程式內建或已整合流程的主要來源類型：
 
-## 真實支援狀態
-
-以下是目前 repo 內已有專用處理或已實際接過下載流程的站點：
-
-- 一般 HTTP / 直連媒體 / 一般 `m3u8`
-- YouTube / `yt-dlp`
+- 一般 HTTP / HTTPS 影片、音訊與 `m3u8`
+- YouTube 與 `yt-dlp` 支援網站
 - Anime1
 - MovieFFM
 - Gimy 系列
-  - `gimytv.biz`
-  - `gimytv.io`
-  - `gimy01.tv`
-  - `gimyai.tw`
-- XiaoyaKankan
+- XiaoyaKankan / 小鴨影音
 - 99iTV
 - 777TV
 - 3KOR
@@ -62,61 +44,53 @@ Windows GUI 下載器，使用 `tkinter` 製作介面，整合 `yt-dlp`、`curl_
 - MissAV
 - 18JAV
 - 18AV / `18av.mm-cg.com`
-  - `animation_content`
-  - `CensoredAnimation_content`
-  - `UncensoredAnimation_content`
-  - `censored_content`
-  - `uncensored_content`
-  - `chinese_content`
-  - `reducing-mosaic_content`
-  - `amateurjav_content`
 - PPP.Porn
 - HoHoJ.TV
+- AVJoy
+- AVBebe
+- GoodAV17
+- JavFilms
+- TKTUBE
 - PikPak 分享頁
-  - 目前可辨識頁面、片名與候選媒體
-  - 但受保護分享仍可能需要站方驗證，未必可匿名直接下載
+- MEGA 免空連結
 - Hanime1 / HanimeOne
 - Facebook
 - Instagram
 - Threads
 - Twitter / X
 
-## 支援說明
+## 搜尋功能
 
-- `MovieFFM`、`Gimy`、`XiaoyaKankan`、`18AV`、`18JAV`、`HoHoJ.TV`、`PPP.Porn` 這類站點，多半依賴站方當前播放器結構、外部 CDN、保護播放器或 iframe 內頁。
-- `Jable`、`NJAVTV`、`MissAV`、`NNYY` 等站點依賴當前 `m3u8` 結構與 `yt-dlp` / `ffmpeg` 相容性，屬於可用但容易受上游變動影響的支援。
-- `Instagram`、`Facebook`、`Threads`、`Twitter/X` 因平台反爬、防盜鏈、cookies、第三方 API 變動影響，屬於 **實驗性 / 易失效** 支援。
-- `PikPak`、某些受保護播放器頁、以及部份外站 iframe 來源，可能只能辨識頁面與播放器，但不一定能匿名直接下載實際檔案。
+- 直接輸入影片網址時，會依網址判斷站台並進入下載流程。
+- 直接輸入檔名、片名或番號時，會走搜尋流程，不再把純文字誤判為網址。
+- 番號搜尋會優先比對精準番號，例如 `MIDE-570`、`ROE-209`、`MKON-047`。
+- 中文片名搜尋會過濾不包含關鍵字的明顯無關結果，降低錯誤站台結果混入。
+- 已支援 MovieFFM、小鴨影音、AVJoy、HoHoJ.TV 等站台搜尋結果接入下載。
 
-## 限制與風險
+## 重要檔案
 
-- 任何站點支援都可能因網站改版而失效。
-- 某些站點雖然能播放，但實際下載流可能是外部 CDN、保護播放器、受限 API 或暫時失效片源。
-- 某些站點會依來源主機不同，自動改走較保守或較快的下載器。
-- 續傳流程已盡量統一，但站點上游若主動更換播放清單或 token，仍可能使舊續傳狀態失效。
+- 主程式：`downloader.py`
+- 安全備份版：`downloader_safe.py`
+- PyInstaller 設定：`downloader.spec`
+- 編譯腳本：`build_downloader.ps1`
+- 執行紀錄檢查：`check_runtime_logs.ps1`
+- GitHub 發布腳本：`publish_github.ps1`
+- 下載任務狀態：`dist/downloads.json`
+- 錯誤紀錄：`dist/error.log`
+- 活動紀錄：`dist/activity.log`
 
-## 主要依賴
+## 編譯與同步規則
 
-- `yt-dlp`
-- `curl_cffi`
-- `requests`
-- `Pillow`
-- `ffmpeg`
-- `ffprobe`
+- 每次修改程式碼前，應先檢查 `dist/error.log` 與 `dist/activity.log`，確認上一版是否有新的執行錯誤；若有，需一併修正。
+- 編譯由 `build_downloader.ps1` 執行，腳本會讀取 `downloader.py` 內的 `APP_BUILD`。
+- 目前不是每小時固定同步 GitHub，而是每次編譯完成後比對版本編號。
+- 當 build 尾碼為 `10` 的倍數時，才自動執行 GitHub 同步與發布。
+- 下次同步 GitHub 前，需依照目前程式實際功能檢查並更新本 README，確認說明內容與新版功能一致。
+- 如需非整十版本手動同步，可執行 `publish_github.ps1`。
 
-## 主要檔案
+## 開發注意事項
 
-- 主程式：[C:\antigravity\ai_test\downloader.py](C:\antigravity\ai_test\downloader.py)
-- 安全入口：[C:\antigravity\ai_test\downloader_safe.py](C:\antigravity\ai_test\downloader_safe.py)
-- 打包設定：[C:\antigravity\ai_test\downloader.spec](C:\antigravity\ai_test\downloader.spec)
-- GitHub 發布腳本：[C:\antigravity\ai_test\publish_github.ps1](C:\antigravity\ai_test\publish_github.ps1)
-- build 腳本：[C:\antigravity\ai_test\build_downloader.ps1](C:\antigravity\ai_test\build_downloader.ps1)
-
-## 發布與同步規則
-
-- GitHub 說明與原始碼應以 repo 內最新狀態為準。
-- 目前自動同步規則不是固定每小時檢查。
-- 改為每次編譯完成後，由 `build_downloader.ps1` 讀取 `APP_BUILD`：
-  - 若版本尾碼是 `10` 的倍數，才自動同步 GitHub
-  - 其餘版本只編譯，不自動發布
-- 如需非整十版本同步，可手動執行 [C:\antigravity\ai_test\publish_github.ps1](C:\antigravity\ai_test\publish_github.ps1)。
+- 修改 `downloader.py` 後，需同步更新 `downloader_safe.py`。
+- 編譯前應執行 Python 語法檢查，避免 PyInstaller 打包後才發現錯誤。
+- 對下載流程的修正應盡量集中在通用 fallback、站台解析、檔名清理、續傳狀態與 Windows 相容輸出流程，避免每個站台各自複製大量重複邏輯。
+- 新增站台支援時，應優先確認是否能取得直接影片、HLS manifest 或 iframe 內可播放來源，再接入共用下載流程。
