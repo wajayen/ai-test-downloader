@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260523-3070"
+APP_BUILD = "20260523-3080"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -261,6 +261,37 @@ def _clean_ani_gamer_title_for_search(value, fallback=""):
     title = re.sub(r"\s*線上看\s*$", "", title).strip()
     title = re.sub(r"\s*\[\d+\]\s*$", "", title).strip()
     return re.sub(r"\s+", " ", title).strip()
+
+
+def _extract_ani_gamer_season_episode_links(page_text, page_url, fallback_title=""):
+    text = str(page_text or "")
+    base_url = _normalize_download_url(page_url) or "https://ani.gamer.com.tw/animeVideo.php"
+    series_title = _clean_ani_gamer_title_for_search(_extract_html_title(text, fallback_title), fallback_title)
+    if not series_title:
+        series_title = str(fallback_title or "").strip() or "Ani.Gamer"
+    episodes = []
+    seen = set()
+    season_match = re.search(r'<section[^>]+class=["\'][^"\']*season[^"\']*["\'][^>]*>(.*?)</section>', text, re.IGNORECASE | re.DOTALL)
+    season_html = season_match.group(1) if season_match else text
+    for href, label in re.findall(r'<a[^>]+href=["\']([^"\']*animeVideo\.php\?sn=\d+|[^"\']*\?sn=\d+)["\'][^>]*>(.*?)</a>', season_html, re.IGNORECASE | re.DOTALL):
+        normalized = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(href)))
+        if not _is_ani_gamer_video_url(normalized) or normalized in seen:
+            continue
+        seen.add(normalized)
+        episode_label = html.unescape(re.sub(r"<.*?>", "", label)).strip()
+        if not episode_label:
+            parsed = urllib.parse.urlsplit(normalized)
+            episode_label = (urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("sn") or [""])[0]
+        clean_title = f"{series_title} [{episode_label}]".strip()
+        episodes.append((normalized, clean_title))
+    if not episodes:
+        sn_match = re.search(r"animefun\.videoSn\s*=\s*(\d+)", text)
+        title_match = re.search(r"animefun\.title\s*=\s*['\"]([^'\"]+)['\"]", text)
+        if sn_match:
+            episode_title = html.unescape(title_match.group(1)).strip() if title_match else series_title
+            normalized = _normalize_download_url(f"https://ani.gamer.com.tw/animeVideo.php?sn={sn_match.group(1)}")
+            episodes.append((normalized, episode_title or series_title))
+    return _sort_download_targets_naturally(episodes)
 
 
 def _normalize_jav_code_for_compare(value):
@@ -3665,6 +3696,62 @@ def _extract_anime1_category_episode_links(page_text, base_url):
     return deduped_links_info
 
 
+def _extract_anime1_category_page_urls(page_text, base_url):
+    page_urls = []
+    text = str(page_text or "")
+    base_url = _normalize_download_url(base_url) or str(base_url or "")
+    for href in re.findall(r'href=["\']([^"\']+)["\']', text, re.IGNORECASE):
+        normalized = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(href)))
+        if not normalized or normalized == base_url:
+            continue
+        parsed = urllib.parse.urlsplit(normalized)
+        if "anime1." not in parsed.netloc.lower():
+            continue
+        path = parsed.path.lower()
+        if "/category/" not in path or "/page/" not in path:
+            continue
+        if normalized not in page_urls:
+            page_urls.append(normalized)
+    return page_urls
+
+
+def _collect_anime1_category_episode_links(page_text, base_url, fetch_page_text=None, max_pages=6):
+    collected = []
+    seen_episode_urls = set()
+    seen_page_urls = set()
+
+    def add_episode_links(source_text, source_url):
+        for link, title in _extract_anime1_category_episode_links(source_text, source_url):
+            normalized = _normalize_download_url(link)
+            if not normalized or normalized in seen_episode_urls:
+                continue
+            seen_episode_urls.add(normalized)
+            collected.append((normalized, title))
+
+    base_url = _normalize_download_url(base_url) or str(base_url or "")
+    first_text = str(page_text or "")
+    add_episode_links(first_text, base_url)
+    pending_pages = _extract_anime1_category_page_urls(first_text, base_url)
+    if base_url:
+        seen_page_urls.add(base_url)
+
+    while fetch_page_text and pending_pages and len(seen_page_urls) < max_pages:
+        page_url = pending_pages.pop(0)
+        if not page_url or page_url in seen_page_urls:
+            continue
+        seen_page_urls.add(page_url)
+        try:
+            extra_text = fetch_page_text(page_url)
+        except Exception:
+            continue
+        add_episode_links(extra_text, page_url)
+        for next_page_url in _extract_anime1_category_page_urls(extra_text, page_url):
+            if next_page_url not in seen_page_urls and next_page_url not in pending_pages:
+                pending_pages.append(next_page_url)
+
+    return _sort_download_targets_naturally(collected)
+
+
 def _classify_gimy_stream_candidate(url):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -3710,6 +3797,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
 
 VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "tktube.com",
+    "ani.gamer.com.tw",
     "anime1.me",
     "anime1.pw",
     "xiaoyakankan.io",
@@ -3735,9 +3823,10 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
 )
 
 VIDEO_SEARCH_SITE_PRIORITY = {
-    "tktube.com": 0,
-    "anime1.me": 4,
-    "anime1.pw": 4,
+    "anime1.me": 0,
+    "anime1.pw": 0,
+    "tktube.com": 2,
+    "ani.gamer.com.tw": 3,
     "xiaoyakankan.io": 5,
     "xiaoyakankan.tv": 6,
     "xiaoyakankan.com": 7,
@@ -3788,8 +3877,40 @@ VIDEO_SEARCH_CHINESE_SUBTITLE_MARKERS = (
     "c-sub",
 )
 
+ANIME1_CATALOG_SEARCH_URLS = (
+    "https://anime1.me/%E5%8B%95%E7%95%AB%E5%88%97%E8%A1%A8",
+    "https://anime1.me/2026%E5%B9%B4%E6%98%A5%E5%AD%A3%E6%96%B0%E7%95%AA",
+    "https://anime1.me/2026%E5%B9%B4%E5%86%AC%E5%AD%A3%E6%96%B0%E7%95%AA",
+)
+
 VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
+    "霧尾粉絲後援會": [
+        {
+            "url": "https://anime1.me/category/2026%E5%B9%B4%E6%98%A5%E5%AD%A3/%E9%9C%A7%E5%B0%BE%E7%B2%89%E7%B5%B2%E5%BE%8C%E6%8F%B4%E6%9C%83",
+            "title": "霧尾粉絲後援會 Anime1",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "你又被殺了呢，偵探大人": [
+        {
+            "url": "https://anime1.me/category/2026%E5%B9%B4%E6%98%A5%E5%AD%A3/%E4%BD%A0%E5%8F%88%E8%A2%AB%E6%AE%BA%E4%BA%86%E5%91%A2%EF%BC%8C%E5%81%B5%E6%8E%A2%E5%A4%A7%E4%BA%BA",
+            "title": "你又被殺了呢，偵探大人 Anime1",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "女騎士成為蠻族新娘": [
+        {
+            "url": "https://anime1.me/category/2026%E5%B9%B4%E6%98%A5%E5%AD%A3/%E5%A5%B3%E9%A8%8E%E5%A3%AB%E6%88%90%E7%82%BA%E8%A0%BB%E6%97%8F%E6%96%B0%E5%A8%98",
+            "title": "女騎士成為蠻族新娘 Anime1",
+            "snippet": "known verified search seed",
+        },
+    ],
     "勇者之渣": [
+        {
+            "url": "https://ani.gamer.com.tw/animeVideo.php?sn=47072",
+            "title": "勇者之渣 Ani.Gamer",
+            "snippet": "known verified search seed",
+        },
         {
             "url": "https://anime1.me/category/2026%e5%b9%b4%e5%86%ac%e5%ad%a3/%e5%8b%87%e8%80%85%e4%b9%8b%e6%b8%a3",
             "title": "勇者之渣 Anime1",
@@ -3798,6 +3919,34 @@ VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
         {
             "url": "https://www.youtube.com/playlist?list=PL12UaAf_xzfoCw9upcroz0eSEuTHb91P8",
             "title": "勇者之渣 YouTube playlist",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "容易對付的惡魔大人": [
+        {
+            "url": "https://anime1.me/category/2026%e5%b9%b4%e6%98%a5%e5%ad%a3/%e5%ae%b9%e6%98%93%e5%b0%8d%e4%bb%98%e7%9a%84%e6%83%a1%e9%ad%94%e5%a4%a7%e4%ba%ba",
+            "title": "容易對付的惡魔大人 Anime1",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "吞噬魔物的冒險者": [
+        {
+            "url": "https://anime1.me/category/2026%E5%B9%B4%E6%98%A5%E5%AD%A3/%E5%90%9E%E5%99%AC%E9%AD%94%E7%89%A9%E7%9A%84%E5%86%92%E9%9A%AA%E8%80%85",
+            "title": "吞噬魔物的冒險者 Anime1",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "庫吉馬唱歌的家": [
+        {
+            "url": "https://anime1.me/category/2026%e5%b9%b4%e6%98%a5%e5%ad%a3/%e5%ba%ab%e5%90%89%e9%a6%ac%e5%94%b1%e6%ad%8c%e7%9a%84%e5%ae%b6",
+            "title": "庫吉馬唱歌的家 Anime1",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "Re:從零開始的異世界生活 第四季": [
+        {
+            "url": "https://anime1.me/category/2026%E5%B9%B4%E6%98%A5%E5%AD%A3/re%E5%BE%9E%E9%9B%B6%E9%96%8B%E5%A7%8B%E7%9A%84%E7%95%B0%E4%B8%96%E7%95%8C%E7%94%9F%E6%B4%BB-%E7%AC%AC%E5%9B%9B%E5%AD%A3",
+            "title": "Re:從零開始的異世界生活 第四季 Anime1",
             "snippet": "known verified search seed",
         },
     ],
@@ -3888,6 +4037,30 @@ VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
 
 ANI_GAMER_SN_SEARCH_FALLBACKS = {
     "47072": "勇者之渣",
+    "48421": "容易對付的惡魔大人",
+    "48422": "容易對付的惡魔大人",
+    "48423": "容易對付的惡魔大人",
+    "48582": "容易對付的惡魔大人",
+    "48741": "容易對付的惡魔大人",
+    "48845": "容易對付的惡魔大人",
+    "49006": "容易對付的惡魔大人",
+    "48404": "吞噬魔物的冒險者",
+    "48405": "吞噬魔物的冒險者",
+    "48406": "吞噬魔物的冒險者",
+    "48605": "吞噬魔物的冒險者",
+    "48861": "吞噬魔物的冒險者",
+    "48868": "吞噬魔物的冒險者",
+    "49036": "吞噬魔物的冒險者",
+    "49037": "吞噬魔物的冒險者",
+}
+
+ANI_GAMER_SN_EPISODE_ORDER = {
+    sn: index + 1
+    for series in (
+        ("48421", "48422", "48423", "48582", "48741", "48845", "49006"),
+        ("48404", "48405", "48406", "48605", "48861", "48868", "49036", "49037"),
+    )
+    for index, sn in enumerate(series)
 }
 
 
@@ -3899,11 +4072,52 @@ def _video_search_site_for_url(url):
     return ""
 
 
+def _normalize_known_video_search_key(value):
+    text = html.unescape(str(value or "")).strip().lower()
+    text = text.replace("：", ":")
+    text = re.sub(r"\s+", "", text)
+    return re.sub(r"[\-_:：!！?？,，.。・．、~～（）()［］\[\]【】「」『』《》〈〉\"'`]+", "", text)
+
+
+def _anime1_url_is_category_listing(url):
+    parsed = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or ""))
+    if "anime1." not in parsed.netloc.lower():
+        return False
+    if "/category/" in parsed.path.lower():
+        return True
+    return bool(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("cat"))
+
+
+def _extract_anime1_catalog_search_results(page_text, base_url, query_text):
+    normalized_query = _normalize_known_video_search_key(query_text)
+    if not normalized_query:
+        return []
+    results = []
+    seen_urls = set()
+    for href, raw_label in re.findall(r"<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", str(page_text or ""), re.IGNORECASE | re.DOTALL):
+        title = html.unescape(re.sub(r"<.*?>", "", str(raw_label or ""))).strip()
+        normalized_title = _normalize_known_video_search_key(title)
+        if not normalized_title:
+            continue
+        if normalized_query != normalized_title and normalized_query not in normalized_title and normalized_title not in normalized_query:
+            continue
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(str(href or ""))))
+        if not url or not _anime1_url_is_category_listing(url) or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        results.append({
+            "url": url,
+            "title": title or str(query_text or "").strip() or "Anime1",
+            "snippet": "anime1 catalog search",
+        })
+    return results
+
+
 def _known_video_search_seed_results(query_text):
-    normalized_query = re.sub(r"\s+", "", str(query_text or "")).strip().lower()
+    normalized_query = _normalize_known_video_search_key(query_text)
     results = []
     for key, seeds in VIDEO_SEARCH_KNOWN_RESULT_SEEDS.items():
-        normalized_key = re.sub(r"\s+", "", str(key or "")).strip().lower()
+        normalized_key = _normalize_known_video_search_key(key)
         if not normalized_key:
             continue
         if normalized_query != normalized_key and normalized_key not in normalized_query and normalized_query not in normalized_key:
@@ -5904,14 +6118,22 @@ class DownloadManagerApp:
         def fetch_anime1():
             try:
                 c_req = get_curl_cffi_requests()
+                def fetch_anime1_page(page_url):
+                    page_resp = c_req.get(page_url, impersonate="chrome110", timeout=15)
+                    return _response_text_utf8(page_resp)
+
                 resp = c_req.get(new_url, impersonate="chrome110", timeout=15)
-                links_info = _extract_anime1_category_episode_links(resp.text, new_url)
+                links_info = _collect_anime1_category_episode_links(
+                    _response_text_utf8(resp),
+                    new_url,
+                    fetch_page_text=fetch_anime1_page,
+                )
                 if not links_info:
                     self._schedule_warning(t("msg_fetch_anime1_empty"))
                     return
 
                 def enqueue():
-                    ordered_links = list(reversed(links_info))
+                    ordered_links = _sort_download_targets_naturally(links_info)
                     targets = self._choose_playlist_targets(ordered_links, ordered_links[0])
                     for link, title in targets:
                         clean_title = html.unescape(title).replace("&#8211;", "-").strip()
@@ -7503,6 +7725,51 @@ class DownloadManagerApp:
         if not url:
             return result
         original_title = str(result.get("title") or "").strip()
+        if _is_ani_gamer_video_url(url):
+            parsed_ani_url = urllib.parse.urlsplit(url)
+            sn = (urllib.parse.parse_qs(parsed_ani_url.query, keep_blank_values=True).get("sn") or [""])[0]
+            fallback_query = ANI_GAMER_SN_SEARCH_FALLBACKS.get(str(sn or "").strip(), "")
+            resolved_query = fallback_query or query_text
+            result["title"] = f"{resolved_query} Ani.Gamer".strip()
+            result["resolver_query"] = resolved_query
+            result["source_page"] = url
+            try:
+                c_req = get_curl_cffi_requests()
+                for seed in _known_video_search_seed_results(resolved_query):
+                    seed_url = _normalize_download_url(seed.get("url", ""))
+                    if not _anime1_url_is_category_listing(seed_url):
+                        continue
+                    seed_resp = c_req.get(
+                        seed_url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer="https://www.google.com/"),
+                    )
+                    episode_links = _collect_anime1_category_episode_links(
+                        _response_text_utf8(seed_resp),
+                        seed_url,
+                        fetch_page_text=lambda page_url: _response_text_utf8(
+                            c_req.get(
+                                page_url,
+                                impersonate="chrome120",
+                                timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
+                                headers=_make_ytdlp_http_headers(referer=seed_url),
+                            )
+                        ),
+                    )
+                    if episode_links:
+                        ordered_links = _sort_download_targets_naturally(episode_links)
+                        result["candidate_urls"] = [link for link, _title in ordered_links]
+                        result["playlist_entries"] = [
+                            {"url": link, "title": html.unescape(str(title or "")).replace("&#8211;", "-").strip() or resolved_query}
+                            for link, title in ordered_links
+                        ]
+                        result["playlist_count"] = len(result["playlist_entries"])
+                        result["playlist_source_page"] = seed_url
+                        break
+            except Exception:
+                pass
+            return result
         try:
             c_req = get_curl_cffi_requests()
             resp = c_req.get(
@@ -7521,14 +7788,76 @@ class DownloadManagerApp:
             candidates = []
             parsed_search_url = urllib.parse.urlsplit(url)
             search_host = parsed_search_url.netloc.lower()
-            if "anime1." in search_host and "/category/" in parsed_search_url.path.lower():
-                episode_links = _extract_anime1_category_episode_links(page_text, url)
+            if _is_ani_gamer_video_url(url):
+                sn = (urllib.parse.parse_qs(parsed_search_url.query, keep_blank_values=True).get("sn") or [""])[0]
+                fallback_query = ANI_GAMER_SN_SEARCH_FALLBACKS.get(str(sn or "").strip(), "")
+                resolved_query = _clean_ani_gamer_title_for_search(_extract_html_title(page_text, fallback_query), fallback_query)
+                if not _looks_like_video_search_text(resolved_query):
+                    resolved_query = fallback_query or query_text
+                result["title"] = f"{resolved_query} Ani.Gamer".strip()
+                result["resolver_query"] = resolved_query
+                result["source_page"] = url
+                for seed in _known_video_search_seed_results(resolved_query):
+                    seed_url = _normalize_download_url(seed.get("url", ""))
+                    if not _anime1_url_is_category_listing(seed_url):
+                        continue
+                    try:
+                        seed_resp = c_req.get(
+                            seed_url,
+                            impersonate="chrome120",
+                            timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
+                            headers=_make_ytdlp_http_headers(referer=url),
+                        )
+                        episode_links = _collect_anime1_category_episode_links(
+                            _response_text_utf8(seed_resp),
+                            seed_url,
+                            fetch_page_text=lambda page_url: _response_text_utf8(
+                                c_req.get(
+                                    page_url,
+                                    impersonate="chrome120",
+                                    timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
+                                    headers=_make_ytdlp_http_headers(referer=seed_url),
+                                )
+                            ),
+                        )
+                    except Exception:
+                        episode_links = []
+                    if episode_links:
+                        ordered_links = _sort_download_targets_naturally(episode_links)
+                        candidates = [link for link, _title in ordered_links]
+                        result["playlist_entries"] = [
+                            {"url": link, "title": html.unescape(str(title or "")).replace("&#8211;", "-").strip() or resolved_query}
+                            for link, title in ordered_links
+                        ]
+                        result["playlist_count"] = len(result["playlist_entries"])
+                        result["playlist_source_page"] = seed_url
+                        break
+            if _anime1_url_is_category_listing(url):
+                def fetch_anime1_page(page_url):
+                    page_resp = c_req.get(
+                        page_url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer=url),
+                    )
+                    return _response_text_utf8(page_resp)
+
+                episode_links = _collect_anime1_category_episode_links(
+                    page_text,
+                    url,
+                    fetch_page_text=fetch_anime1_page,
+                )
                 if episode_links:
-                    ordered_links = list(reversed(episode_links))
+                    ordered_links = _sort_download_targets_naturally(episode_links)
                     candidates = [link for link, _title in ordered_links]
+                    result["playlist_entries"] = [
+                        {"url": link, "title": html.unescape(str(title or "")).replace("&#8211;", "-").strip() or query_text}
+                        for link, title in ordered_links
+                    ]
+                    result["playlist_count"] = len(result["playlist_entries"])
                     result["source_page"] = url
                     if not result.get("title") or not _video_search_matches_query(result, query_text):
-                        result["title"] = query_text
+                        result["title"] = f"{query_text} 全集"
             if not candidates and "tktube.com" in search_host:
                 candidates = _extract_tktube_media_candidates(page_text)
             if not candidates and "hohoj.tv" in search_host:
@@ -7715,6 +8044,44 @@ class DownloadManagerApp:
 
         def fetch_anime1_results():
             collected = []
+            try:
+                anime1_search_url = "https://anime1.me/?" + urllib.parse.urlencode({"s": search_text})
+                resp = c_req.get(
+                    anime1_search_url,
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=_make_ytdlp_http_headers(referer="https://anime1.me/"),
+                )
+                append_unique_results(
+                    collected,
+                    _extract_anime1_catalog_search_results(
+                        _response_text_utf8(resp),
+                        str(getattr(resp, "url", anime1_search_url)),
+                        search_text,
+                    ),
+                )
+            except Exception:
+                pass
+            for catalog_url in ANIME1_CATALOG_SEARCH_URLS:
+                try:
+                    resp = c_req.get(
+                        catalog_url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer="https://anime1.me/"),
+                    )
+                    append_unique_results(
+                        collected,
+                        _extract_anime1_catalog_search_results(
+                            _response_text_utf8(resp),
+                            str(getattr(resp, "url", catalog_url)),
+                            search_text,
+                        ),
+                    )
+                except Exception:
+                    pass
+            if collected:
+                return collected
             for domain in ("anime1.me", "anime1.pw"):
                 query = f"{primary_query} site:{domain}/category"
                 try:
@@ -7849,6 +8216,26 @@ class DownloadManagerApp:
         selected_index = max(0, min(selected_index, len(results) - 1))
         best = results[selected_index]
         target_url = _normalize_download_url(best.get("url", ""))
+        playlist_entries = []
+        for entry in best.get("playlist_entries", []) or []:
+            if isinstance(entry, dict):
+                entry_url = _normalize_download_url(entry.get("url", ""))
+                entry_title = str(entry.get("title") or "").strip()
+            elif isinstance(entry, (tuple, list)):
+                entry_url = _normalize_download_url(entry[0] if entry else "")
+                entry_title = str(entry[1] if len(entry) > 1 else "").strip()
+            else:
+                entry_url = _normalize_download_url(entry)
+                entry_title = ""
+            if not entry_url:
+                continue
+            playlist_entries.append(
+                {
+                    "url": entry_url,
+                    "title": html.unescape(entry_title).replace("&#8211;", "-").strip(),
+                }
+            )
+        playlist_entries = _sort_download_targets_naturally(playlist_entries)
         candidate_urls = _dedupe_download_urls(best.get("candidate_urls", []))
         source_page = target_url
         fallback_urls = [
@@ -7856,7 +8243,11 @@ class DownloadManagerApp:
             for index, result in enumerate(results)
             if index != selected_index and result.get("url")
         ]
-        if candidate_urls:
+        if playlist_entries:
+            source_page = target_url
+            target_url = playlist_entries[0]["url"]
+            candidate_urls = [entry["url"] for entry in playlist_entries]
+        elif candidate_urls:
             source_page = target_url
             target_url = candidate_urls[0]
             fallback_urls = candidate_urls[1:] + fallback_urls
@@ -7879,6 +8270,8 @@ class DownloadManagerApp:
             "extra_task_data": extra,
             "source_page": source_page,
             "quality": quality,
+            "playlist_entries": playlist_entries,
+            "playlist_count": len(playlist_entries),
         }
 
     def _show_video_search_failure_dialog(self, query_text, detail=""):
@@ -7898,6 +8291,34 @@ class DownloadManagerApp:
         if not target_url:
             self._show_warning("這筆搜尋結果沒有可下載網址，請選擇其他結果。", parent=parent)
             return False
+        playlist_entries = [
+            entry
+            for entry in (plan.get("playlist_entries") or [])
+            if isinstance(entry, dict) and _normalize_download_url(entry.get("url", ""))
+        ]
+        if len(playlist_entries) > 1:
+            source_page = plan.get("source_page") or plan.get("target_url") or ""
+            message = (
+                f"共找到 {len(playlist_entries)} 集，是否開始全劇集下載？\n\n"
+                f"名稱：{plan.get('custom_name') or ''}\n"
+                f"來源：{source_page}\n\n"
+                "確認後會一次加入全部集數到下載任務列表。"
+            )
+            if not self._ask_warning_yesno(message, parent=parent):
+                return False
+            for entry in playlist_entries:
+                episode_url = _normalize_download_url(entry.get("url", ""))
+                episode_title = str(entry.get("title") or plan.get("custom_name") or "").strip()
+                if not episode_url:
+                    continue
+                self._final_add_download(
+                    episode_url,
+                    is_mp3=bool(plan.get("is_mp3", False)),
+                    custom_name=episode_title or None,
+                    source_site=plan.get("source_site") or None,
+                    extra_task_data=self._build_extra_task_data(source_page=source_page),
+                )
+            return True
         self._final_add_download(
             target_url,
             is_mp3=bool(plan.get("is_mp3", False)),
@@ -7964,6 +8385,9 @@ class DownloadManagerApp:
             subtitle = "有" if _video_search_chinese_subtitle_score(result) == 0 else ""
             site = self._source_site_from_search_url(result.get("url", ""))
             title = re.sub(r"\s+", " ", str(result.get("title") or query_text).strip())
+            playlist_count = int(result.get("playlist_count") or len(result.get("playlist_entries") or []) or 0)
+            if playlist_count > 1 and f"{playlist_count} 集" not in title:
+                title = f"{title}（全集 {playlist_count} 集）"
             url = _normalize_download_url(result.get("url", "")) or ""
             tree.insert("", "end", iid=str(index), values=(index + 1, f"{quality}p" if quality else "", subtitle, site, title[:160], url))
         tree.selection_set("0")
@@ -7979,6 +8403,15 @@ class DownloadManagerApp:
             plan = self._build_video_search_download_plan(results, int(selection[0]), query_text, is_mp3=is_mp3)
             if not plan:
                 hint_var.set("這筆搜尋結果沒有可下載網址。")
+                return
+            playlist_count = int(plan.get("playlist_count") or 0)
+            if playlist_count > 1:
+                hint_var.set(
+                    f"將下載全劇集：{plan['custom_name']}（共 {playlist_count} 集）\n"
+                    f"來源：{plan['source_page']}\n"
+                    f"第一集下載點：{plan['target_url']}\n"
+                    "按下開始後會再確認是否一次加入全部集數。"
+                )
                 return
             hint_var.set(f"將下載：{plan['custom_name']}\n來源：{plan['source_page']}\n下載點：{plan['target_url']}")
 
@@ -8024,6 +8457,42 @@ class DownloadManagerApp:
 
         self._start_background_parse(worker)
 
+    def _resolve_ani_gamer_playlist_entries(self, query_text, season_entries=None):
+        query_text = re.sub(r"\s+", " ", str(query_text or "").strip())
+        if not _looks_like_video_search_text(query_text):
+            return []
+        results = self._google_video_search_results(query_text)
+        for result in results or []:
+            entries = result.get("playlist_entries") or []
+            if len(entries) <= 1:
+                continue
+            resolved_entries = [
+                {
+                    "url": _normalize_download_url(entry.get("url", "")),
+                    "title": str(entry.get("title") or "").strip(),
+                }
+                for entry in entries
+                if isinstance(entry, dict) and _normalize_download_url(entry.get("url", ""))
+            ]
+            resolved_entries = _sort_download_targets_naturally(resolved_entries)
+            if not resolved_entries:
+                continue
+            if season_entries and len(resolved_entries) >= len(season_entries):
+                return resolved_entries[: len(season_entries)]
+            return resolved_entries
+        return []
+
+    def _resolve_known_ani_gamer_sn_entries(self, sn, fallback_query=""):
+        sn = str(sn or "").strip()
+        query_text = str(fallback_query or ANI_GAMER_SN_SEARCH_FALLBACKS.get(sn, "")).strip()
+        if not _looks_like_video_search_text(query_text):
+            return [], "", None
+        resolved_entries = self._resolve_ani_gamer_playlist_entries(query_text)
+        episode_number = ANI_GAMER_SN_EPISODE_ORDER.get(sn)
+        if episode_number is not None and resolved_entries:
+            resolved_entries = _sort_download_targets_naturally(resolved_entries)
+        return resolved_entries, query_text, episode_number
+
     def _start_ani_gamer_video_search(self, page_url, is_mp3=False):
         page_url = _normalize_download_url(page_url)
         if not page_url:
@@ -8035,6 +8504,24 @@ class DownloadManagerApp:
             sn = (urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("sn") or [""])[0]
             fallback_query = ANI_GAMER_SN_SEARCH_FALLBACKS.get(str(sn or "").strip(), "")
             try:
+                if _looks_like_video_search_text(fallback_query):
+                    resolved_entries, query_text, _episode_number = self._resolve_known_ani_gamer_sn_entries(sn, fallback_query)
+                    if resolved_entries:
+                        def enqueue_known_season(entries=resolved_entries, source_page=page_url, title=query_text):
+                            targets = self._choose_playlist_targets(entries, entries[0])
+                            for entry in targets:
+                                episode_url = entry.get("url", "") if isinstance(entry, dict) else (entry[0] if entry else "")
+                                episode_title = entry.get("title") if isinstance(entry, dict) else (entry[1] if len(entry) > 1 else title)
+                                self._final_add_download(
+                                    episode_url,
+                                    is_mp3=is_mp3,
+                                    custom_name=episode_title or title,
+                                    source_site=self._source_site_from_search_url(episode_url) or "anime1",
+                                    extra_task_data=self._build_extra_task_data(source_page=source_page),
+                                )
+
+                        self._schedule_ui_call(enqueue_known_season)
+                        return
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(
                     page_url,
@@ -8048,6 +8535,30 @@ class DownloadManagerApp:
                     query_text = fallback_query
                 if not _looks_like_video_search_text(query_text):
                     raise Exception("Ani.Gamer title could not be converted into a searchable video name")
+                season_entries = _extract_ani_gamer_season_episode_links(page_text, page_url, query_text)
+                if len(season_entries) > 1:
+                    resolved_entries = self._resolve_ani_gamer_playlist_entries(query_text, season_entries=season_entries)
+                    if not resolved_entries:
+                        raise Exception(f"Ani.Gamer season was found but no supported stream source was resolved for {query_text}")
+
+                    def enqueue_season(entries=resolved_entries, source_page=page_url):
+                        targets = self._choose_playlist_targets(entries, entries[0])
+                        for entry in targets:
+                            if isinstance(entry, dict):
+                                episode_url = entry.get("url", "")
+                                episode_title = entry.get("title") or query_text
+                            else:
+                                episode_url, episode_title = entry
+                            self._final_add_download(
+                                episode_url,
+                                is_mp3=is_mp3,
+                                custom_name=episode_title,
+                                source_site=self._source_site_from_search_url(episode_url) or "anime1",
+                                extra_task_data=self._build_extra_task_data(source_page=source_page),
+                            )
+
+                    self._schedule_ui_call(enqueue_season)
+                    return
                 self._schedule_ui_call(lambda q=query_text: self._start_video_search_download(q, is_mp3=is_mp3))
             except Exception as exc:
                 if _looks_like_video_search_text(fallback_query):
@@ -8111,6 +8622,53 @@ class DownloadManagerApp:
             updates["resume_requested"] = bool(fields.get("resume_requested", False))
         if updates:
             update_state_entry(url, **updates)
+
+    def _retarget_download_task(self, task, item_id, old_url, target_url, name=None, source_site=None, source_page=None, fallback_urls=None):
+        target_url = _normalize_download_url(target_url)
+        if not target_url:
+            return None
+        old_state_url = _normalize_download_url(old_url) or _normalize_download_url(_task_field_value(task, "url", "")) or target_url
+        normalized_source_page = _normalize_download_url(source_page)
+        normalized_site = str(source_site or self._source_site_from_search_url(target_url) or _task_source_site_name(task) or "").strip().lower()
+        normalized_fallbacks = _dedupe_download_urls(fallback_urls or [], primary_url=target_url)
+        normalized_name = ""
+        if name:
+            normalized_name = self._set_task_display_name(
+                task,
+                item_id,
+                name,
+                source_site=normalized_site or None,
+                source_page=normalized_source_page or None,
+            )
+        _set_task_aux_fields(
+            task,
+            url=target_url,
+            source_site=normalized_site,
+            source_page=normalized_source_page,
+            fallback_urls=normalized_fallbacks,
+            resolved_url="",
+            resolved_url_saved_at=0.0,
+        )
+        update_fields = {
+            "url": target_url,
+            "source_site": normalized_site,
+            "source_page": normalized_source_page,
+            "fallback_urls": normalized_fallbacks,
+            "resolved_url": "",
+            "resolved_url_saved_at": 0.0,
+        }
+        if normalized_name:
+            update_fields["name"] = normalized_name
+        elif name:
+            update_fields["name"] = str(name or "").strip()
+        update_state_entry(old_state_url, **update_fields)
+        return {
+            "target_url": target_url,
+            "source_site": normalized_site,
+            "source_page": normalized_source_page,
+            "fallback_urls": normalized_fallbacks,
+            "name": normalized_name or str(name or "").strip(),
+        }
 
     def _set_task_display_name(self, task, item_id, name, source_site=None, source_page=None):
         normalized_name = re.sub(r"\s+", " ", str(name or "")).strip()
@@ -15086,21 +15644,60 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, message="動畫瘋頁面不支援直接下載，正在搜尋可下載來源...")
             sn = (urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True).get("sn") or [""])[0]
             fallback_query = ANI_GAMER_SN_SEARCH_FALLBACKS.get(str(sn or "").strip(), "")
-            try:
-                c_req = get_curl_cffi_requests()
-                resp = c_req.get(
-                    url,
-                    impersonate="chrome120",
-                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                    headers=_make_ytdlp_http_headers(referer="https://ani.gamer.com.tw/"),
-                )
-                query_text = _clean_ani_gamer_title_for_search(_extract_html_title(_response_text_utf8(resp), fallback_query), fallback_query)
-            except Exception as exc:
-                query_text = fallback_query
-                if query_text:
-                    write_error_log("ani gamer download reroute title fallback", exc, url=url, item_id=item_id, fallback_query=query_text)
+            query_text = fallback_query
+            episode_number = ANI_GAMER_SN_EPISODE_ORDER.get(str(sn or "").strip())
+            if not _looks_like_video_search_text(query_text):
+                try:
+                    c_req = get_curl_cffi_requests()
+                    resp = c_req.get(
+                        url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer="https://ani.gamer.com.tw/"),
+                    )
+                    page_text = _response_text_utf8(resp)
+                    page_title = _extract_html_title(page_text, fallback_query)
+                    query_text = _clean_ani_gamer_title_for_search(page_title, fallback_query)
+                    episode_number = _extract_episode_order_number(page_title)
+                except Exception as exc:
+                    query_text = fallback_query
+                    episode_number = None
+                    if query_text:
+                        write_error_log("ani gamer download reroute title fallback", exc, url=url, item_id=item_id, fallback_query=query_text)
             if not _looks_like_video_search_text(query_text):
                 raise Exception("Ani.Gamer URL is not directly downloadable and no searchable title could be resolved")
+            resolved_entries = self._resolve_ani_gamer_playlist_entries(query_text)
+            if resolved_entries:
+                selected_entry = resolved_entries[0]
+                if episode_number is not None:
+                    selected_entry = next(
+                        (
+                            entry
+                            for entry in resolved_entries
+                            if _extract_episode_order_number(entry.get("title", "")) == episode_number
+                        ),
+                        selected_entry,
+                    )
+                target_url = _normalize_download_url(selected_entry.get("url", ""))
+                if target_url:
+                    source_site = self._source_site_from_search_url(target_url) or "anime1"
+                    retargeted = self._retarget_download_task(
+                        task,
+                        item_id,
+                        old_url=_normalize_download_url(_task_field_value(task, "url", "")) or url,
+                        target_url=target_url,
+                        name=selected_entry.get("title") or query_text,
+                        source_site=source_site,
+                        source_page=url,
+                        fallback_urls=[],
+                    )
+                    if not retargeted:
+                        raise Exception(f"Ani.Gamer URL reroute resolved an empty target for {query_text}")
+                    next_use_impersonate = use_impersonate or source_site in IMPERSONATION_SITE_MARKERS or any(
+                        marker in target_url.lower() for marker in IMPERSONATION_SITE_MARKERS
+                    )
+                    self._download_task_internal(target_url, item_id, save_dir, next_use_impersonate, is_mp3)
+                    return
             results = self._google_video_search_results(query_text)
             if not results:
                 raise Exception(f"Ani.Gamer URL is not directly downloadable and no downloadable search result was found for {query_text}")
@@ -15110,35 +15707,21 @@ class DownloadManagerApp:
             target_url = _normalize_download_url(plan.get("target_url", ""))
             if not target_url:
                 raise Exception(f"Ani.Gamer URL reroute resolved an empty target for {query_text}")
-            old_state_url = _normalize_download_url(_task_field_value(task, "url", "")) or url
             source_site = str(plan.get("source_site") or self._source_site_from_search_url(target_url) or "").strip().lower()
             extra_task_data = plan.get("extra_task_data") or {}
             fallback_urls = _dedupe_download_urls((extra_task_data or {}).get("fallback_urls", []), primary_url=target_url)
-            _set_task_aux_fields(
+            retargeted = self._retarget_download_task(
                 task,
-                url=target_url,
-                source_site=source_site,
-                source_page=url,
-                fallback_urls=fallback_urls,
-                resolved_url="",
-                resolved_url_saved_at=0.0,
-            )
-            update_state_entry(
-                old_state_url,
-                url=target_url,
-                name=plan.get("custom_name") or query_text,
-                source_site=source_site,
-                source_page=url,
-                fallback_urls=fallback_urls,
-                resolved_url="",
-                resolved_url_saved_at=0.0,
-            )
-            _set_task_identity(
+                item_id,
+                old_url=_normalize_download_url(_task_field_value(task, "url", "")) or url,
+                target_url=target_url,
                 name=plan.get("custom_name") or query_text,
                 source_site=source_site,
                 source_page=url,
                 fallback_urls=fallback_urls,
             )
+            if not retargeted:
+                raise Exception(f"Ani.Gamer URL reroute resolved an empty target for {query_text}")
             next_use_impersonate = use_impersonate or source_site in IMPERSONATION_SITE_MARKERS or any(
                 marker in target_url.lower() for marker in IMPERSONATION_SITE_MARKERS
             )
