@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260523-3060"
+APP_BUILD = "20260523-3070"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -82,6 +82,7 @@ MAX_DOWNLOADS_PER_SOURCE_SITE = {
     "avbebe": 4,
     "movieffm": 3,
 }
+VIDEO_SEARCH_MIN_QUALITY = 720
 LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
 LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 10
 RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
@@ -237,6 +238,29 @@ def _looks_like_video_search_text(value):
         return True
     alnum_count = len(re.findall(r"[A-Za-z0-9]", searchable))
     return alnum_count >= 3 and bool(re.search(r"[A-Za-z]", searchable))
+
+
+def _is_ani_gamer_video_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlsplit(normalized)
+    host = parsed.netloc.lower()
+    if host != "ani.gamer.com.tw":
+        return False
+    if not parsed.path.lower().endswith("/animevideo.php"):
+        return False
+    return bool(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("sn"))
+
+
+def _clean_ani_gamer_title_for_search(value, fallback=""):
+    title = html.unescape(str(value or "")).strip()
+    if not title:
+        title = str(fallback or "").strip()
+    title = re.sub(r"\s*-\s*巴哈姆特動畫瘋\s*$", "", title, flags=re.IGNORECASE).strip()
+    title = re.sub(r"\s*線上看\s*$", "", title).strip()
+    title = re.sub(r"\s*\[\d+\]\s*$", "", title).strip()
+    return re.sub(r"\s+", " ", title).strip()
 
 
 def _normalize_jav_code_for_compare(value):
@@ -492,6 +516,26 @@ RESUMABLE_TASK_STATES = frozenset(("PAUSED", "ERROR"))
 STOP_REASON_PAUSE = "pause"
 STOP_REASON_DELETE = "delete"
 STOP_REASONS = frozenset((STOP_REASON_PAUSE, STOP_REASON_DELETE))
+MEDIA_DOWNLOAD_RETRY_MARKERS = (
+    "http 403",
+    "http 404",
+    "http 410",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "service temporarily unavailable",
+    "temporarily unavailable",
+    "could not resolve host",
+    "failed to resolve hostname",
+    "getaddrinfo failed",
+    "name does not resolve",
+    "dns",
+    "timed out",
+    "timeout",
+    "urlopen error",
+)
 _ERROR_LOG_RECENT = {}
 ERROR_LOG_MAX_ENTRIES = 10
 TRACE_LOG_MAX_ENTRIES = 10
@@ -2396,12 +2440,26 @@ def _nnyy_stream_priority(url):
     return 100
 
 
-def _order_movieffm_hls_candidates(primary_url, fallback_urls=()):
+def _site_hls_candidate_priority(source_site, url):
+    site = str(source_site or "").strip().lower()
+    if site == "movieffm":
+        return _movieffm_stream_priority(url)
+    if site == "xiaoyakankan":
+        return _xiaoyakankan_stream_priority(url)
+    if site == "nnyy":
+        return _nnyy_stream_priority(url)
+    return 0
+
+
+def _order_site_hls_candidates(primary_url, fallback_urls=(), source_site=""):
     ordered = _dedupe_download_urls([primary_url, *(fallback_urls or [])])
     if not ordered:
         return []
+    site = str(source_site or "").strip().lower()
+    if site not in ("movieffm", "xiaoyakankan", "nnyy"):
+        return ordered
     indexed_candidates = list(enumerate(ordered))
-    indexed_candidates.sort(key=lambda item: (_movieffm_stream_priority(item[1]), item[0]))
+    indexed_candidates.sort(key=lambda item: (_site_hls_candidate_priority(site, item[1]), item[0]))
     return [candidate for _index, candidate in indexed_candidates]
 
 
@@ -2416,12 +2474,7 @@ def _select_reachable_stream_candidates(primary_url, fallback_urls=(), source_si
         ordered.append(normalized_url)
     if not ordered:
         return "", [], False
-    if source_site == "movieffm":
-        ordered = sorted(ordered, key=_movieffm_stream_priority)
-    elif source_site == "xiaoyakankan":
-        ordered = sorted(ordered, key=_xiaoyakankan_stream_priority)
-    elif source_site == "nnyy":
-        ordered = sorted(ordered, key=_nnyy_stream_priority)
+    ordered = _order_site_hls_candidates(ordered[0], ordered[1:], source_site=source_site)
     reachable = [candidate for candidate in ordered if _url_host_resolves(candidate)]
     preferred = reachable[0] if reachable else ordered[0]
     remaining = [candidate for candidate in ordered if candidate != preferred]
@@ -3581,6 +3634,37 @@ def _extract_tktube_video_page_urls(page_text, base_url="https://tktube.com/"):
     return urls
 
 
+def _extract_anime1_category_episode_links(page_text, base_url):
+    links_info = []
+    text = str(page_text or "")
+    episode_url_re = re.compile(r"^https://anime1\.(?:me|pw)/\d+/?$", re.IGNORECASE)
+
+    def collect_from_anchor_matches(pattern, require_episode_marker=False):
+        for href, title in re.findall(pattern, text, re.IGNORECASE | re.DOTALL):
+            normalized_link = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(href)))
+            if not normalized_link or not episode_url_re.match(normalized_link):
+                continue
+            clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
+            if not clean_title:
+                continue
+            if require_episode_marker and not re.search(r"\[\d+\]", clean_title):
+                continue
+            links_info.append((normalized_link.rstrip("/"), clean_title))
+
+    collect_from_anchor_matches(r'<h2[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>')
+    if not links_info:
+        collect_from_anchor_matches(r'<a href="([^"]+)"[^>]*>(.*?)</a>', require_episode_marker=True)
+
+    deduped_links_info = []
+    seen_links = set()
+    for link, title in links_info:
+        if link in seen_links:
+            continue
+        seen_links.add(link)
+        deduped_links_info.append((link, title))
+    return deduped_links_info
+
+
 def _classify_gimy_stream_candidate(url):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -3626,6 +3710,8 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
 
 VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "tktube.com",
+    "anime1.me",
+    "anime1.pw",
     "xiaoyakankan.io",
     "xiaoyakankan.tv",
     "xiaoyakankan.com",
@@ -3650,6 +3736,8 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
 
 VIDEO_SEARCH_SITE_PRIORITY = {
     "tktube.com": 0,
+    "anime1.me": 4,
+    "anime1.pw": 4,
     "xiaoyakankan.io": 5,
     "xiaoyakankan.tv": 6,
     "xiaoyakankan.com": 7,
@@ -3701,6 +3789,18 @@ VIDEO_SEARCH_CHINESE_SUBTITLE_MARKERS = (
 )
 
 VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
+    "勇者之渣": [
+        {
+            "url": "https://anime1.me/category/2026%e5%b9%b4%e5%86%ac%e5%ad%a3/%e5%8b%87%e8%80%85%e4%b9%8b%e6%b8%a3",
+            "title": "勇者之渣 Anime1",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.youtube.com/playlist?list=PL12UaAf_xzfoCw9upcroz0eSEuTHb91P8",
+            "title": "勇者之渣 YouTube playlist",
+            "snippet": "known verified search seed",
+        },
+    ],
     "阮玲玉": [
         {
             "url": "https://www.iq.com/play/%E9%98%AE%E7%8E%B2%E7%8E%89-%E5%9C%8B-1991-19rtxy8a20?lang=zh_tw",
@@ -3786,6 +3886,10 @@ VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
     ],
 }
 
+ANI_GAMER_SN_SEARCH_FALLBACKS = {
+    "47072": "勇者之渣",
+}
+
 
 def _video_search_site_for_url(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or "")).netloc.lower()
@@ -3827,6 +3931,31 @@ def _video_search_quality_score(value):
     if "hd" in text:
         best = max(best, 720)
     return best
+
+
+def _video_search_known_quality(result):
+    try:
+        quality = int((result or {}).get("quality") or 0)
+    except (TypeError, ValueError):
+        quality = 0
+    if quality > 0:
+        return quality
+    return _video_search_quality_score(_video_search_result_text(result))
+
+
+def _video_search_quality_is_allowed(result, min_quality=VIDEO_SEARCH_MIN_QUALITY):
+    quality = _video_search_known_quality(result)
+    return quality <= 0 or quality >= int(min_quality or 0)
+
+
+def _filter_video_search_candidates_by_quality(candidate_urls, min_quality=VIDEO_SEARCH_MIN_QUALITY):
+    filtered = []
+    for candidate in _dedupe_download_urls(candidate_urls):
+        quality = _video_search_quality_score(candidate)
+        if quality and quality < int(min_quality or 0):
+            continue
+        filtered.append(candidate)
+    return filtered
 
 
 def _video_search_result_text(result, include_candidates=True):
@@ -3879,12 +4008,7 @@ def _video_search_download_speed_score(result):
 
 def _video_search_result_rank(result, query_text=""):
     match_rank = _video_search_name_match_score(result, query_text)
-    try:
-        quality = int((result or {}).get("quality") or 0)
-    except (TypeError, ValueError):
-        quality = 0
-    if quality <= 0:
-        quality = _video_search_quality_score(_video_search_result_text(result))
+    quality = _video_search_known_quality(result)
     subtitle_rank = _video_search_chinese_subtitle_score(result)
     speed_rank = _video_search_download_speed_score(result)
     return (match_rank, -quality, subtitle_rank, speed_rank, len(str((result or {}).get("url", ""))))
@@ -3926,6 +4050,8 @@ def _video_search_result_is_downloadable(result):
         if "/play/best-episode" in path or not re.search(r"/play/.+-[a-z0-9]{8,}", path, re.IGNORECASE):
             return False
     if site in (
+        "anime1.me",
+        "anime1.pw",
         "avjoy.me",
         "hohoj.tv",
         "movieffm.net",
@@ -5759,6 +5885,12 @@ class DownloadManagerApp:
         format_choice = self.format_var.get() if hasattr(self, "format_var") else ""
         is_mp3 = format_choice == t("format_audio")
         ffmpeg_ok = has_local_ffmpeg_binaries() if platform.system() == "Windows" else bool(shutil.which("ffmpeg"))
+        if _is_ani_gamer_video_url(new_url):
+            if is_mp3 and not ffmpeg_ok:
+                self.download_ffmpeg_interactive(lambda url=new_url: self._start_ani_gamer_video_search(url, is_mp3=is_mp3))
+                return
+            self._start_ani_gamer_video_search(new_url, is_mp3=is_mp3)
+            return
         if not re.search(r"https?://", new_url, re.IGNORECASE) and _looks_like_video_search_text(new_url):
             if is_mp3 and not ffmpeg_ok:
                 self.download_ffmpeg_interactive(lambda: self._start_video_search_download(new_url, is_mp3=is_mp3))
@@ -5773,33 +5905,7 @@ class DownloadManagerApp:
             try:
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(new_url, impersonate="chrome110", timeout=15)
-                html_text = str(resp.text or "")
-                links_info = []
-                for href, title in re.findall(r'<h2[^>]*>\s*<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
-                    normalized_link = _normalize_download_url(urllib.parse.urljoin(new_url, html.unescape(href)))
-                    if not normalized_link or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized_link):
-                        continue
-                    clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
-                    if not clean_title:
-                        continue
-                    links_info.append((normalized_link.rstrip("/"), clean_title))
-                if not links_info:
-                    for href, title in re.findall(r'<a href="([^"]+)"[^>]*>(.*?)</a>', html_text, re.IGNORECASE | re.DOTALL):
-                        normalized_link = _normalize_download_url(urllib.parse.urljoin(new_url, html.unescape(href)))
-                        if not normalized_link or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", normalized_link):
-                            continue
-                        clean_title = html.unescape(re.sub(r"<.*?>", "", title)).replace("&#8211;", "-").strip()
-                        if not clean_title or not re.search(r"\[\d+\]", clean_title):
-                            continue
-                        links_info.append((normalized_link.rstrip("/"), clean_title))
-                deduped_links_info = []
-                seen_links = set()
-                for link, title in links_info:
-                    if link in seen_links:
-                        continue
-                    seen_links.add(link)
-                    deduped_links_info.append((link, title))
-                links_info = deduped_links_info
+                links_info = _extract_anime1_category_episode_links(resp.text, new_url)
                 if not links_info:
                     self._schedule_warning(t("msg_fetch_anime1_empty"))
                     return
@@ -7215,7 +7321,7 @@ class DownloadManagerApp:
             self._discard_task(item_id)
             return
         if state == "PAUSE_REQUESTED":
-            self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+            self._set_task_status_mode_ui(item_id, self._paused_status_text())
             _set_task_aux_fields(task, state="PAUSED", _stop_reason=None)
             return
 
@@ -7368,6 +7474,8 @@ class DownloadManagerApp:
         site = _video_search_site_for_url(url)
         return {
             "tktube.com": "tktube",
+            "anime1.me": "anime1",
+            "anime1.pw": "anime1",
             "avbebe.com": "avbebe",
             "avjoy.me": "avjoy",
             "goodav17.com": "goodav17",
@@ -7411,10 +7519,20 @@ class DownloadManagerApp:
             if original_title and not _video_search_matches_query(result, query_text):
                 result["title"] = original_title
             candidates = []
-            if "tktube.com" in urllib.parse.urlsplit(url).netloc.lower():
+            parsed_search_url = urllib.parse.urlsplit(url)
+            search_host = parsed_search_url.netloc.lower()
+            if "anime1." in search_host and "/category/" in parsed_search_url.path.lower():
+                episode_links = _extract_anime1_category_episode_links(page_text, url)
+                if episode_links:
+                    ordered_links = list(reversed(episode_links))
+                    candidates = [link for link, _title in ordered_links]
+                    result["source_page"] = url
+                    if not result.get("title") or not _video_search_matches_query(result, query_text):
+                        result["title"] = query_text
+            if not candidates and "tktube.com" in search_host:
                 candidates = _extract_tktube_media_candidates(page_text)
-            if not candidates and "hohoj.tv" in urllib.parse.urlsplit(url).netloc.lower():
-                parsed_hohoj = urllib.parse.urlsplit(url)
+            if not candidates and "hohoj.tv" in search_host:
+                parsed_hohoj = parsed_search_url
                 site_root = f"{parsed_hohoj.scheme or 'https'}://{parsed_hohoj.netloc or 'hohoj.tv'}"
                 result["title"] = _clean_hohoj_title(result.get("title") or _extract_html_title(page_text, query_text), query_text)
                 embed_url = urllib.parse.urljoin(url, f"/embed?{parsed_hohoj.query}") if parsed_hohoj.query else ""
@@ -7432,10 +7550,10 @@ class DownloadManagerApp:
                         candidates.extend(_extract_candidate_media_urls(_response_text_utf8(embed_resp), allowed_exts=(".mp4", ".m3u8", ".mpd")))
                     except Exception:
                         pass
-            if not candidates and "xiaoyakankan." in urllib.parse.urlsplit(url).netloc.lower():
+            if not candidates and "xiaoyakankan." in search_host:
                 result["title"] = _clean_xiaoyakankan_title(result.get("title") or _extract_html_title(page_text, query_text))
                 play_urls = []
-                if "/vod/play/" in urllib.parse.urlsplit(url).path.lower():
+                if "/vod/play/" in parsed_search_url.path.lower():
                     play_urls.append(url)
                 else:
                     play_urls.extend(_extract_xiaoyakankan_play_urls(page_text, url))
@@ -7460,7 +7578,11 @@ class DownloadManagerApp:
                     and "screenshot" not in str(candidate or "").lower()
                 ]
             if candidates:
-                result["candidate_urls"] = _dedupe_download_urls(candidates)
+                result["candidate_urls"] = _filter_video_search_candidates_by_quality(candidates)
+                if not result["candidate_urls"]:
+                    result["quality"] = max(_video_search_quality_score(candidate) for candidate in candidates)
+                    result["quality_below_min"] = True
+                    return result
                 result["quality"] = max(_video_search_quality_score(candidate) for candidate in result["candidate_urls"])
         except Exception:
             pass
@@ -7591,6 +7713,20 @@ class DownloadManagerApp:
                 pass
             return collected
 
+        def fetch_anime1_results():
+            collected = []
+            for domain in ("anime1.me", "anime1.pw"):
+                query = f"{primary_query} site:{domain}/category"
+                try:
+                    append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                except Exception:
+                    pass
+                try:
+                    append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                except Exception:
+                    pass
+            return collected
+
         def fetch_gimy_results():
             collected = []
             for domain in ("gimy.cc", "gimy01.co", "gimy01.tv"):
@@ -7627,6 +7763,7 @@ class DownloadManagerApp:
         source_jobs = [
             ("known", lambda: _known_video_search_seed_results(search_text)),
             ("tktube", fetch_tktube_results),
+            ("anime1", fetch_anime1_results),
             ("avjoy", fetch_avjoy_results),
             ("hohoj", fetch_hohoj_results),
             ("movieffm", fetch_movieffm_results),
@@ -7692,6 +7829,7 @@ class DownloadManagerApp:
         enriched.extend(pre_ranked[VIDEO_SEARCH_ENRICH_LIMIT:VIDEO_SEARCH_MAX_RESULTS])
         enriched = [result for result in enriched if _video_search_site_for_url(result.get("url", ""))]
         enriched = [result for result in enriched if _video_search_result_is_downloadable(result)]
+        enriched = [result for result in enriched if _video_search_quality_is_allowed(result)]
         exact_matches = [result for result in enriched if _video_search_matches_query(result, search_text)]
         if exact_matches:
             enriched = exact_matches
@@ -7796,7 +7934,7 @@ class DownloadManagerApp:
 
         tk.Label(
             dialog,
-            text=f"搜尋：{query_text}\n請確認要下載的結果，排序依序為：檔名/番號、畫質、中文字幕、下載速度。",
+            text=f"搜尋：{query_text}\n請確認要下載的結果；已排除已知低於 {VIDEO_SEARCH_MIN_QUALITY}p 的來源，排序依序為：檔名/番號、畫質、中文字幕、下載速度。",
             justify="left",
             anchor="w",
             font=("Microsoft JhengHei UI", 10),
@@ -7878,45 +8016,51 @@ class DownloadManagerApp:
                 self._schedule_ui_call(
                     lambda q=query_text, found=results, audio=is_mp3: self._handle_video_search_results(q, found, is_mp3=audio)
                 )
-                return
-                if not results:
-                    self._schedule_warning(f"Google 搜尋沒有找到支援網站結果：{query_text}")
-                    return
-                best = results[0]
-                target_url = _normalize_download_url(best.get("url", ""))
-                candidate_urls = _dedupe_download_urls(best.get("candidate_urls", []))
-                source_page = target_url
-                fallback_urls = [result.get("url", "") for result in results[1:] if result.get("url")]
-                if candidate_urls:
-                    source_page = target_url
-                    target_url = candidate_urls[0]
-                    fallback_urls = candidate_urls[1:] + fallback_urls
-                if not target_url:
-                    self._schedule_warning(f"Google 搜尋沒有找到可下載結果：{query_text}")
-                    return
-                source_site = self._source_site_from_search_url(source_page or target_url)
-                title = str(best.get("title") or query_text).strip()
-                quality = int(best.get("quality") or _video_search_quality_score(target_url) or 0)
-                if quality > 0 and f"{quality}p" not in title.lower():
-                    title = f"{title} {quality}p"
-                extra = self._build_extra_task_data(
-                    source_page=source_page,
-                    fallback_urls=_dedupe_download_urls(fallback_urls, primary_url=target_url),
-                )
-                self._schedule_ui_call(lambda: self._final_add_download(
-                    target_url,
-                    is_mp3=is_mp3,
-                    custom_name=title,
-                    source_site=source_site,
-                    extra_task_data=extra,
-                ))
             except Exception as exc:
                 write_error_log("google video search failure", exc, query=query_text)
                 self._schedule_ui_call(
                     lambda q=query_text, err=str(exc)[:160]: self._show_video_search_failure_dialog(q, f"搜尋時發生錯誤：{err}")
                 )
-                return
-                self._schedule_error(f"Google 搜尋失敗：{str(exc)[:120]}")
+
+        self._start_background_parse(worker)
+
+    def _start_ani_gamer_video_search(self, page_url, is_mp3=False):
+        page_url = _normalize_download_url(page_url)
+        if not page_url:
+            self._show_warning("請輸入影片網址或番號。")
+            return
+
+        def worker():
+            parsed = urllib.parse.urlsplit(page_url)
+            sn = (urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("sn") or [""])[0]
+            fallback_query = ANI_GAMER_SN_SEARCH_FALLBACKS.get(str(sn or "").strip(), "")
+            try:
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    page_url,
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=_make_ytdlp_http_headers(referer="https://ani.gamer.com.tw/"),
+                )
+                page_text = _response_text_utf8(resp)
+                query_text = _clean_ani_gamer_title_for_search(_extract_html_title(page_text, fallback_query), fallback_query)
+                if not _looks_like_video_search_text(query_text):
+                    query_text = fallback_query
+                if not _looks_like_video_search_text(query_text):
+                    raise Exception("Ani.Gamer title could not be converted into a searchable video name")
+                self._schedule_ui_call(lambda q=query_text: self._start_video_search_download(q, is_mp3=is_mp3))
+            except Exception as exc:
+                if _looks_like_video_search_text(fallback_query):
+                    write_error_log("ani gamer title fetch fallback", exc, url=page_url, fallback_query=fallback_query)
+                    self._schedule_ui_call(lambda q=fallback_query: self._start_video_search_download(q, is_mp3=is_mp3))
+                    return
+                write_error_log("ani gamer title fetch failure", exc, url=page_url, sn=sn)
+                self._schedule_ui_call(
+                    lambda err=str(exc)[:160]: self._show_video_search_failure_dialog(
+                        page_url,
+                        f"動畫瘋頁面不支援直接下載，且無法取得可搜尋標題：{err}",
+                    )
+                )
 
         self._start_background_parse(worker)
 
@@ -10444,7 +10588,7 @@ class DownloadManagerApp:
                 if self._is_pause_requested_state(state):
                     self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, url, "pause_requested")
                     _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                    self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                    self._set_task_status_mode_ui(item_id, self._paused_status_text())
                     return
                 if self._is_delete_requested_state(state):
                     self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, url, "delete_requested")
@@ -10452,7 +10596,7 @@ class DownloadManagerApp:
                     self._discard_task(item_id)
                     return
                 current_size = self._get_existing_file_size(temp_out_path)
-                if self._maybe_auto_pause_for_disk_space(item_id, temp_out_path, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"):
+                if self._maybe_auto_pause_for_disk_space(item_id, temp_out_path, note=self._disk_full_pause_note()):
                     self._terminate_ffmpeg_process(
                         self.tasks.get(item_id, {}),
                         item_id,
@@ -10502,13 +10646,22 @@ class DownloadManagerApp:
         except Exception:
             return None
 
+    def _paused_status_text(self):
+        return t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停"
+
+    def _disk_full_pause_note(self):
+        return t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"
+
     def _pause_task_for_disk_full(self, item_id, target_path, free_bytes, required_bytes=None, note=None):
         task = self.tasks.get(item_id)
         if not task:
             return True
+        already_paused_for_disk = bool(_task_field_value(task, "disk_full_pause", False))
         _set_task_aux_fields(task, state="PAUSED", disk_full_pause=True)
-        message = note or (t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
-        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停", message)
+        message = note or self._disk_full_pause_note()
+        self._set_task_status_mode_ui(item_id, self._paused_status_text(), message)
+        if already_paused_for_disk:
+            return True
         write_error_log(
             "disk full auto pause",
             Exception("disk space low"),
@@ -10560,7 +10713,7 @@ class DownloadManagerApp:
             self._show_warning(warning_body, parent=self.root)
         except Exception:
             pass
-        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停", t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
+        self._set_task_status_mode_ui(item_id, self._paused_status_text(), self._disk_full_pause_note())
         _set_task_aux_fields(task, state="PAUSED", disk_full_pause=True)
         return False
 
@@ -10686,7 +10839,7 @@ class DownloadManagerApp:
             if status == "downloading":
                 target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
                 required_bytes = max(int(total) - int(downloaded), 0) if total else None
-                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"):
+                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_note()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
                 return
@@ -10773,7 +10926,7 @@ class DownloadManagerApp:
                     except Exception:
                         pass
                     _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                    self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                    self._set_task_status_mode_ui(item_id, self._paused_status_text())
                     write_error_log(
                         "mega cmd terminate requested",
                         Exception("mega cmd terminate requested"),
@@ -10990,7 +11143,7 @@ class DownloadManagerApp:
         headers = dict(headers or {})
         task = self.tasks.get(item_id, {})
         self._cache_task_resolved_link(task, url, fallback_urls=_dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=url))
-        pause_note = t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"
+        pause_note = self._disk_full_pause_note()
         if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=pause_note):
             return
         if "User-Agent" not in headers:
@@ -11119,7 +11272,7 @@ class DownloadManagerApp:
                     state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                     if state == "PAUSE_REQUESTED":
                         _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                        self._set_task_status_mode_ui(item_id, self._paused_status_text())
                         try:
                             if res is not None:
                                 res.close()
@@ -11265,7 +11418,7 @@ class DownloadManagerApp:
                                 future.cancel()
                             if current_task_state == "PAUSE_REQUESTED":
                                 _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                                self._set_task_named_column_text(item_id, "status", t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                                self._set_task_named_column_text(item_id, "status", self._paused_status_text())
                             return
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         required_bytes = max(total_size - multi_downloaded, 0) if total_size > 0 else None
@@ -11337,7 +11490,7 @@ class DownloadManagerApp:
         except OSError as exc:
             if getattr(exc, "errno", None) == 28:
                 free_bytes = self._get_disk_free_bytes(out_path)
-                self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停")
+                self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=self._disk_full_pause_note())
                 return
             raise
         except Exception:
@@ -11365,21 +11518,7 @@ class DownloadManagerApp:
 
     def _is_retryable_media_download_error(self, exc):
         text = str(exc or "").lower()
-        retry_markers = (
-            "http 403",
-            "http 404",
-            "http 410",
-            "http 429",
-            "http 500",
-            "http 502",
-            "http 503",
-            "http 504",
-            "service temporarily unavailable",
-            "temporarily unavailable",
-            "timed out",
-            "timeout",
-        )
-        return any(marker in text for marker in retry_markers)
+        return any(marker in text for marker in MEDIA_DOWNLOAD_RETRY_MARKERS)
 
     def _fetch_avjoy_media_candidates(self, page_url, fallback_name="AVJOY"):
         parsed = urllib.parse.urlsplit(str(page_url or ""))
@@ -12545,57 +12684,20 @@ class DownloadManagerApp:
                 candidate for candidate in direct_fallback_urls
                 if urllib.parse.urlsplit(_normalize_download_url(candidate) or "").netloc.lower() not in gimy_failed_stream_hosts
             ]
-        candidate_urls = _dedupe_download_urls([url] + direct_fallback_urls)
-        if source_site == "movieffm":
-            candidate_urls = _order_movieffm_hls_candidates(url, direct_fallback_urls)
-            if candidate_urls:
-                selected_movieffm_url = candidate_urls[0]
-                if _normalize_download_url(selected_movieffm_url) != _normalize_download_url(url):
-                    remaining_movieffm_urls = [
-                        candidate
-                        for candidate in candidate_urls
-                        if _normalize_download_url(candidate) != _normalize_download_url(selected_movieffm_url)
-                    ]
-                    self._cache_task_resolved_link(
-                        task,
-                        selected_movieffm_url,
-                        fallback_urls=remaining_movieffm_urls,
-                        page_refresh_candidates=page_refresh_candidates,
-                    )
-                    url = selected_movieffm_url
-        elif source_site == "xiaoyakankan":
-            candidate_urls = sorted(candidate_urls, key=_xiaoyakankan_stream_priority)
-            if candidate_urls:
-                selected_xiaoyakankan_url = candidate_urls[0]
-                if _normalize_download_url(selected_xiaoyakankan_url) != _normalize_download_url(url):
-                    remaining_xiaoyakankan_urls = [
-                        candidate
-                        for candidate in candidate_urls
-                        if _normalize_download_url(candidate) != _normalize_download_url(selected_xiaoyakankan_url)
-                    ]
-                    self._cache_task_resolved_link(
-                        task,
-                        selected_xiaoyakankan_url,
-                        fallback_urls=remaining_xiaoyakankan_urls,
-                        page_refresh_candidates=page_refresh_candidates,
-                    )
-                    url = selected_xiaoyakankan_url
-        elif source_site == "nnyy":
-            candidate_urls = sorted(candidate_urls, key=_nnyy_stream_priority)
-            if candidate_urls:
-                selected_nnyy_url = candidate_urls[0]
-                if _normalize_download_url(selected_nnyy_url) != _normalize_download_url(url):
-                    remaining_nnyy_urls = [
-                        candidate
-                        for candidate in candidate_urls
-                        if _normalize_download_url(candidate) != _normalize_download_url(selected_nnyy_url)
-                    ]
-                    self._cache_task_resolved_link(
-                        task,
-                        selected_nnyy_url,
-                        fallback_urls=remaining_nnyy_urls,
-                    )
-                    url = selected_nnyy_url
+        candidate_urls = _order_site_hls_candidates(url, direct_fallback_urls, source_site=source_site)
+        if source_site in ("movieffm", "xiaoyakankan", "nnyy") and candidate_urls:
+            selected_manifest_url = candidate_urls[0]
+            if _normalize_download_url(selected_manifest_url) != _normalize_download_url(url):
+                remaining_manifest_urls = [
+                    candidate
+                    for candidate in candidate_urls
+                    if _normalize_download_url(candidate) != _normalize_download_url(selected_manifest_url)
+                ]
+                cache_kwargs = {"fallback_urls": remaining_manifest_urls}
+                if source_site in ("movieffm", "xiaoyakankan"):
+                    cache_kwargs["page_refresh_candidates"] = page_refresh_candidates
+                self._cache_task_resolved_link(task, selected_manifest_url, **cache_kwargs)
+                url = selected_manifest_url
         failed_primary_candidate_url = ""
 
         def _remember_gimy_failed_stream(stream_url):
@@ -13190,7 +13292,7 @@ class DownloadManagerApp:
                 required_bytes = None
                 if active_total_bytes:
                     required_bytes = max(int(active_total_bytes) - int(base_bytes + cached_active_output_bytes), 0)
-                if self._maybe_auto_pause_for_disk_space(item_id, active_output_path, required_bytes=required_bytes, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"):
+                if self._maybe_auto_pause_for_disk_space(item_id, active_output_path, required_bytes=required_bytes, note=self._disk_full_pause_note()):
                     self._terminate_ffmpeg_process(
                         self.tasks.get(item_id, {}),
                         item_id,
@@ -13211,7 +13313,7 @@ class DownloadManagerApp:
                     if state == "PAUSE_REQUESTED":
                         self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, candidate_url, "pause_requested")
                         _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                        self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                        self._set_task_status_mode_ui(item_id, self._paused_status_text())
                         return
                     if state == "DELETE_REQUESTED":
                         self._terminate_ffmpeg_process(self.tasks.get(item_id, {}), item_id, proc, candidate_url, "delete_requested")
@@ -13664,7 +13766,7 @@ class DownloadManagerApp:
             state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if state == "DOWNLOADING" or self._is_pause_requested_state(state):
                 _set_task_aux_fields(self.tasks[item_id], state="PAUSE_REQUESTED", _stop_reason=STOP_REASON_PAUSE)
-                self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                self._set_task_status_mode_ui(item_id, self._paused_status_text())
                 proc = _task_field_value(self.tasks[item_id], "_proc", None)
                 if proc is not None:
                     try:
@@ -13673,7 +13775,7 @@ class DownloadManagerApp:
                         pass
             elif state == "QUEUED":
                 _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                self._set_task_status_mode_ui(item_id, self._paused_status_text())
                 self._schedule_process_queue()
         self.persist_unfinished_state(force=True)
 
@@ -13909,10 +14011,10 @@ class DownloadManagerApp:
             state = str(_task_field_value(task, "state", "") or "")
             if state == "DOWNLOADING":
                 _set_task_aux_fields(task, state="PAUSE_REQUESTED", _stop_reason=STOP_REASON_PAUSE, resume_requested=True)
-                self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                self._set_task_status_mode_ui(item_id, self._paused_status_text())
             elif state == "QUEUED":
                 _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, resume_requested=True)
-                self._set_task_status_mode_ui(item_id, t("status_paused") if "status_paused" in I18N_DICT.get(CURRENT_LANG, {}) else "已暫停")
+                self._set_task_status_mode_ui(item_id, self._paused_status_text())
 
     def _force_kill_child_processes(self):
         tracked_processes = list(self._iter_active_process_handles())
@@ -14530,7 +14632,13 @@ class DownloadManagerApp:
             else:
                 source_site = _task_source_site_name(task)
                 source_page_url = self._get_task_source_page(task, fallback_url=url)
-                if source_site == "movieffm" and source_page_url and source_page_url != url and not _url_host_resolves(url):
+                if (
+                    source_site in ("movieffm", "xiaoyakankan")
+                    and source_page_url
+                    and source_page_url != url
+                    and (_looks_like_manifest_url(url) or _looks_like_http_media_url(url))
+                    and not _url_host_resolves(url)
+                ):
                     self._set_task_parse_ui(item_id, message="已記錄來源失效，重新分析頁面...")
                     self._download_task_internal(source_page_url, item_id, save_dir, use_impersonate, is_mp3)
                 else:
@@ -14601,7 +14709,7 @@ class DownloadManagerApp:
             if status == "downloading":
                 target_path, downloaded, total = _event_transfer_metrics(d, default_path=save_dir, default_downloaded=0)
                 required_bytes = max(int(total) - int(downloaded), 0) if total else None
-                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=t("msg_disk_full_pause") if "msg_disk_full_pause" in I18N_DICT.get(CURRENT_LANG, {}) else "磁碟空間不足，自動暫停"):
+                if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_note()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
                 return
@@ -14673,6 +14781,34 @@ class DownloadManagerApp:
                 raise KeyboardInterrupt()
             self._mark_task_finished(item_id)
 
+        def _download_manifest_with_ffmpeg_or_page_fallback(target_url, referer=None, origin=None, fallback_reason="manifest download failed; retrying next search result"):
+            try:
+                self._download_m3u8_with_ffmpeg(
+                    item_id,
+                    target_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
+                    _native_fallback_done=True,
+                )
+            except (
+                StopDownloadException,
+                KeyboardInterrupt,
+                ResumeLowSpeedReanalysisException,
+                ParallelHlsRetryLaterException,
+                ParallelHlsUnsupportedSegmentContentException,
+            ):
+                raise
+            except Exception as ffmpeg_exc:
+                if self._is_retryable_media_download_error(ffmpeg_exc) and _retry_next_page_fallback(
+                    fallback_reason,
+                    ffmpeg_exc,
+                ):
+                    return True
+                raise
+            return True
+
         def _download_manifest_with_site_strategy(
             target_url,
             referer=None,
@@ -14692,15 +14828,7 @@ class DownloadManagerApp:
                 force_ffmpeg=force_ffmpeg,
             )
             if selected_route == "ffmpeg":
-                self._download_m3u8_with_ffmpeg(
-                    item_id,
-                    target_url,
-                    save_dir,
-                    is_mp3=is_mp3,
-                    referer=referer,
-                    origin=origin,
-                    _native_fallback_done=True,
-                )
+                _download_manifest_with_ffmpeg_or_page_fallback(target_url, referer=referer, origin=origin)
                 return
             if selected_route == "native":
                 try:
@@ -14724,14 +14852,11 @@ class DownloadManagerApp:
                         selected_route=selected_route,
                     )
                     self._cleanup_failed_native_hls_output(task, item_id, target_url, save_dir, is_mp3=is_mp3)
-                    self._download_m3u8_with_ffmpeg(
-                        item_id,
+                    _download_manifest_with_ffmpeg_or_page_fallback(
                         target_url,
-                        save_dir,
-                        is_mp3=is_mp3,
                         referer=referer,
                         origin=origin,
-                        _native_fallback_done=True,
+                        fallback_reason="native hls ffmpeg handoff failed; retrying next search result",
                     )
                 return
             _download_manifest_with_generic_ytdlp(target_url, referer=referer, origin=origin)
@@ -14957,6 +15082,69 @@ class DownloadManagerApp:
             return _dedupe_download_urls(candidates)
 
         parsed_url = urllib.parse.urlparse(url)
+        if _is_ani_gamer_video_url(url):
+            self._set_task_parse_ui(item_id, message="動畫瘋頁面不支援直接下載，正在搜尋可下載來源...")
+            sn = (urllib.parse.parse_qs(parsed_url.query, keep_blank_values=True).get("sn") or [""])[0]
+            fallback_query = ANI_GAMER_SN_SEARCH_FALLBACKS.get(str(sn or "").strip(), "")
+            try:
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    url,
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=_make_ytdlp_http_headers(referer="https://ani.gamer.com.tw/"),
+                )
+                query_text = _clean_ani_gamer_title_for_search(_extract_html_title(_response_text_utf8(resp), fallback_query), fallback_query)
+            except Exception as exc:
+                query_text = fallback_query
+                if query_text:
+                    write_error_log("ani gamer download reroute title fallback", exc, url=url, item_id=item_id, fallback_query=query_text)
+            if not _looks_like_video_search_text(query_text):
+                raise Exception("Ani.Gamer URL is not directly downloadable and no searchable title could be resolved")
+            results = self._google_video_search_results(query_text)
+            if not results:
+                raise Exception(f"Ani.Gamer URL is not directly downloadable and no downloadable search result was found for {query_text}")
+            plan = self._build_video_search_download_plan(results, 0, query_text, is_mp3=is_mp3)
+            if not plan:
+                raise Exception(f"Ani.Gamer URL reroute could not build a download plan for {query_text}")
+            target_url = _normalize_download_url(plan.get("target_url", ""))
+            if not target_url:
+                raise Exception(f"Ani.Gamer URL reroute resolved an empty target for {query_text}")
+            old_state_url = _normalize_download_url(_task_field_value(task, "url", "")) or url
+            source_site = str(plan.get("source_site") or self._source_site_from_search_url(target_url) or "").strip().lower()
+            extra_task_data = plan.get("extra_task_data") or {}
+            fallback_urls = _dedupe_download_urls((extra_task_data or {}).get("fallback_urls", []), primary_url=target_url)
+            _set_task_aux_fields(
+                task,
+                url=target_url,
+                source_site=source_site,
+                source_page=url,
+                fallback_urls=fallback_urls,
+                resolved_url="",
+                resolved_url_saved_at=0.0,
+            )
+            update_state_entry(
+                old_state_url,
+                url=target_url,
+                name=plan.get("custom_name") or query_text,
+                source_site=source_site,
+                source_page=url,
+                fallback_urls=fallback_urls,
+                resolved_url="",
+                resolved_url_saved_at=0.0,
+            )
+            _set_task_identity(
+                name=plan.get("custom_name") or query_text,
+                source_site=source_site,
+                source_page=url,
+                fallback_urls=fallback_urls,
+            )
+            next_use_impersonate = use_impersonate or source_site in IMPERSONATION_SITE_MARKERS or any(
+                marker in target_url.lower() for marker in IMPERSONATION_SITE_MARKERS
+            )
+            self._download_task_internal(target_url, item_id, save_dir, next_use_impersonate, is_mp3)
+            return
+
         if parsed_url.netloc.lower().endswith("mega.nz") or parsed_url.netloc.lower().endswith("mega.co.nz"):
             self._set_task_parse_ui(item_id, key="eta_site_mega", fallback="正在解析 MEGA...")
             self._download_mega_public_file(item_id, url, save_dir, is_mp3=is_mp3)
