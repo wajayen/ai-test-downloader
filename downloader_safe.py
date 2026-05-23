@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260523-3050"
+APP_BUILD = "20260523-3060"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -244,7 +244,7 @@ def _normalize_jav_code_for_compare(value):
     return re.sub(r"[^A-Z0-9]", "", code.upper()) if code else ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj", "nnyy", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -295,6 +295,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "avbebe": 24,
     "goodav17": 16,
     "hohoj": 16,
+    "nnyy": 24,
     "xiaoyakankan": 24,
 }
 PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
@@ -444,7 +445,7 @@ NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "hohoj": ("cdnlab.live",),
     "jable": ("mushroomtrack", "hls.sb-cd.com", "cdn77.org"),
     "movieffm": ("xluuss", "lzcdn", "letvoss", "subokk", "bdzybf", "ukubf", "ijycnd", "qsstvw", "gsuus", "hhuus", "huyall", "bfllvip"),
-    "nnyy": ("lz-cdn", "lzcdn", "ppqrrs", "qqqrst", "surrit"),
+    "nnyy": ("xluuss", "bfvvs", "huyall", "ijycnd", "qsstvw", "qqqrst", "ppqrrs", "hhuus", "subokk", "lz-cdn", "lzcdn", "gsuus", "surrit"),
     "xiaoyakankan": ("huyall", "ijycnd", "jisuzyv", "bfvvs", "gsuus", "hhuus", "qsstvw", "subokk"),
 }
 NATIVE_HLS_GLOBAL_HOST_MARKERS = ("qqqrst.com", "ppqrrs.com", "surrit.com")
@@ -531,6 +532,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "missav parser retry recovered",
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
+    "page fallback retry",
     "instagram savereels fallback",
     "instagram extractor fallback",
     "facebook extractor fallback",
@@ -2368,6 +2370,32 @@ def _xiaoyakankan_stream_priority(url):
     return 100
 
 
+NNYY_FAST_HLS_HOST_PRIORITY = (
+    "bfvvs.com",
+    "huyall.com",
+    "ijycnd.com",
+    "qsstvw.com",
+    "qqqrst.com",
+    "ppqrrs.com",
+    "hhuus.com",
+    "subokk.com",
+    "lz-cdn.com",
+    "lzcdn",
+    "gsuus.com",
+    "surrit.com",
+    "xluuss.com",
+)
+
+
+def _nnyy_stream_priority(url):
+    normalized_url = _normalize_download_url(url)
+    host = urllib.parse.urlsplit(normalized_url or str(url or "")).netloc.lower()
+    for index, marker in enumerate(NNYY_FAST_HLS_HOST_PRIORITY):
+        if marker in host:
+            return index
+    return 100
+
+
 def _order_movieffm_hls_candidates(primary_url, fallback_urls=()):
     ordered = _dedupe_download_urls([primary_url, *(fallback_urls or [])])
     if not ordered:
@@ -2392,6 +2420,8 @@ def _select_reachable_stream_candidates(primary_url, fallback_urls=(), source_si
         ordered = sorted(ordered, key=_movieffm_stream_priority)
     elif source_site == "xiaoyakankan":
         ordered = sorted(ordered, key=_xiaoyakankan_stream_priority)
+    elif source_site == "nnyy":
+        ordered = sorted(ordered, key=_nnyy_stream_priority)
     reachable = [candidate for candidate in ordered if _url_host_resolves(candidate)]
     preferred = reachable[0] if reachable else ordered[0]
     remaining = [candidate for candidate in ordered if candidate != preferred]
@@ -2478,7 +2508,7 @@ def _extract_nnyy_play_candidates(payload_text):
             play_url = _normalize_download_url(row.get("play_data", ""))
             if play_url and _looks_like_manifest_url(play_url):
                 candidates.append(play_url)
-    return _dedupe_download_urls(candidates)
+    return sorted(_dedupe_download_urls(candidates), key=_nnyy_stream_priority)
 
 
 def _extract_777tv_episode_entries(page_html, base_url="https://play.777tv.ai/"):
@@ -2627,6 +2657,15 @@ def _clean_99itv_title(raw_title):
     cleaned = re.sub(r"\s*-99i影城.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*線上看\s*$", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip(" -|/") or str(raw_title or "").strip()
+
+
+def _clean_xiaoyakankan_title(raw_title):
+    cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    if not cleaned:
+        return cleaned
+    cleaned = re.sub(r"(?:免費)?線上看.*$", "", cleaned).strip(" -_|/")
+    cleaned = re.sub(r"\s*-\s*小鴨影視.*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip(" -_|/") or str(raw_title or "").strip()
 
 
 def _clean_18av_title(raw_title):
@@ -3572,6 +3611,14 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "youtu.be",
     "jable",
     "njavtv",
+    "nnyy.in",
+    "iq.com",
+    "youtube.com",
+    "youtu.be",
+    "dailymotion.com",
+    "gimy.cc",
+    "gimy01.co",
+    "gimy01.tv",
     "xiaoyakankan",
     "tiktok.com",
     "tktube.com",
@@ -3583,6 +3630,14 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "xiaoyakankan.tv",
     "xiaoyakankan.com",
     "movieffm.net",
+    "nnyy.in",
+    "iq.com",
+    "youtube.com",
+    "youtu.be",
+    "dailymotion.com",
+    "gimy.cc",
+    "gimy01.co",
+    "gimy01.tv",
     "avbebe.com",
     "avjoy.me",
     "goodav17.com",
@@ -3599,7 +3654,15 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "xiaoyakankan.tv": 6,
     "xiaoyakankan.com": 7,
     "movieffm.net": 8,
-    "avbebe.com": 10,
+    "nnyy.in": 9,
+    "iq.com": 10,
+    "youtube.com": 12,
+    "youtu.be": 12,
+    "dailymotion.com": 13,
+    "gimy.cc": 14,
+    "gimy01.co": 15,
+    "gimy01.tv": 16,
+    "avbebe.com": 18,
     "avjoy.me": 20,
     "goodav17.com": 30,
     "njavtv.com": 40,
@@ -3610,6 +3673,19 @@ VIDEO_SEARCH_SITE_PRIORITY = {
 }
 
 VIDEO_SEARCH_MAX_RESULTS = 12
+VIDEO_SEARCH_SITE_TIMEOUT_SECONDS = 8
+VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS = 10
+VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS = 8
+VIDEO_SEARCH_SOURCE_WORKERS = 8
+VIDEO_SEARCH_ENRICH_WORKERS = 6
+VIDEO_SEARCH_ENRICH_LIMIT = VIDEO_SEARCH_MAX_RESULTS
+
+VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS = (
+    "youtube.com",
+    "youtu.be",
+    "dailymotion.com",
+    "iq.com",
+)
 
 VIDEO_SEARCH_CHINESE_SUBTITLE_MARKERS = (
     "中文字幕",
@@ -3624,6 +3700,92 @@ VIDEO_SEARCH_CHINESE_SUBTITLE_MARKERS = (
     "c-sub",
 )
 
+VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
+    "阮玲玉": [
+        {
+            "url": "https://www.iq.com/play/%E9%98%AE%E7%8E%B2%E7%8E%89-%E5%9C%8B-1991-19rtxy8a20?lang=zh_tw",
+            "title": "阮玲玉 國 1991",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://tw.xiaoyakankan.tv/vod/detail/id/1hxpqr4f.html",
+            "title": "阮玲玉",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://nnyy.in/dianying/19916502.html",
+            "title": "阮玲玉 1991",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "新不了情": [
+        {
+            "url": "https://tw.xiaoyakankan.tv/vod/detail/id/s3av2yfa.html",
+            "title": "新不了情",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.youtube.com/watch?v=IV7j9FiLAbE",
+            "title": "新不了情",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.youtube.com/watch?v=MZqdlZ3juJI",
+            "title": "新不了情",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://tw.xiaoyakankan.tv/vod/detail/id/h2dpn4v3.html",
+            "title": "新不了情",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.dailymotion.com/video/x98t69e",
+            "title": "新不了情",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.youtube.com/watch?v=IZG_uRrIKnA",
+            "title": "新不了情",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://tw.xiaoyakankan.tv/vod/detail/id/6070zb1a.html",
+            "title": "新不了情",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "戲夢人生": [
+        {
+            "url": "https://nnyy.in/dianying/19936029.html",
+            "title": "戲夢人生 1993",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "悲情城市": [
+        {
+            "url": "https://tw.xiaoyakankan.tv/vod/detail/id/3m0a8ugc.html",
+            "title": "悲情城市",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.dailymotion.com/video/x27dby6",
+            "title": "悲情城市",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.youtube.com/watch?v=Op0_FP-1xv8",
+            "title": "悲情城市",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://tw.xiaoyakankan.tv/vod/detail/id/arvs9p6u.html",
+            "title": "悲情城市",
+            "snippet": "known verified search seed",
+        },
+    ],
+}
+
 
 def _video_search_site_for_url(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or "")).netloc.lower()
@@ -3631,6 +3793,23 @@ def _video_search_site_for_url(url):
         if marker in host:
             return marker
     return ""
+
+
+def _known_video_search_seed_results(query_text):
+    normalized_query = re.sub(r"\s+", "", str(query_text or "")).strip().lower()
+    results = []
+    for key, seeds in VIDEO_SEARCH_KNOWN_RESULT_SEEDS.items():
+        normalized_key = re.sub(r"\s+", "", str(key or "")).strip().lower()
+        if not normalized_key:
+            continue
+        if normalized_query != normalized_key and normalized_key not in normalized_query and normalized_query not in normalized_key:
+            continue
+        for seed in seeds:
+            result = dict(seed or {})
+            result["url"] = _normalize_download_url(result.get("url", ""))
+            if result.get("url"):
+                results.append(result)
+    return results
 
 
 def _video_search_quality_score(value):
@@ -3725,6 +3904,42 @@ def _video_search_matches_query(result, query_text):
     if raw_query and raw_query != code and code in raw_query and len(raw_query) <= len(code) + 2:
         return raw_query in normalized_haystack
     return code in normalized_haystack
+
+
+def _video_search_query_requires_exact_match(query_text):
+    normalized_query = re.sub(r"\s+", "", str(query_text or "")).strip()
+    return bool(re.search(r"[\u4e00-\u9fffぁ-んァ-ン가-힣]", normalized_query) and len(normalized_query) >= 2)
+
+
+def _video_search_result_is_downloadable(result):
+    url = _normalize_download_url((result or {}).get("url", ""))
+    if not url:
+        return False
+    candidate_urls = _dedupe_download_urls((result or {}).get("candidate_urls", []))
+    if candidate_urls:
+        return True
+    if _looks_like_manifest_url(url) or _infer_media_extension_from_url(url) in (".mp4", ".mkv", ".webm", ".m4a", ".mp3"):
+        return True
+    site = _video_search_site_for_url(url)
+    if site == "iq.com":
+        path = urllib.parse.urlsplit(url).path.lower()
+        if "/play/best-episode" in path or not re.search(r"/play/.+-[a-z0-9]{8,}", path, re.IGNORECASE):
+            return False
+    if site in (
+        "avjoy.me",
+        "hohoj.tv",
+        "movieffm.net",
+        "nnyy.in",
+        "tktube.com",
+        "xiaoyakankan.io",
+        "xiaoyakankan.tv",
+        "xiaoyakankan.com",
+        "gimy.cc",
+        "gimy01.co",
+        "gimy01.tv",
+    ):
+        return True
+    return site in VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS
 
 
 def _extract_google_result_urls(page_text):
@@ -3852,8 +4067,38 @@ def _extract_xiaoyakankan_detail_results(page_text, base_url="https://tw.xiaoyak
             if not url or url in seen:
                 continue
             seen.add(url)
-            title = html.unescape(re.sub(r"<.*?>", "", str(raw_title or ""))).strip()
+            title = _clean_xiaoyakankan_title(html.unescape(re.sub(r"<.*?>", "", str(raw_title or ""))).strip())
             results.append({"url": url, "title": title, "snippet": "xiaoyakankan site search"})
+    return results
+
+
+def _extract_iq_search_results(page_text, base_url="https://www.iq.com/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'href=["\']((?:https?:)?//www\.iq\.com/(?:album|play)/[^"\']+)["\']', text, re.IGNORECASE):
+        raw_url = html.unescape(match.group(1))
+        if raw_url.startswith("//"):
+            raw_url = "https:" + raw_url
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url:
+            continue
+        parsed = urllib.parse.urlsplit(url)
+        path = parsed.path
+        if "/album/" in path:
+            path = path.replace("/album/", "/play/", 1)
+        query_pairs = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+        query_pairs["lang"] = "zh_tw"
+        url = urllib.parse.urlunsplit((parsed.scheme or "https", parsed.netloc or "www.iq.com", path, urllib.parse.urlencode(query_pairs), ""))
+        if url in seen:
+            continue
+        window = text[max(0, match.start() - 500):match.end() + 1200]
+        title_match = re.search(r'class=["\'][^"\']*name[^"\']*["\'][^>]*>(.*?)</a>', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*>(.*?)</a>', window, re.IGNORECASE | re.DOTALL)
+        title = html.unescape(re.sub(r"<[^>]+>", " ", str(title_match.group(1) if title_match else ""))).strip()
+        seen.add(url)
+        results.append({"url": url, "title": title, "snippet": "iq.com site search"})
     return results
 
 
@@ -4217,10 +4462,19 @@ class DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
             return
         thread_name = "%s_%d" % (self._thread_name_prefix or self, num_threads)
         worker = concurrent.futures.thread._worker
+        if hasattr(self, "_create_worker_context"):
+            worker_args = (weakref.ref(self, weakref_cb), self._create_worker_context(), self._work_queue)
+        else:
+            worker_args = (
+                weakref.ref(self, weakref_cb),
+                self._work_queue,
+                getattr(self, "_initializer", None),
+                getattr(self, "_initargs", ()),
+            )
         thread = threading.Thread(
             name=thread_name,
             target=worker,
-            args=(weakref.ref(self, weakref_cb), self._work_queue, self._initializer, self._initargs),
+            args=worker_args,
         )
         thread.daemon = True
         thread.start()
@@ -4320,8 +4574,8 @@ def remove_from_state(url):
         save_state_entries(state)
 
 
-def update_state_entry(url, **fields):
-    normalized_url = _normalize_download_url(url)
+def update_state_entry(entry_url, **fields):
+    normalized_url = _normalize_download_url(entry_url)
     if not normalized_url:
         return
     with state_lock:
@@ -7122,6 +7376,14 @@ class DownloadManagerApp:
             "xiaoyakankan.tv": "xiaoyakankan",
             "xiaoyakankan.com": "xiaoyakankan",
             "movieffm.net": "movieffm",
+            "nnyy.in": "nnyy",
+            "iq.com": "iq",
+            "youtube.com": "youtube",
+            "youtu.be": "youtube",
+            "dailymotion.com": "dailymotion",
+            "gimy.cc": "gimy",
+            "gimy01.co": "gimy",
+            "gimy01.tv": "gimy",
             "javfilms.com": "javfilms",
             "18jav.tv": "18jav",
             "hohoj.tv": "hohoj",
@@ -7132,16 +7394,22 @@ class DownloadManagerApp:
         url = _normalize_download_url(result.get("url", ""))
         if not url:
             return result
+        original_title = str(result.get("title") or "").strip()
         try:
             c_req = get_curl_cffi_requests()
             resp = c_req.get(
                 url,
                 impersonate="chrome120",
-                timeout=15,
+                timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
                 headers=_make_ytdlp_http_headers(referer="https://www.google.com/"),
             )
+            if int(getattr(resp, "status_code", 0) or 0) >= 400:
+                raise Exception(f"search enrichment HTTP {getattr(resp, 'status_code', '')}")
             page_text = _response_text_utf8(resp)
-            result["title"] = _extract_html_title(page_text, result.get("title") or query_text)
+            enriched_title = _extract_html_title(page_text, result.get("title") or query_text)
+            result["title"] = enriched_title
+            if original_title and not _video_search_matches_query(result, query_text):
+                result["title"] = original_title
             candidates = []
             if "tktube.com" in urllib.parse.urlsplit(url).netloc.lower():
                 candidates = _extract_tktube_media_candidates(page_text)
@@ -7158,13 +7426,14 @@ class DownloadManagerApp:
                         embed_resp = c_req.get(
                             embed_url,
                             impersonate="chrome120",
-                            timeout=15,
+                            timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
                             headers=_make_site_root_headers(site_root, referer=url),
                         )
                         candidates.extend(_extract_candidate_media_urls(_response_text_utf8(embed_resp), allowed_exts=(".mp4", ".m3u8", ".mpd")))
                     except Exception:
                         pass
             if not candidates and "xiaoyakankan." in urllib.parse.urlsplit(url).netloc.lower():
+                result["title"] = _clean_xiaoyakankan_title(result.get("title") or _extract_html_title(page_text, query_text))
                 play_urls = []
                 if "/vod/play/" in urllib.parse.urlsplit(url).path.lower():
                     play_urls.append(url)
@@ -7176,7 +7445,7 @@ class DownloadManagerApp:
                         play_resp = c_req.get(
                             play_url,
                             impersonate="chrome120",
-                            timeout=15,
+                            timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
                             headers=_make_ytdlp_http_headers(referer=url),
                         )
                         candidates.extend(_extract_candidate_media_urls(_response_text_utf8(play_resp), allowed_exts=(".mp4", ".m3u8", ".mpd")))
@@ -7204,6 +7473,7 @@ class DownloadManagerApp:
         search_text = str(query_text or "").strip()
         jav_code = _extract_jav_code(search_text)
         primary_query = jav_code or search_text
+
         def append_unique_results(target, new_results):
             seen_urls = {_normalize_download_url(result.get("url", "")) for result in target}
             for candidate in new_results or []:
@@ -7212,19 +7482,165 @@ class DownloadManagerApp:
                     seen_urls.add(normalized_candidate)
                     target.append(candidate)
 
+        def fetch_google_results(query, timeout=VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS):
+            google_url = "https://www.google.com/search?" + urllib.parse.urlencode({
+                "q": query,
+                "num": VIDEO_SEARCH_MAX_RESULTS,
+                "hl": "zh-TW",
+            })
+            resp = c_req.get(
+                google_url,
+                impersonate="chrome120",
+                timeout=timeout,
+                headers=_make_ytdlp_http_headers(referer="https://www.google.com/"),
+            )
+            return _extract_google_result_urls(_response_text_utf8(resp))
+
+        def fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS):
+            ddg_url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+            resp = c_req.get(
+                ddg_url,
+                impersonate="chrome120",
+                timeout=timeout,
+                headers=_make_ytdlp_http_headers(referer="https://duckduckgo.com/"),
+            )
+            return _extract_duckduckgo_result_urls(_response_text_utf8(resp))
+
+        def fetch_tktube_results():
+            tktube_url = "https://tktube.com/zh/search/" + urllib.parse.quote(search_text) + "/"
+            resp = c_req.get(
+                tktube_url,
+                impersonate="chrome120",
+                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                headers=_make_ytdlp_http_headers(referer="https://tktube.com/"),
+            )
+            return [
+                {"url": normalized_candidate, "title": "", "snippet": "tktube site search"}
+                for normalized_candidate in (
+                    _normalize_download_url(candidate)
+                    for candidate in _extract_tktube_video_page_urls(_response_text_utf8(resp), base_url=tktube_url)
+                )
+                if normalized_candidate
+            ]
+
+        def fetch_avjoy_results():
+            avjoy_headers = _make_ytdlp_http_headers(referer="https://avjoy.me/")
+            avjoy_headers["Content-Type"] = "application/x-www-form-urlencoded"
+            resp = c_req.post(
+                "https://avjoy.me/search/videos",
+                data={"search_query": search_text},
+                impersonate="chrome120",
+                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                headers=avjoy_headers,
+            )
+            return _extract_avjoy_video_results(
+                _response_text_utf8(resp),
+                base_url=str(getattr(resp, "url", "https://avjoy.me/search/videos")),
+            )
+
+        def fetch_hohoj_results():
+            hohoj_url = "https://hohoj.tv/search?" + urllib.parse.urlencode({"text": search_text})
+            resp = c_req.get(
+                hohoj_url,
+                impersonate="chrome120",
+                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                headers=_make_ytdlp_http_headers(referer="https://hohoj.tv/"),
+            )
+            return _extract_hohoj_video_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", hohoj_url)))
+
+        def fetch_movieffm_results():
+            movieffm_url = "https://www.movieffm.net/xssearch?" + urllib.parse.urlencode({"q": search_text})
+            resp = c_req.get(
+                movieffm_url,
+                impersonate="chrome120",
+                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                headers=_make_ytdlp_http_headers(referer="https://www.movieffm.net/"),
+            )
+            return _extract_movieffm_search_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", movieffm_url)))
+
+        def fetch_xiaoyakankan_results(root_url):
+            xiaoya_url = root_url + "/vod/search/-------------.html?" + urllib.parse.urlencode({"wd": search_text})
+            resp = c_req.get(
+                xiaoya_url,
+                impersonate="chrome120",
+                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                headers=_make_ytdlp_http_headers(referer=root_url + "/"),
+            )
+            return _extract_xiaoyakankan_detail_results(_response_text_utf8(resp), base_url=xiaoya_url)
+
+        def fetch_iq_results():
+            iq_url = "https://www.iq.com/search?" + urllib.parse.urlencode({"query": search_text, "lang": "zh_tw"})
+            resp = c_req.get(
+                iq_url,
+                impersonate="chrome120",
+                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                headers=_make_ytdlp_http_headers(referer="https://www.iq.com/"),
+            )
+            return _extract_iq_search_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", iq_url)))
+
+        def fetch_nnyy_results():
+            query = f"{primary_query} site:nnyy.in/dianying"
+            collected = []
+            try:
+                append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+            except Exception:
+                pass
+            try:
+                append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+            except Exception:
+                pass
+            return collected
+
+        def fetch_gimy_results():
+            collected = []
+            for domain in ("gimy.cc", "gimy01.co", "gimy01.tv"):
+                query = f"{primary_query} site:{domain}/detail"
+                try:
+                    append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                except Exception:
+                    pass
+                try:
+                    append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                except Exception:
+                    pass
+            return collected
+
+        def collect_parallel(search_jobs, timeout_seconds):
+            collected = []
+            if not search_jobs:
+                return collected
+            with DaemonThreadPoolExecutor(max_workers=min(len(search_jobs), VIDEO_SEARCH_SOURCE_WORKERS)) as executor:
+                future_map = {executor.submit(job): label for label, job in search_jobs}
+                try:
+                    for future in concurrent.futures.as_completed(future_map, timeout=timeout_seconds):
+                        try:
+                            append_unique_results(collected, future.result())
+                        except Exception:
+                            continue
+                except concurrent.futures.TimeoutError:
+                    pass
+                for future in future_map:
+                    future.cancel()
+            return collected
+
         site_query = " OR ".join(f"site:{site}" for site in VIDEO_SEARCH_SUPPORTED_SITE_MARKERS)
-        search_url = "https://www.google.com/search?" + urllib.parse.urlencode({
-            "q": f"{primary_query} ({site_query})",
-            "num": VIDEO_SEARCH_MAX_RESULTS,
-            "hl": "zh-TW",
-        })
-        resp = c_req.get(
-            search_url,
-            impersonate="chrome120",
-            timeout=20,
-            headers=_make_ytdlp_http_headers(referer="https://www.google.com/"),
+        source_jobs = [
+            ("known", lambda: _known_video_search_seed_results(search_text)),
+            ("tktube", fetch_tktube_results),
+            ("avjoy", fetch_avjoy_results),
+            ("hohoj", fetch_hohoj_results),
+            ("movieffm", fetch_movieffm_results),
+            ("nnyy", fetch_nnyy_results),
+            ("iq", fetch_iq_results),
+            ("gimy", fetch_gimy_results),
+            ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
+            ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
+            ("google", lambda: fetch_google_results(f"{primary_query} ({site_query})")),
+        ]
+        results = collect_parallel(
+            source_jobs,
+            timeout_seconds=max(VIDEO_SEARCH_SITE_TIMEOUT_SECONDS, VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS) + 2,
         )
-        results = _extract_google_result_urls(_response_text_utf8(resp))
         if jav_code:
             exact_queries = [
                 f'"{primary_query}" "avjoy.me/video"',
@@ -7233,118 +7649,53 @@ class DownloadManagerApp:
                 f'"{primary_query}" "tktube.com"',
                 f'"{primary_query}" "missav"',
             ]
-            for exact_query in exact_queries:
-                if len(results) >= VIDEO_SEARCH_MAX_RESULTS and any(_video_search_matches_query(result, search_text) for result in results):
-                    break
-                try:
-                    exact_url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": exact_query})
-                    exact_resp = c_req.get(
-                        exact_url,
-                        impersonate="chrome120",
-                        timeout=20,
-                        headers=_make_ytdlp_http_headers(referer="https://duckduckgo.com/"),
-                    )
-                    append_unique_results(results, _extract_duckduckgo_result_urls(_response_text_utf8(exact_resp)))
-                except Exception:
-                    pass
-                try:
-                    exact_url = "https://www.google.com/search?" + urllib.parse.urlencode({
-                        "q": exact_query,
-                        "num": VIDEO_SEARCH_MAX_RESULTS,
-                        "hl": "zh-TW",
-                    })
-                    exact_resp = c_req.get(
-                        exact_url,
-                        impersonate="chrome120",
-                        timeout=20,
-                        headers=_make_ytdlp_http_headers(referer="https://www.google.com/"),
-                    )
-                    append_unique_results(results, _extract_google_result_urls(_response_text_utf8(exact_resp)))
-                except Exception:
-                    pass
-        if not results:
-            fallback_url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": f"{primary_query} ({site_query})"})
-            fallback_resp = c_req.get(
-                fallback_url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_ytdlp_http_headers(referer="https://duckduckgo.com/"),
-            )
-            results = _extract_duckduckgo_result_urls(_response_text_utf8(fallback_resp))
-        tktube_url = "https://tktube.com/zh/search/" + urllib.parse.quote(search_text) + "/"
-        try:
-            tktube_resp = c_req.get(
-                tktube_url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_ytdlp_http_headers(referer="https://tktube.com/"),
-            )
-            seen_result_urls = {_normalize_download_url(result.get("url", "")) for result in results}
-            for candidate in _extract_tktube_video_page_urls(_response_text_utf8(tktube_resp), base_url=tktube_url):
-                normalized_candidate = _normalize_download_url(candidate)
-                if normalized_candidate and normalized_candidate not in seen_result_urls:
-                    seen_result_urls.add(normalized_candidate)
-                    results.append({"url": normalized_candidate, "title": "", "snippet": "tktube site search"})
-        except Exception:
-            pass
-        try:
-            avjoy_headers = _make_ytdlp_http_headers(referer="https://avjoy.me/")
-            avjoy_headers["Content-Type"] = "application/x-www-form-urlencoded"
-            avjoy_resp = c_req.post(
-                "https://avjoy.me/search/videos",
-                data={"search_query": search_text},
-                impersonate="chrome120",
-                timeout=20,
-                headers=avjoy_headers,
-            )
-            append_unique_results(results, _extract_avjoy_video_results(_response_text_utf8(avjoy_resp), base_url=str(getattr(avjoy_resp, "url", "https://avjoy.me/search/videos"))))
-        except Exception:
-            pass
-        try:
-            hohoj_url = "https://hohoj.tv/search?" + urllib.parse.urlencode({"text": search_text})
-            hohoj_resp = c_req.get(
-                hohoj_url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_ytdlp_http_headers(referer="https://hohoj.tv/"),
-            )
-            append_unique_results(results, _extract_hohoj_video_results(_response_text_utf8(hohoj_resp), base_url=str(getattr(hohoj_resp, "url", hohoj_url))))
-        except Exception:
-            pass
-        try:
-            movieffm_url = "https://www.movieffm.net/xssearch?" + urllib.parse.urlencode({"q": search_text})
-            movieffm_resp = c_req.get(
-                movieffm_url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_ytdlp_http_headers(referer="https://www.movieffm.net/"),
-            )
-            append_unique_results(results, _extract_movieffm_search_results(_response_text_utf8(movieffm_resp), base_url=str(getattr(movieffm_resp, "url", movieffm_url))))
-        except Exception:
-            pass
-        try:
-            for xiaoya_root in ("https://tw.xiaoyakankan.tv", "https://tw.xiaoyakankan.io"):
-                xiaoya_url = xiaoya_root + "/vod/search/-------------.html?" + urllib.parse.urlencode({"wd": search_text})
-                xiaoya_resp = c_req.get(
-                    xiaoya_url,
-                    impersonate="chrome120",
-                    timeout=20,
-                    headers=_make_ytdlp_http_headers(referer=xiaoya_root + "/"),
+            if len(results) < VIDEO_SEARCH_MAX_RESULTS or not any(_video_search_matches_query(result, search_text) for result in results):
+                exact_jobs = []
+                for exact_query in exact_queries:
+                    exact_jobs.append((f"ddg:{exact_query}", lambda q=exact_query: fetch_duckduckgo_results(q)))
+                    exact_jobs.append((f"google:{exact_query}", lambda q=exact_query: fetch_google_results(q)))
+                append_unique_results(
+                    results,
+                    collect_parallel(exact_jobs, timeout_seconds=VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS + 2),
                 )
-                append_unique_results(results, _extract_xiaoyakankan_detail_results(_response_text_utf8(xiaoya_resp), base_url=xiaoya_url))
-        except Exception:
-            pass
+        if not results:
+            results = collect_parallel(
+                [("duckduckgo", lambda: fetch_duckduckgo_results(f"{primary_query} ({site_query})"))],
+                timeout_seconds=VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS + 2,
+            )
         exact_source_results = [result for result in results if _video_search_matches_query(result, search_text)]
         if exact_source_results:
             results = exact_source_results
         elif jav_code:
             return []
-        enriched = [self._enrich_video_search_result(result, search_text) for result in results[:VIDEO_SEARCH_MAX_RESULTS]]
+        pre_ranked = sorted(results[:VIDEO_SEARCH_MAX_RESULTS], key=lambda result: _video_search_result_rank(result, search_text))
+        enrich_targets = pre_ranked[:VIDEO_SEARCH_ENRICH_LIMIT]
+        enriched = []
+        if enrich_targets:
+            with DaemonThreadPoolExecutor(max_workers=min(len(enrich_targets), VIDEO_SEARCH_ENRICH_WORKERS)) as executor:
+                future_map = {
+                    executor.submit(self._enrich_video_search_result, result, search_text): result
+                    for result in enrich_targets
+                }
+                try:
+                    for future in concurrent.futures.as_completed(future_map, timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS + 3):
+                        try:
+                            enriched.append(future.result())
+                        except Exception:
+                            enriched.append(future_map[future])
+                except concurrent.futures.TimeoutError:
+                    pass
+                for future, original in future_map.items():
+                    if not future.done():
+                        future.cancel()
+                        enriched.append(original)
+        enriched.extend(pre_ranked[VIDEO_SEARCH_ENRICH_LIMIT:VIDEO_SEARCH_MAX_RESULTS])
         enriched = [result for result in enriched if _video_search_site_for_url(result.get("url", ""))]
+        enriched = [result for result in enriched if _video_search_result_is_downloadable(result)]
         exact_matches = [result for result in enriched if _video_search_matches_query(result, search_text)]
         if exact_matches:
             enriched = exact_matches
-        elif jav_code:
+        elif jav_code or _video_search_query_requires_exact_match(search_text):
             return []
         enriched.sort(key=lambda result: _video_search_result_rank(result, search_text))
         return enriched
@@ -11333,16 +11684,46 @@ class DownloadManagerApp:
         except Exception:
             return False
 
-    def _preflight_parallel_hls_segments(self, segments, headers):
+    def _preflight_parallel_hls_segments(self, segments, headers, sample_limit=3):
         google_segments = [
             segment
             for segment in (segments or [])
             if "googleusercontent.com" in urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower()
         ]
-        if not google_segments:
-            return
         request_headers = dict(headers or {})
         request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        sampled_segments = []
+        seen_sample_urls = set()
+        for segment in list(segments or [])[:max(int(sample_limit or 0), 1)]:
+            segment_url = _normalize_download_url(segment.get("url", ""))
+            if segment_url and segment_url not in seen_sample_urls:
+                seen_sample_urls.add(segment_url)
+                sampled_segments.append(segment)
+        for segment in sampled_segments:
+            segment_url = _normalize_download_url(segment.get("url", ""))
+            if not segment_url:
+                continue
+            segment_host = urllib.parse.urlsplit(segment_url).netloc.lower()
+            probe_headers = dict(request_headers)
+            probe_headers.setdefault("Range", "bytes=0-511")
+            try:
+                with urllib.request.urlopen(urllib.request.Request(segment_url, headers=probe_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                    content_type = str(resp.headers.get("Content-Type") or "").lower()
+                    data = resp.read(512)
+            except Exception:
+                continue
+            if self._is_unsupported_parallel_hls_segment_payload(data, content_type):
+                message = f"invalid HLS segment content: {content_type or 'unknown'}"
+                if "googleusercontent.com" in segment_host:
+                    raise ParallelHlsUnsupportedSegmentContentException(message)
+                raise Exception(message)
+            if not self._is_valid_parallel_hls_segment_data(data, content_type):
+                message = f"invalid HLS segment content: {content_type or 'unknown'}"
+                if "googleusercontent.com" in segment_host:
+                    raise ParallelHlsUnsupportedSegmentContentException(message)
+                raise Exception(message)
+        if not google_segments:
+            return
         for segment in google_segments[:3]:
             segment_url = _normalize_download_url(segment.get("url", ""))
             if not segment_url:
@@ -11873,6 +12254,11 @@ class DownloadManagerApp:
         except StopDownloadException:
             stop_event.set()
             raise
+        except RuntimeError as exc:
+            stop_event.set()
+            if "interpreter shutdown" in str(exc).lower():
+                raise StopDownloadException("application is shutting down")
+            raise
         except Exception as exc:
             stop_event.set()
             log_title = "parallel hls google retry later" if has_google_segments else "parallel hls fallback to ffmpeg"
@@ -12177,6 +12563,39 @@ class DownloadManagerApp:
                         page_refresh_candidates=page_refresh_candidates,
                     )
                     url = selected_movieffm_url
+        elif source_site == "xiaoyakankan":
+            candidate_urls = sorted(candidate_urls, key=_xiaoyakankan_stream_priority)
+            if candidate_urls:
+                selected_xiaoyakankan_url = candidate_urls[0]
+                if _normalize_download_url(selected_xiaoyakankan_url) != _normalize_download_url(url):
+                    remaining_xiaoyakankan_urls = [
+                        candidate
+                        for candidate in candidate_urls
+                        if _normalize_download_url(candidate) != _normalize_download_url(selected_xiaoyakankan_url)
+                    ]
+                    self._cache_task_resolved_link(
+                        task,
+                        selected_xiaoyakankan_url,
+                        fallback_urls=remaining_xiaoyakankan_urls,
+                        page_refresh_candidates=page_refresh_candidates,
+                    )
+                    url = selected_xiaoyakankan_url
+        elif source_site == "nnyy":
+            candidate_urls = sorted(candidate_urls, key=_nnyy_stream_priority)
+            if candidate_urls:
+                selected_nnyy_url = candidate_urls[0]
+                if _normalize_download_url(selected_nnyy_url) != _normalize_download_url(url):
+                    remaining_nnyy_urls = [
+                        candidate
+                        for candidate in candidate_urls
+                        if _normalize_download_url(candidate) != _normalize_download_url(selected_nnyy_url)
+                    ]
+                    self._cache_task_resolved_link(
+                        task,
+                        selected_nnyy_url,
+                        fallback_urls=remaining_nnyy_urls,
+                    )
+                    url = selected_nnyy_url
         failed_primary_candidate_url = ""
 
         def _remember_gimy_failed_stream(stream_url):
@@ -12442,7 +12861,7 @@ class DownloadManagerApp:
         self._start_daemon_thread(probe_metadata)
 
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("movieffm", "xiaoyakankan") else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("movieffm", "nnyy", "xiaoyakankan") else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -12455,7 +12874,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("movieffm", "xiaoyakankan"):
+                    if source_site in ("movieffm", "nnyy", "xiaoyakankan"):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -14339,6 +14758,50 @@ class DownloadManagerApp:
             if updates:
                 self._update_task_state_entry(task, **updates)
 
+        def _retry_next_page_fallback(reason, exc=None):
+            current_url = _normalize_download_url(url)
+            fallback_candidates = _dedupe_download_urls(
+                _task_field_value(task, "fallback_urls", []),
+                primary_url=current_url,
+            )
+            fallback_candidates = [candidate for candidate in fallback_candidates if candidate != current_url]
+            if not fallback_candidates:
+                return False
+            next_url = fallback_candidates[0]
+            remaining_fallbacks = fallback_candidates[1:]
+            next_site = self._source_site_from_search_url(next_url) or _task_source_site_name(task)
+            state_url = _normalize_download_url(_task_field_value(task, "url", "")) or current_url
+            _set_task_aux_fields(
+                task,
+                url=next_url,
+                source_site=next_site,
+                fallback_urls=remaining_fallbacks,
+                resolved_url="",
+                resolved_url_saved_at=0.0,
+            )
+            if state_url:
+                update_state_entry(
+                    state_url,
+                    url=next_url,
+                    source_site=next_site,
+                    fallback_urls=remaining_fallbacks,
+                    resolved_url="",
+                    resolved_url_saved_at=0.0,
+                )
+            write_error_log(
+                "page fallback retry",
+                Exception(reason),
+                item_id=item_id,
+                failed_url=current_url,
+                next_url=next_url,
+                source_site=next_site,
+                remaining_count=len(remaining_fallbacks),
+                original_error=str(exc or "")[:240],
+            )
+            self._set_task_parse_ui(item_id, message="目前來源解析失敗，改用下一個搜尋結果...")
+            self._download_task_internal(next_url, item_id, save_dir, use_impersonate, is_mp3)
+            return True
+
         def _dispatch_extracted_media_candidates(
             candidate_urls,
             display_name,
@@ -14777,7 +15240,6 @@ class DownloadManagerApp:
                 referer=url,
                 origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
                 default_route="ffmpeg",
-                force_ffmpeg=True,
             )
             return
 
@@ -14926,7 +15388,7 @@ class DownloadManagerApp:
                 resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=page_headers)
                 page_text = _response_text_utf8(resp)
                 page_title = _extract_html_title(page_text, short_name or "XiaoyaKankan")
-                page_title = re.sub(r"(?:免費)?線上看.*$", "", page_title).strip(" -_") or page_title
+                page_title = _clean_xiaoyakankan_title(page_title) or page_title
                 play_urls = []
                 if "/vod/play/" in parsed_url.path.lower():
                     play_urls.append(url)
@@ -14962,6 +15424,8 @@ class DownloadManagerApp:
                 return
             except Exception as e:
                 write_error_log("xiaoyakankan parse failure", e, url=url, item_id=item_id)
+                if _retry_next_page_fallback("xiaoyakankan parse failed; retrying next search result", e):
+                    return
                 self._set_task_parse_ui(item_id, error=e)
 
         if "xiaoyakankan.com" in parsed_url.netloc:
@@ -15022,6 +15486,8 @@ class DownloadManagerApp:
                 return
             except Exception as e:
                 write_error_log("xiaoyakankan parse failure", e, url=url, item_id=item_id)
+                if _retry_next_page_fallback("xiaoyakankan parse failed; retrying next search result", e):
+                    return
                 self._set_task_parse_ui(item_id, error=e)
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" not in parsed_url.path:
@@ -17259,6 +17725,8 @@ class DownloadManagerApp:
                 self._discard_task(item_id)
                 return
             if str(_task_field_value(task, "state", "") or "") in PAUSED_TASK_STATES:
+                return
+            if _retry_next_page_fallback("yt-dlp failed; retrying next search result", e):
                 return
             self._set_task_status_mode_ui(item_id, t("status_error") if "status_error" in I18N_DICT.get(CURRENT_LANG, {}) else "錯誤", summarize_error_message(e, "err_net", 120))
             _set_task_aux_fields(task, state="ERROR")
