@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260524-3090"
+APP_BUILD = "20260524-3100"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -320,6 +320,92 @@ def _normalize_jav_code_for_compare(value):
     return re.sub(r"[^A-Z0-9]", "", code.upper()) if code else ""
 
 
+JAV_DUPLICATE_SOURCE_SITES = frozenset((
+    "18av",
+    "18jav",
+    "avbebe",
+    "avjoy",
+    "goodav17",
+    "jable",
+    "javfilms",
+    "missav",
+    "njavtv",
+))
+JAV_DUPLICATE_HOST_MARKERS = {
+    "18av.mm-cg.com": "18av",
+    "18jav.tv": "18jav",
+    "avbebe.com": "avbebe",
+    "avjoy.me": "avjoy",
+    "goodav17.com": "goodav17",
+    "jable.tv": "jable",
+    "javfilms.com": "javfilms",
+    "missav": "missav",
+    "njavtv.com": "njavtv",
+}
+
+
+def _infer_jav_duplicate_site(source_site="", url=""):
+    site = str(source_site or "").strip().lower()
+    if site in JAV_DUPLICATE_SOURCE_SITES:
+        return site
+    normalized_url = _normalize_download_url(url)
+    host = urllib.parse.urlsplit(normalized_url).netloc.lower() if normalized_url else ""
+    for marker, marker_site in JAV_DUPLICATE_HOST_MARKERS.items():
+        if marker in host:
+            return marker_site
+    return ""
+
+
+def _normalize_jav_code_from_url_for_compare(url):
+    normalized_url = _normalize_download_url(url)
+    if not normalized_url:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized_url)
+    path_segments = [
+        urllib.parse.unquote(segment)
+        for segment in (parsed.path or "").split("/")
+        if segment.strip()
+    ]
+    for segment in reversed(path_segments):
+        if re.fullmatch(r"dm\d+", segment, re.IGNORECASE):
+            continue
+        code = _normalize_jav_code_for_compare(segment)
+        if code:
+            return code
+    return _normalize_jav_code_for_compare(parsed.query)
+
+
+def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=False):
+    task = task or {}
+    task_url = _normalize_download_url(url or _task_field_value(task, "url", "") or "")
+    site = _infer_jav_duplicate_site(source_site or _task_source_site_name(task), task_url)
+    if not site:
+        return ""
+    title_values = [
+        name,
+        _task_field_value(task, "short_name", ""),
+        _task_field_value(task, "name", ""),
+    ]
+    url_values = [
+        task_url,
+        _task_field_value(task, "source_page", ""),
+        _task_field_value(task, "resolved_url", ""),
+    ]
+    for fallback_url in _task_field_value(task, "fallback_urls", []) or []:
+        url_values.append(fallback_url)
+    for value in title_values:
+        code = _normalize_jav_code_for_compare(value)
+        if code:
+            kind = "audio" if is_mp3 or bool(_task_field_value(task, "is_mp3", False)) else "video"
+            return f"jav::{code}::{kind}"
+    for value in url_values:
+        code = _normalize_jav_code_from_url_for_compare(value)
+        if code:
+            kind = "audio" if is_mp3 or bool(_task_field_value(task, "is_mp3", False)) else "video"
+            return f"jav::{code}::{kind}"
+    return ""
+
+
 PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj", "nnyy", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
@@ -470,6 +556,18 @@ YTDLP_HTTP_CHUNK_SIZE_BY_SITE = {
 }
 YTDLP_THROTTLED_RATE_BPS = 0
 YTDLP_THROTTLED_RATE_BPS_BY_SITE = {
+}
+YTDLP_DOWNLOAD_RETRIES = 20
+YTDLP_FRAGMENT_RETRIES = 30
+YTDLP_EXTRACTOR_RETRIES = 5
+YTDLP_FILE_ACCESS_RETRIES = 10
+YTDLP_PROGRESS_DELTA_SECONDS = 0.5
+YTDLP_RETRY_PROFILE_BY_SITE = {
+    "bilibili": {"extractor_retries": 8, "fragment_retries": 40},
+    "youtube": {"extractor_retries": 8, "fragment_retries": 40},
+    "missav": {"fragment_retries": 40, "file_access_retries": 15},
+    "movieffm": {"fragment_retries": 40},
+    "xiaoyakankan": {"fragment_retries": 40},
 }
 HTTP_MULTIPART_TRIGGER_SECONDS = 0.15
 HTTP_MULTIPART_TRIGGER_SPEED_BPS = 6 * 1024 * 1024
@@ -3843,6 +3941,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "gimy01.co",
     "gimy01.tv",
     "xiaoyakankan",
+    "yfsp.tv",
     "tiktok.com",
     "tktube.com",
 )
@@ -3855,6 +3954,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "xiaoyakankan.io",
     "xiaoyakankan.tv",
     "xiaoyakankan.com",
+    "yfsp.tv",
     "movieffm.net",
     "nnyy.in",
     "iq.com",
@@ -3883,6 +3983,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "xiaoyakankan.io": 5,
     "xiaoyakankan.tv": 6,
     "xiaoyakankan.com": 7,
+    "yfsp.tv": 8,
     "movieffm.net": 8,
     "nnyy.in": 9,
     "iq.com": 10,
@@ -3915,6 +4016,7 @@ VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS = (
     "youtu.be",
     "dailymotion.com",
     "iq.com",
+    "yfsp.tv",
 )
 
 VIDEO_SEARCH_CHINESE_SUBTITLE_MARKERS = (
@@ -4057,6 +4159,33 @@ VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
             "snippet": "known verified search seed",
         },
     ],
+    "人在囧途": [
+        {
+            "url": "https://tw.xiaoyakankan.tv/vod/detail/id/bcg4um54.html",
+            "title": "人在囧途",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.youtube.com/watch?v=QpewH1pALmQ",
+            "title": "人在囧途",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.youtube.com/watch?v=uNV_WADOgvk",
+            "title": "人在囧途",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.iq.com/album/%E4%BA%BA%E5%9C%A8%E5%9B%A7%E9%80%94-2011-ooaxgbeu5g",
+            "title": "人在囧途 iQIYI",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.yfsp.tv/play/uUKxvDDsenF",
+            "title": "人在囧途 YFSP",
+            "snippet": "known verified search seed",
+        },
+    ],
     "戲夢人生": [
         {
             "url": "https://nnyy.in/dianying/19936029.html",
@@ -4125,10 +4254,18 @@ def _video_search_site_for_url(url):
     return ""
 
 
-def _normalize_known_video_search_key(value):
+def _normalize_video_search_text_for_match(value):
     text = html.unescape(str(value or "")).strip().lower()
-    text = text.replace("：", ":")
-    text = re.sub(r"\s+", "", text)
+    text = text.replace("：", ":").replace("冏", "囧")
+    return re.sub(r"\s+", "", text)
+
+
+def _video_search_text_has_cjk(value):
+    return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", str(value or "")))
+
+
+def _normalize_known_video_search_key(value):
+    text = _normalize_video_search_text_for_match(value)
     return re.sub(r"[\-_:：!！?？,，.。・．、~～（）()［］\[\]【】「」『』《》〈〉\"'`]+", "", text)
 
 
@@ -4234,13 +4371,13 @@ def _video_search_result_text(result, include_candidates=True):
 
 def _video_search_name_match_score(result, query_text):
     haystack = _video_search_result_text(result)
-    normalized_query_text = re.sub(r"\s+", "", str(query_text or "")).strip().lower()
-    normalized_title_text = re.sub(r"\s+", "", str((result or {}).get("title", "") or "")).lower()
+    normalized_query_text = _normalize_video_search_text_for_match(query_text)
+    normalized_title_text = _normalize_video_search_text_for_match((result or {}).get("title", ""))
     if normalized_query_text and normalized_title_text.startswith(normalized_query_text):
         return 0
     if normalized_query_text and normalized_query_text in normalized_title_text:
         return 1
-    normalized_plain_haystack = re.sub(r"\s+", "", haystack).lower()
+    normalized_plain_haystack = _normalize_video_search_text_for_match(haystack)
     if normalized_query_text and normalized_query_text in normalized_plain_haystack:
         return 2
     normalized_haystack = re.sub(r"[^A-Za-z0-9]", "", haystack).upper()
@@ -4284,9 +4421,9 @@ def _video_search_result_rank(result, query_text=""):
 def _video_search_matches_query(result, query_text):
     code = _normalize_jav_code_for_compare(query_text)
     if not code:
-        normalized_query = re.sub(r"\s+", "", str(query_text or "")).strip().lower()
-        if re.search(r"[\u4e00-\u9fffぁ-んァ-ン가-힣]", normalized_query) and len(normalized_query) >= 2:
-            normalized_text = re.sub(r"\s+", "", _video_search_result_text(result)).lower()
+        normalized_query = _normalize_video_search_text_for_match(query_text)
+        if _video_search_text_has_cjk(normalized_query) and len(normalized_query) >= 2:
+            normalized_text = _normalize_video_search_text_for_match(_video_search_result_text(result))
             return normalized_query in normalized_text
         return True
     haystack = _video_search_result_text(result)
@@ -4298,8 +4435,8 @@ def _video_search_matches_query(result, query_text):
 
 
 def _video_search_query_requires_exact_match(query_text):
-    normalized_query = re.sub(r"\s+", "", str(query_text or "")).strip()
-    return bool(re.search(r"[\u4e00-\u9fffぁ-んァ-ン가-힣]", normalized_query) and len(normalized_query) >= 2)
+    normalized_query = _normalize_video_search_text_for_match(query_text)
+    return bool(_video_search_text_has_cjk(normalized_query) and len(normalized_query) >= 2)
 
 
 def _video_search_result_is_downloadable(result):
@@ -4324,6 +4461,7 @@ def _video_search_result_is_downloadable(result):
         "movieffm.net",
         "nnyy.in",
         "tktube.com",
+        "yfsp.tv",
         "xiaoyakankan.io",
         "xiaoyakankan.tv",
         "xiaoyakankan.com",
@@ -4557,6 +4695,18 @@ def get_yt_dlp_module():
     return yt_dlp
 
 
+def _make_ytdlp_task_temp_dir(item_id="", url="", prefix="ai_test_ytdlp"):
+    try:
+        normalized_url = _normalize_download_url(url) or str(url or "")
+        seed = f"{item_id or 'task'}|{normalized_url}"
+        task_temp_key = hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()[:16]
+        temp_dir = os.path.join(tempfile.gettempdir(), prefix, task_temp_key)
+        os.makedirs(temp_dir, exist_ok=True)
+        return temp_dir
+    except Exception:
+        return tempfile.gettempdir()
+
+
 def _ytdlp_retry_sleep_http(*args, **kwargs):
     count = kwargs.get("n")
     if count is None and args:
@@ -4608,6 +4758,29 @@ def _preferred_browser_cookie_sources(preferred_browsers=("edge", "chrome", "fir
     ]
 
 
+def _build_ytdlp_route_profile(site):
+    site = str(site or "").strip().lower()
+    retry_profile = dict(YTDLP_RETRY_PROFILE_BY_SITE.get(site, {}) or {})
+    return {
+        "concurrent_fragment_downloads": _ytdlp_generic_concurrency_for_site(site),
+        "http_chunk_size": _ytdlp_http_chunk_size_for_site(site),
+        "throttled_rate_bps": _ytdlp_throttled_rate_for_site(site),
+        "retries": int(retry_profile.get("retries", YTDLP_DOWNLOAD_RETRIES)),
+        "fragment_retries": int(retry_profile.get("fragment_retries", YTDLP_FRAGMENT_RETRIES)),
+        "extractor_retries": int(retry_profile.get("extractor_retries", YTDLP_EXTRACTOR_RETRIES)),
+        "file_access_retries": int(retry_profile.get("file_access_retries", YTDLP_FILE_ACCESS_RETRIES)),
+    }
+
+
+def _apply_ytdlp_route_options(ydl_opts, route_options):
+    route_options = dict(route_options or {})
+    throttled_rate = route_options.pop("throttled_rate_bps", None)
+    ydl_opts.update({key: value for key, value in route_options.items() if value is not None})
+    if throttled_rate:
+        ydl_opts["throttledratelimit"] = int(throttled_rate)
+    return ydl_opts
+
+
 def _build_bilibili_ytdlp_route_options(parsed_url):
     site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'www.bilibili.com'}"
     return {
@@ -4619,9 +4792,8 @@ def _build_bilibili_ytdlp_route_options(parsed_url):
             "best[height>=720][height<=2160]"
         ),
         "merge_output_format": "mp4",
-        "concurrent_fragment_downloads": _ytdlp_generic_concurrency_for_site("bilibili"),
-        "http_chunk_size": _ytdlp_http_chunk_size_for_site("bilibili"),
         "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
+        **_build_ytdlp_route_profile("bilibili"),
     }
 
 
@@ -4631,10 +4803,9 @@ def _build_youtube_ytdlp_route_options(parsed_url):
         "noplaylist": True,
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
         "merge_output_format": "mp4",
-        "concurrent_fragment_downloads": _ytdlp_generic_concurrency_for_site("youtube"),
-        "http_chunk_size": _ytdlp_http_chunk_size_for_site("youtube"),
         "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
         "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
+        **_build_ytdlp_route_profile("youtube"),
     }
 
 
@@ -4645,9 +4816,8 @@ def _build_social_ytdlp_route_options(parsed_url, source_site):
         "noplaylist": True,
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
         "merge_output_format": "mp4",
-        "concurrent_fragment_downloads": _ytdlp_generic_concurrency_for_site(site),
-        "http_chunk_size": _ytdlp_http_chunk_size_for_site(site),
         "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
+        **_build_ytdlp_route_profile(site),
     }
 
 
@@ -4713,16 +4883,21 @@ def _build_ytdlp_download_opts(
     socket_timeout=None,
     http_chunk_size=None,
     throttled_rate_bps=None,
+    retries=None,
+    fragment_retries=None,
+    extractor_retries=None,
+    file_access_retries=None,
+    progress_delta=YTDLP_PROGRESS_DELTA_SECONDS,
 ):
     opts = {
         "color": "never",
         "nopart": False,
         "continuedl": True,
         "nocheckcertificate": True,
-        "retries": 20,
-        "fragment_retries": 30,
-        "extractor_retries": 5,
-        "file_access_retries": 10,
+        "retries": int(retries if retries is not None else YTDLP_DOWNLOAD_RETRIES),
+        "fragment_retries": int(fragment_retries if fragment_retries is not None else YTDLP_FRAGMENT_RETRIES),
+        "extractor_retries": int(extractor_retries if extractor_retries is not None else YTDLP_EXTRACTOR_RETRIES),
+        "file_access_retries": int(file_access_retries if file_access_retries is not None else YTDLP_FILE_ACCESS_RETRIES),
         "skip_unavailable_fragments": False,
         "concurrent_fragment_downloads": int(concurrent_fragment_downloads),
         "paths": {"home": home_dir, "temp": temp_dir},
@@ -4730,6 +4905,7 @@ def _build_ytdlp_download_opts(
         "format": format_selector,
         "merge_output_format": merge_output_format,
         "progress_hooks": [progress_hook],
+        "progress_delta": float(progress_delta),
         "ignoreerrors": False,
         "no_warnings": False,
         "quiet": True,
@@ -7046,6 +7222,11 @@ class DownloadManagerApp:
                 rejected_title=short_name,
             )
             short_name = default_short_name_for_url(url, is_mp3=is_mp3)
+        existing_media_item_id = self._find_existing_media_task_id(url, short_name, source_site, is_mp3)
+        if existing_media_item_id:
+            self._focus_tree_item(existing_media_item_id)
+            self._clear_url_entry()
+            return
         add_to_state(url, short_name, is_mp3, source_site=source_site, extra_task_data=extra_task_data)
         self._start_download_thread(url, short_name, is_mp3=is_mp3, source_site=source_site, extra_task_data=extra_task_data)
         self._clear_url_entry()
@@ -7063,6 +7244,31 @@ class DownloadManagerApp:
             if self._is_deleted_state(str(_task_field_value(task, "state", "") or "")):
                 continue
             return item_id
+        return None
+
+    def _task_media_duplicate_key(self, task=None, url="", name="", source_site="", is_mp3=False):
+        return _task_jav_duplicate_key(
+            task=task,
+            url=url,
+            name=name,
+            source_site=source_site,
+            is_mp3=is_mp3,
+        )
+
+    def _find_existing_media_task_id(self, url, name, source_site, is_mp3):
+        media_key = self._task_media_duplicate_key(
+            url=url,
+            name=name,
+            source_site=source_site,
+            is_mp3=is_mp3,
+        )
+        if not media_key:
+            return None
+        for item_id, task in self.tasks.items():
+            if self._is_deleted_state(str(_task_field_value(task, "state", "") or "")):
+                continue
+            if self._task_media_duplicate_key(task) == media_key:
+                return item_id
         return None
 
     def _choose_playlist_targets(self, episodes, selected_episode=None):
@@ -7501,7 +7707,27 @@ class DownloadManagerApp:
     def update_tree(self, item_id, col, value, force=False):
         self.update_tree_many(item_id, {col: value}, force=force)
 
+    def _normalize_terminal_ui_updates(self, item_id, updates):
+        task = self.tasks.get(item_id)
+        if not task or not updates:
+            return dict(updates or {})
+        state = str(_task_field_value(task, "state", "") or "")
+        if state not in TERMINAL_TASK_STATES:
+            return dict(updates)
+        done_text = t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成"
+        normalized = dict(updates)
+        status_text = str(normalized.get("status", "") or "")
+        if status_text and status_text != done_text:
+            normalized.pop("status", None)
+        if state == "FINISHED":
+            if "progress" in normalized and str(normalized.get("progress", "") or "") != "100%":
+                normalized.pop("progress", None)
+            if "speed_eta" in normalized and str(normalized.get("speed_eta", "") or "") != done_text:
+                normalized.pop("speed_eta", None)
+        return normalized
+
     def update_tree_many(self, item_id, updates, force=False):
+        updates = self._normalize_terminal_ui_updates(item_id, updates)
         throttler = self.ui_throttler or self.throttler
         if throttler and self.tree is not None and updates:
             throttler.update_many(item_id, updates, force=force)
@@ -7645,8 +7871,8 @@ class DownloadManagerApp:
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
             except OSError:
                 pass
-        self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", complete_progress=True)
         _set_task_aux_fields(task, state="FINISHED")
+        self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", complete_progress=True)
         remove_from_state(_normalize_download_url(_task_field_value(task, "url", "")) or "")
 
     def _discard_task(self, item_id):
@@ -7833,6 +8059,7 @@ class DownloadManagerApp:
             "xiaoyakankan.io": "xiaoyakankan",
             "xiaoyakankan.tv": "xiaoyakankan",
             "xiaoyakankan.com": "xiaoyakankan",
+            "yfsp.tv": "yfsp",
             "movieffm.net": "movieffm",
             "nnyy.in": "nnyy",
             "iq.com": "iq",
@@ -9087,9 +9314,10 @@ class DownloadManagerApp:
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
             except OSError:
                 pass
-        self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", message, complete_progress=True)
         if task:
             _set_task_aux_fields(task, state="FINISHED", resume_requested=False)
+        self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", message, complete_progress=True)
+        if task:
             remove_from_state(_normalize_download_url(_task_field_value(task, "url", "")) or "")
 
     def _has_resume_artifact_state(self, task, save_dir=None, is_mp3=None):
@@ -11410,6 +11638,8 @@ class DownloadManagerApp:
         updates = {}
         if complete_progress:
             updates["progress"] = "100%"
+            if message is None:
+                message = status_text
         task = self.tasks.get(item_id)
         if task is not None:
             _set_task_aux_fields(task, _last_status_text=str(status_text))
@@ -13150,24 +13380,28 @@ class DownloadManagerApp:
             "concurrent_fragment_downloads": _ytdlp_native_concurrency_for_site(source_site),
             "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(source_site, True)),
         }
+        native_route_profile = _build_ytdlp_route_profile(source_site)
+        native_route_profile["concurrent_fragment_downloads"] = native_options["concurrent_fragment_downloads"]
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
 
         progress_hook = self._make_yt_dlp_progress_hook(task, item_id, save_dir)
 
         native_work_dir = tempfile.gettempdir()
+        native_temp_dir = _make_ytdlp_task_temp_dir(item_id=item_id, url=url)
+        native_outtmpl = f"{os.path.basename(os.path.splitext(temp_out_path)[0])}.%(ext)s"
         ydl_opts = _build_ytdlp_download_opts(
             progress_hook=progress_hook,
             home_dir=native_work_dir,
-            temp_dir=native_work_dir,
-            outtmpl=f"{os.path.splitext(temp_out_path)[0]}.%(ext)s",
+            temp_dir=native_temp_dir,
+            outtmpl=native_outtmpl,
             concurrent_fragment_downloads=native_options["concurrent_fragment_downloads"],
             format_selector="best",
             http_headers=_make_hls_http_headers(referer=referer, origin=origin),
             hls_prefer_native=True,
             hls_use_mpegts=native_options["hls_use_mpegts"],
             socket_timeout=native_options["socket_timeout"],
-            throttled_rate_bps=_ytdlp_throttled_rate_for_site(source_site),
+            **native_route_profile,
         )
         if is_mp3:
             _apply_ytdlp_audio_postprocessing(ydl_opts)
@@ -13182,6 +13416,9 @@ class DownloadManagerApp:
             socket_timeout=native_options["socket_timeout"],
             concurrent_fragment_downloads=ydl_opts["concurrent_fragment_downloads"],
             throttled_rate_bps=ydl_opts.get("throttledratelimit"),
+            retries=ydl_opts.get("retries"),
+            fragment_retries=ydl_opts.get("fragment_retries"),
+            file_access_retries=ydl_opts.get("file_access_retries"),
             hls_use_mpegts=ydl_opts["hls_use_mpegts"],
         )
         info = None
@@ -14788,6 +15025,7 @@ class DownloadManagerApp:
         domain_counts = {}
         source_page_counts = {}
         source_site_counts = {}
+        media_key_counts = {}
         queued_items = []
         for item_id, task in self.tasks.items():
             if self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
@@ -14801,6 +15039,9 @@ class DownloadManagerApp:
                     source_page_counts[source_page] = source_page_counts.get(source_page, 0) + 1
                 if source_site:
                     source_site_counts[source_site] = source_site_counts.get(source_site, 0) + 1
+                media_key = self._task_media_duplicate_key(task)
+                if media_key:
+                    media_key_counts[media_key] = media_key_counts.get(media_key, 0) + 1
             elif self._is_queued_state(str(_task_field_value(task, "state", "") or "")):
                 queued_items.append(item_id)
         self._log_domain_limit_change(domain_limit, sum(domain_counts.values()), len(queued_items))
@@ -14812,6 +15053,9 @@ class DownloadManagerApp:
             )
             source_site = _task_source_site_name(task)
             source_page_limit, source_site_limit = self._source_download_limits(source_site, domain_limit)
+            media_key = self._task_media_duplicate_key(task)
+            if media_key and media_key_counts.get(media_key, 0) > 0:
+                continue
             if domain_counts.get(domain, 0) >= domain_limit:
                 continue
             if source_page and source_page_counts.get(source_page, 0) >= source_page_limit:
@@ -14824,6 +15068,8 @@ class DownloadManagerApp:
                 source_page_counts[source_page] = source_page_counts.get(source_page, 0) + 1
             if source_site:
                 source_site_counts[source_site] = source_site_counts.get(source_site, 0) + 1
+            if media_key:
+                media_key_counts[media_key] = media_key_counts.get(media_key, 0) + 1
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中")
             self._start_daemon_thread(
                 self.download_task,
@@ -15385,6 +15631,9 @@ class DownloadManagerApp:
         if self._complete_if_output_exists(item_id):
             return
 
+        source_site_name = _task_source_site_name(task)
+        ytdlp_route_profile = _build_ytdlp_route_profile(source_site_name)
+
         def progress_hook(d):
             task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if self._is_pause_requested_state(task_state):
@@ -15416,13 +15665,11 @@ class DownloadManagerApp:
         ydl_opts = _build_ytdlp_download_opts(
             progress_hook=progress_hook,
             home_dir=save_dir,
-            temp_dir=tempfile.gettempdir(),
+            temp_dir=_make_ytdlp_task_temp_dir(item_id=item_id, url=url),
             outtmpl="%(title)s.%(ext)s",
-            concurrent_fragment_downloads=_ytdlp_generic_concurrency_for_site(_task_source_site_name(task)),
             http_headers=_make_ytdlp_http_headers(),
             extractor_args={"youtube": {"player_client": ["android", "web"]}},
-            http_chunk_size=_ytdlp_http_chunk_size_for_site(_task_source_site_name(task)),
-            throttled_rate_bps=_ytdlp_throttled_rate_for_site(_task_source_site_name(task)),
+            **ytdlp_route_profile,
         )
         if is_mp3:
             _apply_ytdlp_audio_postprocessing(ydl_opts)
@@ -15507,7 +15754,7 @@ class DownloadManagerApp:
             log_context=None,
         ):
             site = str(source_site or "").strip().lower()
-            ydl_opts.update(route_options or {})
+            _apply_ytdlp_route_options(ydl_opts, route_options)
             current_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
             probed_title = _extract_ytdlp_page_title(target_url, fallback_title=current_title, cookie_sources=cookie_sources)
             fallback_title = current_title or default_short_name_for_url(target_url, is_mp3=is_mp3)
@@ -15691,6 +15938,49 @@ class DownloadManagerApp:
                 force_ffmpeg=force_ffmpeg,
             )
 
+        def _dispatch_direct_media_download(
+            media_url,
+            *,
+            name=None,
+            source_site=None,
+            source_page=None,
+            fallback_urls=None,
+            referer=None,
+            origin=None,
+            headers=None,
+            session=None,
+            default_ext=".mp4",
+            allow_audio_extract=True,
+            persist_direct_output=False,
+            show_direct_filename=False,
+        ):
+            site = source_site or _task_source_site_name(task)
+            display_name = str(name or _task_field_value(task, "short_name") or _task_field_value(task, "name") or short_name or "").strip()
+            _set_task_identity(
+                name=display_name,
+                source_site=site,
+                source_page=source_page,
+                fallback_urls=fallback_urls,
+            )
+            self._download_routed_media_url(
+                task,
+                item_id,
+                media_url,
+                save_dir,
+                display_name,
+                is_mp3=is_mp3,
+                source_site=site,
+                fallback_urls=fallback_urls,
+                referer=referer,
+                origin=origin,
+                headers=headers,
+                session=session,
+                default_ext=default_ext,
+                allow_audio_extract=allow_audio_extract,
+                persist_direct_output=persist_direct_output,
+                show_direct_filename=show_direct_filename,
+            )
+
         def _retry_next_page_fallback(reason, exc=None):
             current_url = _normalize_download_url(url)
             fallback_candidates = _dedupe_download_urls(
@@ -15756,20 +16046,11 @@ class DownloadManagerApp:
             stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
             media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
             if prefer_direct and media_url:
-                _set_task_identity(
+                _dispatch_direct_media_download(
+                    media_url,
                     name=display_name,
                     source_site=source_site,
                     source_page=source_page or url,
-                    fallback_urls=media_fallback_urls + manifest_candidates,
-                )
-                self._download_routed_media_url(
-                    task,
-                    item_id,
-                    media_url,
-                    save_dir,
-                    display_name,
-                    is_mp3=is_mp3,
-                    source_site=source_site,
                     fallback_urls=media_fallback_urls + manifest_candidates,
                     referer=referer or url,
                     origin=origin,
@@ -15790,20 +16071,11 @@ class DownloadManagerApp:
                 )
                 return True
             if media_url:
-                _set_task_identity(
+                _dispatch_direct_media_download(
+                    media_url,
                     name=display_name,
                     source_site=source_site,
                     source_page=source_page or url,
-                    fallback_urls=media_fallback_urls,
-                )
-                self._download_routed_media_url(
-                    task,
-                    item_id,
-                    media_url,
-                    save_dir,
-                    display_name,
-                    is_mp3=is_mp3,
-                    source_site=source_site,
                     fallback_urls=media_fallback_urls,
                     referer=referer or url,
                     origin=origin,
