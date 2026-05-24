@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260523-3080"
+APP_BUILD = "20260524-3090"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -253,6 +253,27 @@ def _is_ani_gamer_video_url(url):
     return bool(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("sn"))
 
 
+def _is_bilibili_video_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlsplit(normalized)
+    host = parsed.netloc.lower()
+    if not (host == "bilibili.com" or host.endswith(".bilibili.com")):
+        return False
+    return bool(re.search(r"/video/(?:BV[0-9A-Za-z]+|av\d+)", parsed.path, re.IGNORECASE))
+
+
+def _clean_bilibili_title(value, fallback="Bilibili"):
+    title = html.unescape(str(value or "")).strip()
+    title = re.sub(r"\s*[-_]\s*bilibili\s*$", "", title, flags=re.IGNORECASE).strip()
+    title = re.sub(r"\s*哔哩哔哩.*$", "", title).strip()
+    title = re.sub(r"\s+", " ", title).strip()
+    if not title or _looks_like_garbled_text(title):
+        title = str(fallback or "Bilibili").strip() or "Bilibili"
+    return title
+
+
 def _clean_ani_gamer_title_for_search(value, fallback=""):
     title = html.unescape(str(value or "")).strip()
     if not title:
@@ -418,22 +439,34 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS = 12
 YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "18jav": 18,
+    "bilibili": 12,
+    "facebook": 8,
     "gimy": 24,
     "hohoj": 18,
+    "instagram": 8,
     "missav": 24,
     "movieffm": 24,
     "mixdrop": 16,
     "njavtv": 18,
     "99itv": 18,
     "nnyy": 18,
+    "threads": 8,
+    "twitter": 8,
+    "youtube": 16,
 }
 YTDLP_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
 YTDLP_HTTP_CHUNK_SIZE_BY_SITE = {
+    "bilibili": 16 * 1024 * 1024,
+    "facebook": 8 * 1024 * 1024,
     "gimy": 10 * 1024 * 1024,
     "goodav17": 10 * 1024 * 1024,
+    "instagram": 8 * 1024 * 1024,
     "movieffm": 10 * 1024 * 1024,
     "mixdrop": 10 * 1024 * 1024,
     "missav": 10 * 1024 * 1024,
+    "threads": 8 * 1024 * 1024,
+    "twitter": 8 * 1024 * 1024,
+    "youtube": 16 * 1024 * 1024,
 }
 YTDLP_THROTTLED_RATE_BPS = 0
 YTDLP_THROTTLED_RATE_BPS_BY_SITE = {
@@ -539,7 +572,7 @@ GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
 GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
-IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1", "avbebe", "tktube")
+IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1", "avbebe", "tktube", "bilibili")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
 STOP_REQUEST_TASK_STATES = frozenset(("PAUSE_REQUESTED", "DELETE_REQUESTED"))
@@ -608,6 +641,10 @@ TRACE_LOG_CONTEXTS = frozenset((
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
     "page fallback retry",
+    "bilibili yt-dlp route selected",
+    "facebook yt-dlp route selected",
+    "instagram yt-dlp route selected",
+    "youtube yt-dlp route selected",
     "instagram savereels fallback",
     "instagram extractor fallback",
     "facebook extractor fallback",
@@ -1196,6 +1233,20 @@ def _normalize_download_url(url):
         query = [(key, value) for key, value in query if key not in ("list", "index", "start_radio", "pp", "feature")]
     normalized_query = urllib.parse.urlencode(query, doseq=True)
     return urllib.parse.urlunsplit((scheme, netloc, parsed.path, normalized_query, ""))
+
+
+def _split_inline_download_url_and_title(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return "", ""
+    match = re.search(r"https?://[^\s<>\"]+", raw, re.IGNORECASE)
+    if not match:
+        return "", raw
+    url = match.group(0).rstrip(".,;，。；、")
+    title = (raw[:match.start()] + " " + raw[match.end():]).strip()
+    title = re.sub(r"^[\-:：|｜\s]+|[\-:：|｜\s]+$", "", title).strip()
+    title = title.strip("\"'“”‘’")
+    return url, title
 
 
 def _parse_mega_public_file_parts(mega_client, url):
@@ -3771,6 +3822,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "hanime1.me",
     "hanimeone.me",
     "anime1",
+    "bilibili.com",
     "instagram.com",
     "facebook.com",
     "threads.net",
@@ -3814,6 +3866,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "gimy01.tv",
     "avbebe.com",
     "avjoy.me",
+    "bilibili.com",
     "goodav17.com",
     "njavtv.com",
     "missav",
@@ -4535,6 +4588,67 @@ def _make_ytdlp_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_
     if origin:
         headers["Origin"] = origin
     return headers
+
+
+def _detect_browser_cookie_sources():
+    """Return yt-dlp cookiesfrombrowser candidates without requiring a browser."""
+    candidates = []
+    for browser in ("edge", "chrome", "firefox"):
+        candidates.append((browser,))
+    return candidates
+
+
+def _preferred_browser_cookie_sources(preferred_browsers=("edge", "chrome", "firefox")):
+    detected_sources = _detect_browser_cookie_sources()
+    return [
+        source
+        for browser in preferred_browsers
+        for source in detected_sources
+        if source and source[0] == browser
+    ]
+
+
+def _build_bilibili_ytdlp_route_options(parsed_url):
+    site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'www.bilibili.com'}"
+    return {
+        "noplaylist": True,
+        "format": (
+            "bestvideo[height>=720][height<=2160][ext=mp4]+bestaudio[ext=m4a]/"
+            "bestvideo[height>=720][height<=2160]+bestaudio/"
+            "best[height>=720][height<=2160][ext=mp4]/"
+            "best[height>=720][height<=2160]"
+        ),
+        "merge_output_format": "mp4",
+        "concurrent_fragment_downloads": _ytdlp_generic_concurrency_for_site("bilibili"),
+        "http_chunk_size": _ytdlp_http_chunk_size_for_site("bilibili"),
+        "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
+    }
+
+
+def _build_youtube_ytdlp_route_options(parsed_url):
+    site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'www.youtube.com'}"
+    return {
+        "noplaylist": True,
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "concurrent_fragment_downloads": _ytdlp_generic_concurrency_for_site("youtube"),
+        "http_chunk_size": _ytdlp_http_chunk_size_for_site("youtube"),
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
+    }
+
+
+def _build_social_ytdlp_route_options(parsed_url, source_site):
+    site = str(source_site or "").strip().lower()
+    site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+    return {
+        "noplaylist": True,
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "concurrent_fragment_downloads": _ytdlp_generic_concurrency_for_site(site),
+        "http_chunk_size": _ytdlp_http_chunk_size_for_site(site),
+        "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
+    }
 
 
 def _make_site_root_headers(site_root, referer=None, user_agent=DEFAULT_USER_AGENT):
@@ -6091,7 +6205,11 @@ class DownloadManagerApp:
         if not self.url_entry:
             return
         self.persist_save_dir()
-        new_url = self.url_entry.get().strip()
+        raw_input = self.url_entry.get().strip()
+        new_url, inline_title = _split_inline_download_url_and_title(raw_input)
+        if not new_url:
+            new_url = raw_input
+            inline_title = ""
         if not new_url:
             self._show_warning(t("new_url"))
             return
@@ -6112,7 +6230,7 @@ class DownloadManagerApp:
             self._start_video_search_download(new_url, is_mp3=is_mp3)
             return
         if is_mp3 and not ffmpeg_ok:
-            self.download_ffmpeg_interactive(lambda: self._final_add_download(new_url, is_mp3))
+            self.download_ffmpeg_interactive(lambda: self._final_add_download(new_url, is_mp3, inline_title or None))
             return
 
         def fetch_anime1():
@@ -6256,9 +6374,10 @@ class DownloadManagerApp:
             try:
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(new_url, impersonate="chrome110", timeout=15, headers={"Referer": new_url})
-                drama_title, episodes, episode_fallbacks = _collect_movieffm_drama_episodes(resp.text, new_url, "MovieFFM")
+                page_text = _response_text_utf8(resp)
+                drama_title, episodes, episode_fallbacks = _collect_movieffm_drama_episodes(page_text, new_url, "MovieFFM")
                 if not episodes:
-                    page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(resp.text, drama_title)
+                    page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(page_text, drama_title)
                     if not candidates and not player_data and not external_source_urls:
                         self._schedule_warning(t("msg_fetch_movieffm_empty"))
                         return
@@ -6336,7 +6455,8 @@ class DownloadManagerApp:
             try:
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(new_url, impersonate="chrome110", timeout=15, headers={"Referer": new_url})
-                _, detail_pages = _collect_movieffm_tvshow_detail_pages(resp.text, new_url, "MovieFFM")
+                page_text = _response_text_utf8(resp)
+                _, detail_pages = _collect_movieffm_tvshow_detail_pages(page_text, new_url, "MovieFFM")
                 if not detail_pages:
                     self._schedule_warning(t("msg_fetch_movieffm_empty"))
                     return
@@ -6344,7 +6464,8 @@ class DownloadManagerApp:
                 seen_urls = set()
                 for detail_url, _season_name in detail_pages:
                     detail_resp = c_req.get(detail_url, impersonate="chrome110", timeout=15, headers={"Referer": detail_url})
-                    _drama_title, drama_episodes, episode_fallbacks = _collect_movieffm_drama_episodes(detail_resp.text, detail_url, "MovieFFM")
+                    detail_text = _response_text_utf8(detail_resp)
+                    _drama_title, drama_episodes, episode_fallbacks = _collect_movieffm_drama_episodes(detail_text, detail_url, "MovieFFM")
                     for ep_url, ep_name in drama_episodes:
                         if ep_url in seen_urls:
                             continue
@@ -6387,7 +6508,8 @@ class DownloadManagerApp:
             try:
                 c_req = get_curl_cffi_requests()
                 resp = c_req.get(new_url, impersonate="chrome110", timeout=15, headers={"Referer": new_url})
-                page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(resp.text, "MovieFFM")
+                page_text = _response_text_utf8(resp)
+                page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(page_text, "MovieFFM")
                 if not candidates and not player_data and not external_source_urls:
                     self._schedule_warning(t("msg_fetch_movieffm_empty"))
                     return
@@ -6885,10 +7007,15 @@ class DownloadManagerApp:
         if "mega.nz" in lowered or "mega.co.nz" in lowered:
             self._start_background_parse(fetch_mega_single)
             return
-        self._final_add_download(new_url, is_mp3=is_mp3)
+        self._final_add_download(new_url, is_mp3=is_mp3, custom_name=inline_title or None)
         return
 
     def _final_add_download(self, url, is_mp3, custom_name=None, source_site=None, extra_task_data=None):
+        inline_url, inline_title = _split_inline_download_url_and_title(url)
+        if inline_url:
+            url = inline_url
+            if not custom_name and inline_title:
+                custom_name = inline_title
         url = _normalize_download_url(url)
         if not url:
             write_error_log(
@@ -7700,6 +7827,7 @@ class DownloadManagerApp:
             "anime1.pw": "anime1",
             "avbebe.com": "avbebe",
             "avjoy.me": "avjoy",
+            "bilibili.com": "bilibili",
             "goodav17.com": "goodav17",
             "njavtv.com": "njavtv",
             "xiaoyakankan.io": "xiaoyakankan",
@@ -15331,6 +15459,90 @@ class DownloadManagerApp:
             if last_exc:
                 raise last_exc
 
+        def _extract_ytdlp_page_title(target_url, fallback_title="", cookie_sources=None):
+            module = get_yt_dlp_module()
+            if module is None:
+                return str(fallback_title or "").strip()
+            attempt_sources = [None]
+            for source in cookie_sources or []:
+                if source not in attempt_sources:
+                    attempt_sources.append(source)
+            last_exc = None
+            for source in attempt_sources:
+                probe_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "skip_download": True,
+                    "nocheckcertificate": True,
+                    "http_headers": dict(ydl_opts.get("http_headers") or _make_ytdlp_http_headers()),
+                    "extractor_args": copy.deepcopy(ydl_opts.get("extractor_args") or {}),
+                }
+                if source:
+                    probe_opts["cookiesfrombrowser"] = source
+                try:
+                    with ytdl_init_lock:
+                        ydl = module.YoutubeDL(probe_opts)
+                    info = ydl.extract_info(target_url, download=False)
+                    if isinstance(info, dict):
+                        for key in ("fulltitle", "title", "alt_title"):
+                            title = str(info.get(key) or "").strip()
+                            if title:
+                                return title
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if last_exc:
+                write_error_log("yt-dlp title probe failed", last_exc, url=target_url, item_id=item_id)
+            return str(fallback_title or "").strip()
+
+        def _run_ytdlp_site_route(
+            target_url,
+            *,
+            source_site,
+            route_options,
+            cookie_sources=None,
+            title_cleaner=None,
+            source_page=None,
+            fallback_urls=None,
+            log_context=None,
+        ):
+            site = str(source_site or "").strip().lower()
+            ydl_opts.update(route_options or {})
+            current_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
+            probed_title = _extract_ytdlp_page_title(target_url, fallback_title=current_title, cookie_sources=cookie_sources)
+            fallback_title = current_title or default_short_name_for_url(target_url, is_mp3=is_mp3)
+            if callable(title_cleaner):
+                page_title = title_cleaner(probed_title, fallback=fallback_title)
+            else:
+                page_title = re.sub(r"\s+", " ", str(probed_title or fallback_title)).strip() or fallback_title
+            _set_task_identity(
+                name=page_title,
+                source_site=site,
+                source_page=source_page or target_url,
+                fallback_urls=fallback_urls or [],
+            )
+            safe_route_name = _safe_output_stem(page_title, fallback=default_short_name_for_url(target_url, is_mp3=is_mp3))
+            ydl_opts["outtmpl"] = {"default": f"{safe_route_name}.%(ext)s"}
+            route_log_context = log_context or f"{site or 'site'} yt-dlp route selected"
+            write_error_log(
+                route_log_context,
+                Exception(route_log_context),
+                url=target_url,
+                item_id=item_id,
+                title=page_title,
+                cookies=bool(cookie_sources),
+                format=ydl_opts.get("format"),
+            )
+            try:
+                _run_yt_dlp(target_url)
+            except Exception as exc:
+                if site == "bilibili" and "requested format is not available" in str(exc).lower():
+                    raise Exception("Bilibili 未取得 720p 以上可下載影片；請提供有效登入 cookies 或改用有 720p 權限的帳號後重試") from exc
+                raise
+            if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "DELETED":
+                raise KeyboardInterrupt()
+            self._mark_task_finished(item_id)
+
         def _download_manifest_with_generic_ytdlp(target_url, referer=None, origin=None):
             ydl_opts["http_headers"] = _make_hls_http_headers(referer=referer, origin=origin)
             ydl_opts["outtmpl"] = {"default": f"{safe_name}.%(ext)s"}
@@ -15441,6 +15653,44 @@ class DownloadManagerApp:
             if updates:
                 self._update_task_state_entry(task, **updates)
 
+        def _dispatch_manifest_download(
+            media_url,
+            *,
+            name=None,
+            source_site=None,
+            source_page=None,
+            fallback_urls=None,
+            referer=None,
+            origin=None,
+            default_route="generic",
+            force_ffmpeg=False,
+        ):
+            nonlocal safe_name
+            site = source_site or _task_source_site_name(task)
+            _set_task_identity(
+                name=name,
+                source_site=site,
+                source_page=source_page,
+                fallback_urls=fallback_urls,
+            )
+            if name and not _looks_like_garbled_text(name):
+                safe_name = _safe_output_stem(
+                    _task_field_value(task, "short_name") or _task_field_value(task, "name") or name,
+                    fallback=safe_name,
+                )
+            effective_fallbacks = _dedupe_download_urls(
+                fallback_urls if fallback_urls is not None else _task_field_value(task, "fallback_urls", []),
+                primary_url=media_url,
+            )
+            self._log_m3u8_route_selected(task, item_id, media_url, source_site=site, fallback_urls=effective_fallbacks)
+            _download_manifest_with_site_strategy(
+                media_url,
+                referer=referer,
+                origin=origin,
+                default_route=default_route,
+                force_ffmpeg=force_ffmpeg,
+            )
+
         def _retry_next_page_fallback(reason, exc=None):
             current_url = _normalize_download_url(url)
             fallback_candidates = _dedupe_download_urls(
@@ -15528,27 +15778,15 @@ class DownloadManagerApp:
                 )
                 return True
             if stream_url:
-                _set_task_identity(
+                _dispatch_manifest_download(
+                    stream_url,
                     name=display_name,
                     source_site=source_site,
                     source_page=source_page or url,
                     fallback_urls=stream_fallback_urls,
-                )
-                self._download_routed_media_url(
-                    task,
-                    item_id,
-                    stream_url,
-                    save_dir,
-                    display_name,
-                    is_mp3=is_mp3,
-                    source_site=source_site,
-                    fallback_urls=stream_fallback_urls,
                     referer=referer or url,
                     origin=origin,
-                    manifest_downloader=_download_manifest_with_site_strategy,
-                    manifest_default_route=manifest_default_route,
-                    headers=headers,
-                    session=session,
+                    default_route=manifest_default_route,
                 )
                 return True
             if media_url:
@@ -15733,21 +15971,36 @@ class DownloadManagerApp:
             self._download_mega_public_file(item_id, url, save_dir, is_mp3=is_mp3)
             return
         if any(host in parsed_url.netloc for host in ("instagram.com", "facebook.com", "threads.net")):
-            preferred_social_browsers = ("edge", "chrome", "firefox")
-            detected_social_sources = _detect_browser_cookie_sources()
-            social_cookie_sources = [
-                source
-                for browser in preferred_social_browsers
-                for source in detected_social_sources
-                if source and source[0] == browser
-            ]
+            social_cookie_sources = _preferred_browser_cookie_sources()
             if social_cookie_sources:
                 ydl_opts.setdefault("cookiesfrombrowser", social_cookie_sources[0])
         is_youtube = any(host in parsed_url.netloc for host in ("youtube.com", "youtu.be"))
         if is_youtube:
-            use_impersonate = False
-            ydl_opts["noplaylist"] = True
-            _set_task_identity(source_site="youtube")
+            self._set_task_parse_ui(item_id, message="正在解析 YouTube...")
+            _run_ytdlp_site_route(
+                url,
+                source_site="youtube",
+                route_options=_build_youtube_ytdlp_route_options(parsed_url),
+                source_page=url,
+                fallback_urls=[],
+                log_context="youtube yt-dlp route selected",
+            )
+            return
+
+        if _is_bilibili_video_url(url):
+            self._set_task_parse_ui(item_id, message="正在解析 Bilibili...")
+            social_cookie_sources = _preferred_browser_cookie_sources()
+            _run_ytdlp_site_route(
+                url,
+                source_site="bilibili",
+                route_options=_build_bilibili_ytdlp_route_options(parsed_url),
+                cookie_sources=social_cookie_sources,
+                title_cleaner=_clean_bilibili_title,
+                source_page=url,
+                fallback_urls=[],
+                log_context="bilibili yt-dlp route selected",
+            )
+            return
 
         normalized_url = _normalize_download_url(url)
         forced_m3u8_site = _resolve_forced_m3u8_site(normalized_url, task)
@@ -15761,9 +16014,9 @@ class DownloadManagerApp:
                 if parsed_ref.scheme and parsed_ref.netloc:
                     origin = f"{parsed_ref.scheme}://{parsed_ref.netloc}"
             ydl_opts["http_headers"] = _make_hls_http_headers(referer=referer, origin=origin)
-            self._log_m3u8_route_selected(task, item_id, url, source_site=forced_m3u8_site)
-            _download_manifest_with_site_strategy(
+            _dispatch_manifest_download(
                 url,
+                source_site=forced_m3u8_site,
                 referer=referer,
                 origin=origin,
                 default_route="ffmpeg",
@@ -15778,15 +16031,10 @@ class DownloadManagerApp:
                 origin = f"{parsed_referer.scheme}://{parsed_referer.netloc}"
             else:
                 origin = f"{parsed_url.scheme}://{parsed_url.netloc}" if parsed_url.scheme and parsed_url.netloc else ""
-            self._log_m3u8_route_selected(
-                task,
-                item_id,
+            _dispatch_manifest_download(
                 url,
                 source_site=_task_source_site_name(task),
                 fallback_urls=_dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=url),
-            )
-            _download_manifest_with_site_strategy(
-                url,
                 referer=referer,
                 origin=origin,
                 force_ffmpeg=(
@@ -15922,11 +16170,12 @@ class DownloadManagerApp:
             if title_m:
                 raw_title = html.unescape(title_m.group(1)).strip()
                 clean_title = raw_title.split(" - ")[0].strip() or short_name
-            _set_task_identity(name=clean_title, source_site="jable")
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中", self._ui_text("eta_found_stream", "已取得串流網址"))
-            self._log_m3u8_route_selected(task, item_id, url, source_site="jable", fallback_urls=[])
-            _download_manifest_with_site_strategy(
+            _dispatch_manifest_download(
                 url,
+                name=clean_title,
+                source_site="jable",
+                fallback_urls=[],
                 referer="https://jable.tv/",
                 origin="https://jable.tv",
                 default_route="ffmpeg",
@@ -15953,10 +16202,11 @@ class DownloadManagerApp:
             if code_m:
                 title = f"{code_m.group(1).upper()}-{code_m.group(2)}"
             title = _extract_html_title(resp.text, title)
-            _set_task_identity(name=title, source_site="njavtv")
-            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="njavtv", fallback_urls=[])
-            _download_manifest_with_site_strategy(
+            _dispatch_manifest_download(
                 stream_url,
+                name=title,
+                source_site="njavtv",
+                fallback_urls=[],
                 referer=url,
                 origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
                 default_route=_gimy_manifest_default_route(stream_url),
@@ -16265,6 +16515,7 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, key="eta_site_movieffm", fallback="正在解析 MovieFFM 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": "https://www.movieffm.net/"})
+            page_text = _response_text_utf8(resp)
             def _movieffm_api_fallback_candidates(page_text, page_link):
                 post_id_match = re.search(r"\bpostid\s*:\s*(\d+)", str(page_text or ""), re.IGNORECASE)
                 post_id = str(post_id_match.group(1) or "").strip() if post_id_match else ""
@@ -16331,8 +16582,8 @@ class DownloadManagerApp:
                 )
                 self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
-            page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(resp.text, short_name)
-            api_candidates, api_external_source_urls = _movieffm_api_fallback_candidates(resp.text, url)
+            page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(page_text, short_name)
+            api_candidates, api_external_source_urls = _movieffm_api_fallback_candidates(page_text, url)
             for candidate in api_candidates:
                 if candidate not in candidates:
                     candidates.append(candidate)
@@ -16364,12 +16615,14 @@ class DownloadManagerApp:
             )
             if not preferred_url or not has_reachable:
                 raise Exception("MovieFFM stream host did not resolve")
-            _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=ordered_fallbacks)
-            self._log_m3u8_route_selected(task, item_id, preferred_url, source_site="movieffm", fallback_urls=ordered_fallbacks)
             parsed_page = urllib.parse.urlsplit(url)
             page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
-            _download_manifest_with_site_strategy(
+            _dispatch_manifest_download(
                 preferred_url,
+                name=page_title,
+                source_site="movieffm",
+                source_page=url,
+                fallback_urls=ordered_fallbacks,
                 referer=url,
                 origin=page_origin,
                 force_ffmpeg=_should_use_ffmpeg_for_movieffm_manifest(preferred_url),
@@ -16380,6 +16633,7 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, key="eta_site_movieffm", fallback="正在解析 MovieFFM 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
+            page_text = _response_text_utf8(resp)
             def _movieffm_api_fallback_candidates(page_text, page_link):
                 post_id_match = re.search(r"\bpostid\s*:\s*(\d+)", str(page_text or ""), re.IGNORECASE)
                 post_id = str(post_id_match.group(1) or "").strip() if post_id_match else ""
@@ -16419,10 +16673,10 @@ class DownloadManagerApp:
                     if _looks_like_manifest_url(embed_url) or _looks_like_http_media_url(embed_url):
                         manifest_candidates.append(embed_url)
                 return _dedupe_download_urls(manifest_candidates), _dedupe_download_urls(external_candidates)
-            drama_title, episodes, episode_fallbacks = _collect_movieffm_drama_episodes(resp.text, url, short_name or "MovieFFM")
+            drama_title, episodes, episode_fallbacks = _collect_movieffm_drama_episodes(page_text, url, short_name or "MovieFFM")
             if not episodes:
-                page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(resp.text, drama_title or short_name)
-                api_candidates, api_external_source_urls = _movieffm_api_fallback_candidates(resp.text, url)
+                page_title, candidates, external_source_urls, player_data = _extract_movieffm_playback_candidates(page_text, drama_title or short_name)
+                api_candidates, api_external_source_urls = _movieffm_api_fallback_candidates(page_text, url)
                 for candidate in api_candidates:
                     if candidate not in candidates:
                         candidates.append(candidate)
@@ -16450,12 +16704,14 @@ class DownloadManagerApp:
                 preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(candidates[0], candidates[1:], source_site="movieffm")
                 if not preferred_url or not has_reachable:
                     raise Exception("MovieFFM stream host did not resolve")
-                _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=ordered_fallbacks)
-                self._log_m3u8_route_selected(task, item_id, preferred_url, source_site="movieffm", fallback_urls=ordered_fallbacks)
                 parsed_page = urllib.parse.urlsplit(url)
                 page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
-                _download_manifest_with_site_strategy(
+                _dispatch_manifest_download(
                     preferred_url,
+                    name=page_title,
+                    source_site="movieffm",
+                    source_page=url,
+                    fallback_urls=ordered_fallbacks,
                     referer=url,
                     origin=page_origin,
                     force_ffmpeg=_should_use_ffmpeg_for_movieffm_manifest(preferred_url),
@@ -17293,10 +17549,12 @@ class DownloadManagerApp:
                 )
                 raise Exception("Failed to extract Avbebe hgcloud stream URL")
             fallback_urls = _dedupe_download_urls(valid_stream_candidates[1:], primary_url=stream_url)
-            _set_task_identity(name=page_title, source_site="avbebe", source_page=task.get("source_page") or url, fallback_urls=fallback_urls)
-            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
-            _download_manifest_with_site_strategy(
+            _dispatch_manifest_download(
                 stream_url,
+                name=page_title,
+                source_site="avbebe",
+                source_page=task.get("source_page") or url,
+                fallback_urls=fallback_urls,
                 referer=hgcloud_embed_url,
                 origin=embed_origin,
                 default_route="ffmpeg",
@@ -17335,10 +17593,12 @@ class DownloadManagerApp:
                 raise Exception("Failed to extract Avbebe playable iframe stream URL")
             page_title = _clean_avbebe_title(_extract_html_title(resp.text, task.get("name") or short_name or "Avbebe"), task.get("name") or short_name or "Avbebe")
             fallback_urls = _dedupe_download_urls(valid_stream_candidates[1:], primary_url=stream_url)
-            _set_task_identity(name=page_title, source_site="avbebe", source_page=task.get("source_page") or url, fallback_urls=fallback_urls)
-            self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
-            _download_manifest_with_site_strategy(
+            _dispatch_manifest_download(
                 stream_url,
+                name=page_title,
+                source_site="avbebe",
+                source_page=task.get("source_page") or url,
+                fallback_urls=fallback_urls,
                 referer=url,
                 origin=site_root,
                 default_route="ffmpeg",
@@ -17423,10 +17683,12 @@ class DownloadManagerApp:
                     [candidate for candidate in valid_playable_iframe_streams if candidate != stream_url],
                     primary_url=stream_url,
                 )
-                _set_task_identity(name=page_title, source_site="avbebe", source_page=url, fallback_urls=fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
-                _download_manifest_with_site_strategy(
+                _dispatch_manifest_download(
                     stream_url,
+                    name=page_title,
+                    source_site="avbebe",
+                    source_page=url,
+                    fallback_urls=fallback_urls,
                     referer=stream_referer,
                     origin=stream_origin,
                     default_route="ffmpeg",
@@ -17462,10 +17724,12 @@ class DownloadManagerApp:
                 stream_referer = candidate_referers.get(_normalize_download_url(stream_url), url) or url
                 referer_parts = urllib.parse.urlsplit(stream_referer)
                 stream_origin = f"{referer_parts.scheme}://{referer_parts.netloc}" if referer_parts.scheme and referer_parts.netloc else site_root
-                _set_task_identity(name=page_title, source_site="avbebe", source_page=url, fallback_urls=fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="avbebe", fallback_urls=fallback_urls)
-                _download_manifest_with_site_strategy(
+                _dispatch_manifest_download(
                     stream_url,
+                    name=page_title,
+                    source_site="avbebe",
+                    source_page=url,
+                    fallback_urls=fallback_urls,
                     referer=stream_referer,
                     origin=stream_origin,
                     default_route="ffmpeg",
@@ -17551,10 +17815,12 @@ class DownloadManagerApp:
                 self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
                 self._download_direct_media(item_id, direct_media_url, save_dir, is_mp3=is_mp3, referer=url)
                 return
-            _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=candidates[1:] or direct_media_candidates)
-            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="missav")
-            _download_manifest_with_site_strategy(
+            _dispatch_manifest_download(
                 candidates[0],
+                name=page_title,
+                source_site="missav",
+                source_page=url,
+                fallback_urls=candidates[1:] or direct_media_candidates,
                 referer=url,
                 origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
             )
@@ -17697,10 +17963,12 @@ class DownloadManagerApp:
             stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
             media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
             if stream_url:
-                _set_task_identity(name=page_title, source_site="javfilms", source_page=url, fallback_urls=stream_fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="javfilms", fallback_urls=stream_fallback_urls)
-                _download_manifest_with_site_strategy(
+                _dispatch_manifest_download(
                     stream_url,
+                    name=page_title,
+                    source_site="javfilms",
+                    source_page=url,
+                    fallback_urls=stream_fallback_urls,
                     referer=url,
                     origin=site_root,
                     default_route="generic",
@@ -17836,20 +18104,24 @@ class DownloadManagerApp:
             stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
             page_media_url, page_media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
             if stream_url:
-                _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=stream_fallback_urls)
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18av", fallback_urls=stream_fallback_urls)
-                _download_manifest_with_site_strategy(
+                _dispatch_manifest_download(
                     stream_url,
+                    name=page_title,
+                    source_site="18av",
+                    source_page=url,
+                    fallback_urls=stream_fallback_urls,
                     referer=url,
                     origin=site_root,
                 )
                 return
             stream_url, media_url, player_probe_url, protected_player = _resolve_18av_protected_player_media(url, resp.text)
             if stream_url:
-                _set_task_identity(name=page_title, source_site="18av", source_page=url, fallback_urls=[])
-                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="18av", fallback_urls=[])
-                _download_manifest_with_site_strategy(
+                _dispatch_manifest_download(
                     stream_url,
+                    name=page_title,
+                    source_site="18av",
+                    source_page=url,
+                    fallback_urls=[],
                     referer=url,
                     origin=site_root,
                 )
@@ -18252,6 +18524,16 @@ class DownloadManagerApp:
                 write_error_log("instagram savereels fallback failed", savereels_exc, url=url, item_id=item_id)
             write_error_log("instagram extractor fallback", Exception("Instagram video URL missing; falling back to yt-dlp"), url=url, item_id=item_id)
             self._set_task_parse_ui(item_id, message="Instagram 直連解析失敗，改用 yt-dlp...")
+            _run_ytdlp_site_route(
+                url,
+                source_site="instagram",
+                route_options=_build_social_ytdlp_route_options(parsed_url, "instagram"),
+                cookie_sources=social_cookie_sources,
+                source_page=url,
+                fallback_urls=[],
+                log_context="instagram yt-dlp route selected",
+            )
+            return
 
         if "facebook.com" in parsed_url.netloc and any(part in parsed_url.path for part in ("/reel/", "/watch/", "/videos/")):
             self._set_task_parse_ui(item_id, key="eta_site_facebook", fallback="正在解析 Facebook 頁面...")
@@ -18312,6 +18594,16 @@ class DownloadManagerApp:
                 return
             write_error_log("facebook extractor fallback", Exception("Facebook media URL missing; falling back to yt-dlp"), url=url, item_id=item_id)
             self._set_task_parse_ui(item_id, message="Facebook 直連解析失敗，改用 yt-dlp...")
+            _run_ytdlp_site_route(
+                url,
+                source_site="facebook",
+                route_options=_build_social_ytdlp_route_options(parsed_url, "facebook"),
+                cookie_sources=social_cookie_sources,
+                source_page=url,
+                fallback_urls=[],
+                log_context="facebook yt-dlp route selected",
+            )
+            return
 
         if "/status/" in parsed_url.path and any(host in parsed_url.netloc for host in ("twitter.com", "x.com", "fxtwitter.com", "vxtwitter.com")):
             self._set_task_parse_ui(item_id, key="eta_site_twitter", fallback="正在解析 Twitter/X 頁面...")
@@ -18430,10 +18722,13 @@ class DownloadManagerApp:
                 direct_m3u8 = re.search(r'(https?://[^\s"\'\\]+(?:surrit\.com|[^"\']+)\.m3u8[^\s"\']*)', resp.text)
                 if direct_m3u8:
                     url = html.unescape(direct_m3u8.group(1))
-                    _set_task_identity(name=clean_title)
                     self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
-                    _download_manifest_with_site_strategy(
+                    _dispatch_manifest_download(
                         url,
+                        name=clean_title,
+                        source_site="anime1",
+                        source_page=page_url,
+                        fallback_urls=[],
                         referer=page_url,
                         origin=page_origin,
                         default_route="ffmpeg",
@@ -18455,10 +18750,13 @@ class DownloadManagerApp:
                 if not m3u8_m:
                     raise Exception("Anime1 iframe did not contain an m3u8 URL")
                 url = m3u8_m.group(1)
-                _set_task_identity(name=clean_title)
                 self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
-                _download_manifest_with_site_strategy(
+                _dispatch_manifest_download(
                     url,
+                    name=clean_title,
+                    source_site="anime1",
+                    source_page=page_url,
+                    fallback_urls=[],
                     referer=page_url,
                     origin=page_origin,
                     default_route="ffmpeg",
