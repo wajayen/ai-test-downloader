@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260524-3100"
+APP_BUILD = "20260524-3110"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -406,7 +406,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj", "nnyy", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj", "missav", "nnyy", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -429,7 +429,9 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "ffzy-play",
     "yzzy",
     "bdzybf",
+    "surrit.com",
 )
+PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com",)
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "ijycnd.com",
     "huyall.com",
@@ -457,6 +459,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "avbebe": 24,
     "goodav17": 16,
     "hohoj": 16,
+    "missav": 12,
     "nnyy": 24,
     "xiaoyakankan": 24,
 }
@@ -474,6 +477,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
     "ggjav.com": 16,
+    "surrit.com": 12,
     "googleusercontent.com": 1,
 }
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
@@ -562,6 +566,8 @@ YTDLP_FRAGMENT_RETRIES = 30
 YTDLP_EXTRACTOR_RETRIES = 5
 YTDLP_FILE_ACCESS_RETRIES = 10
 YTDLP_PROGRESS_DELTA_SECONDS = 0.5
+YTDLP_WINDOWS_TRIM_FILE_NAME = 180
+YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT = 720
 YTDLP_RETRY_PROFILE_BY_SITE = {
     "bilibili": {"extractor_retries": 8, "fragment_retries": 40},
     "youtube": {"extractor_retries": 8, "fragment_retries": 40},
@@ -1331,6 +1337,19 @@ def _normalize_download_url(url):
         query = [(key, value) for key, value in query if key not in ("list", "index", "start_radio", "pp", "feature")]
     normalized_query = urllib.parse.urlencode(query, doseq=True)
     return urllib.parse.urlunsplit((scheme, netloc, parsed.path, normalized_query, ""))
+
+
+def _extract_youtube_video_id(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized)
+    netloc = parsed.netloc.lower()
+    if netloc in ("www.youtube.com", "youtube.com", "m.youtube.com") and parsed.path == "/watch":
+        return (urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("v") or [""])[0].strip()
+    if netloc == "youtu.be":
+        return parsed.path.strip("/").split("/", 1)[0].strip()
+    return ""
 
 
 def _split_inline_download_url_and_title(value):
@@ -4801,9 +4820,18 @@ def _build_youtube_ytdlp_route_options(parsed_url):
     site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'www.youtube.com'}"
     return {
         "noplaylist": True,
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best",
-        "merge_output_format": "mp4",
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        "format": (
+            "bestvideo*[height>=720]+bestaudio/"
+            "bestvideo[height>=720]+bestaudio/"
+            "best[height>=720]/"
+            "bestvideo*+bestaudio/"
+            "bestvideo+bestaudio/"
+            "best"
+        ),
+        "format_sort": ["res", "fps", "hdr", "vcodec", "br"],
+        "format_sort_force": True,
+        "merge_output_format": "mkv",
+        "extractor_args": {"youtube": {"player_client": ["android_vr", "web", "android"]}},
         "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
         **_build_ytdlp_route_profile("youtube"),
     }
@@ -4909,6 +4937,8 @@ def _build_ytdlp_download_opts(
         "ignoreerrors": False,
         "no_warnings": False,
         "quiet": True,
+        "windowsfilenames": os.name == "nt",
+        "trim_file_name": YTDLP_WINDOWS_TRIM_FILE_NAME,
         "http_headers": dict(http_headers or _make_ytdlp_http_headers()),
         "retry_sleep_functions": {
             "http": _ytdlp_retry_sleep_http,
@@ -9409,11 +9439,67 @@ class DownloadManagerApp:
             return "ffmpeg"
         return "generic"
 
-    def _can_accept_existing_output(self, task, item_id, output_path, temp=False):
+    def _expected_total_bytes_from_task(self, task):
+        for key in ("total_bytes", "expected_total_bytes", "remote_total_bytes"):
+            try:
+                value = int(_task_field_value(task, key, 0) or 0)
+            except Exception:
+                value = 0
+            if value > 0:
+                return value
+        return 0
+
+    def _file_size_matches_expected_total(self, output_path, expected_total_bytes):
+        try:
+            expected = int(expected_total_bytes or 0)
+        except Exception:
+            expected = 0
+        if expected <= 0:
+            return False
+        actual = self._get_existing_file_size(output_path)
+        if actual <= 0:
+            return False
+        tolerance = max(4096, int(expected * 0.001))
+        return abs(actual - expected) <= tolerance
+
+    def _total_bytes_match(self, left_total_bytes, right_total_bytes):
+        try:
+            left = int(left_total_bytes or 0)
+            right = int(right_total_bytes or 0)
+        except Exception:
+            return False
+        if left <= 0 or right <= 0:
+            return False
+        tolerance = max(4096, int(max(left, right) * 0.001))
+        return abs(left - right) <= tolerance
+
+    def _can_accept_existing_output(self, task, item_id, output_path, temp=False, expected_total_bytes=None):
         if not self._has_nonempty_file(output_path):
             return False
         if temp:
             return True
+        expected_total = int(expected_total_bytes or 0) or self._expected_total_bytes_from_task(task)
+        if not self._file_size_matches_expected_total(output_path, expected_total):
+            write_error_log(
+                "existing output rejected",
+                Exception("existing output size does not match current remote total"),
+                item_id=item_id,
+                output=output_path,
+                local_size=self._get_existing_file_size(output_path),
+                expected_total_bytes=expected_total,
+                source_site=_task_source_site_name(task) or None,
+            )
+            return False
+        if self._is_low_quality_youtube_output(task, output_path):
+            write_error_log(
+                "youtube existing output rejected",
+                Exception("existing YouTube output is below the minimum accepted height"),
+                item_id=item_id,
+                output=output_path,
+                source_site=_task_source_site_name(task) or None,
+                min_height=YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT,
+            )
+            return False
         if self._is_incomplete_hls_video_artifact(task, output_path):
             write_error_log(
                 "existing output rejected",
@@ -9424,6 +9510,24 @@ class DownloadManagerApp:
             )
             return False
         return True
+
+    def _is_low_quality_youtube_output(self, task, output_path):
+        if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
+            return False
+        source_site = _task_source_site_name(task)
+        source_url = _normalize_download_url(_task_field_value(task, "url", "") or _task_field_value(task, "source_page", ""))
+        host = urllib.parse.urlsplit(source_url).netloc.lower() if source_url else ""
+        if source_site != "youtube" and not any(marker in host for marker in ("youtube.com", "youtu.be")):
+            return False
+        info = self._probe_media_info(output_path)
+        if not info.get("valid"):
+            return True
+        video_stream = next((stream for stream in info.get("streams") or [] if stream.get("codec_type") == "video"), {})
+        try:
+            height = int(video_stream.get("height") or 0)
+        except Exception:
+            height = 0
+        return 0 < height < YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT
 
     def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None):
         source_site = _task_source_site_name(task)
@@ -9647,6 +9751,40 @@ class DownloadManagerApp:
             if time.time() >= deadline:
                 return ""
             time.sleep(0.5)
+
+    def _find_ytdlp_site_output_path(self, info, save_dir, safe_name, output_template_stem="", preferred_ext=None):
+        candidates = []
+        seen = set()
+
+        def add_candidate(path):
+            clean_path = str(path or "").strip()
+            if not clean_path:
+                return
+            if not os.path.isabs(clean_path) and save_dir:
+                clean_path = os.path.join(save_dir, clean_path)
+            norm_path = os.path.normcase(os.path.abspath(clean_path))
+            if norm_path in seen:
+                return
+            seen.add(norm_path)
+            candidates.append(clean_path)
+
+        for candidate in self._collect_yt_dlp_output_candidates(info, save_dir, safe_name, preferred_ext=preferred_ext):
+            add_candidate(candidate)
+        for stem in (output_template_stem, safe_name):
+            clean_stem = str(stem or "").strip()
+            if not clean_stem or not save_dir:
+                continue
+            pattern = os.path.join(save_dir, f"{glob.escape(clean_stem)}*")
+            for candidate in glob.glob(pattern):
+                base_name = os.path.basename(candidate)
+                if base_name.endswith((".part", ".ytdl", ".temp", ".tmp")) or ".part-" in base_name:
+                    continue
+                add_candidate(candidate)
+        existing = [candidate for candidate in candidates if self._has_nonempty_file(candidate)]
+        if not existing:
+            return ""
+        existing.sort(key=lambda path: (os.path.getmtime(path), self._get_existing_file_size(path)), reverse=True)
+        return existing[0]
 
     def _extract_domain(self, url):
         domain = urllib.parse.urlparse(url).netloc
@@ -10237,7 +10375,7 @@ class DownloadManagerApp:
                     "-v",
                     "error",
                     "-show_entries",
-                    "format=format_name,duration,size:stream=index,codec_type,codec_name,profile,pix_fmt,level,codec_tag_string",
+                    "format=format_name,duration,size:stream=index,codec_type,codec_name,profile,pix_fmt,level,codec_tag_string,width,height",
                     "-of",
                     "json",
                     path,
@@ -10893,19 +11031,20 @@ class DownloadManagerApp:
 
     def _load_resume_progress_info(self, progress_path):
         if not progress_path or not os.path.exists(progress_path):
-            return {"seconds": 0, "bytes": 0, "source_url": "", "resume_id": ""}
+            return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": ""}
         try:
             data = _load_json_with_backup(progress_path, {})
             if not isinstance(data, dict):
-                return {"seconds": 0, "bytes": 0, "source_url": "", "resume_id": ""}
+                return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": ""}
             return {
                 "seconds": max(float(data.get("seconds", 0) or 0), 0.0),
                 "bytes": max(int(data.get("bytes", 0) or 0), 0),
+                "total_bytes": max(int(data.get("total_bytes", 0) or 0), 0),
                 "source_url": str(data.get("source_url", "") or ""),
                 "resume_id": str(data.get("resume_id", "") or ""),
             }
         except Exception:
-            return {"seconds": 0, "bytes": 0, "source_url": "", "resume_id": ""}
+            return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": ""}
 
     def _normalize_resume_match_keys(self, resume_keys):
         keys = []
@@ -10964,6 +11103,7 @@ class DownloadManagerApp:
         seconds,
         source_url=None,
         bytes_done=None,
+        total_bytes=None,
         min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
         min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
         force=False,
@@ -10972,6 +11112,7 @@ class DownloadManagerApp:
             return
         seconds_value = max(float(seconds or 0), 0.0)
         bytes_value = max(int(bytes_done or 0), 0)
+        total_bytes_value = max(int(total_bytes or 0), 0)
         source_value = str(source_url or "")
         resume_id_value = self._normalize_resume_state_id(progress_path)
         min_interval_seconds = max(float(min_interval_seconds or 0.0), 0.0)
@@ -10984,6 +11125,7 @@ class DownloadManagerApp:
                 if cached:
                     last_seconds = float(cached.get("seconds", 0.0) or 0.0)
                     last_bytes = int(cached.get("bytes", 0) or 0)
+                    last_total_bytes = int(cached.get("total_bytes", 0) or 0)
                     last_source = str(cached.get("source_url", "") or "")
                     last_resume_id = str(cached.get("resume_id", "") or "")
                     last_saved_at = float(cached.get("saved_at", 0.0) or 0.0)
@@ -10997,6 +11139,7 @@ class DownloadManagerApp:
                         else:
                             seconds_value = max(seconds_value, last_seconds)
                             bytes_value = max(bytes_value, last_bytes)
+                            total_bytes_value = max(total_bytes_value, last_total_bytes)
                     if (
                         same_resume_target
                         and now - last_saved_at < min_interval_seconds
@@ -11006,6 +11149,7 @@ class DownloadManagerApp:
                         self._resume_progress_cache[progress_path] = {
                             "seconds": seconds_value,
                             "bytes": bytes_value,
+                            "total_bytes": total_bytes_value,
                             "source_url": source_value,
                             "resume_id": resume_id_value,
                             "saved_at": last_saved_at,
@@ -11030,14 +11174,17 @@ class DownloadManagerApp:
                 ):
                     persisted_seconds = float(persisted.get("seconds", 0.0) or 0.0)
                     persisted_bytes = int(persisted.get("bytes", 0) or 0)
+                    persisted_total_bytes = int(persisted.get("total_bytes", 0) or 0)
                     if self._should_prefer_lower_resume_progress(seconds_value, bytes_value, persisted_seconds, persisted_bytes):
                         pass
                     else:
                         seconds_value = max(seconds_value, persisted_seconds)
                         bytes_value = max(bytes_value, persisted_bytes)
+                        total_bytes_value = max(total_bytes_value, persisted_total_bytes)
         payload = {
             "seconds": seconds_value,
             "bytes": bytes_value,
+            "total_bytes": total_bytes_value,
             "source_url": source_value,
             "resume_id": resume_id_value,
             "updated_at": now,
@@ -11048,6 +11195,7 @@ class DownloadManagerApp:
                 self._resume_progress_cache[progress_path] = {
                     "seconds": seconds_value,
                     "bytes": bytes_value,
+                    "total_bytes": total_bytes_value,
                     "source_url": source_value,
                     "resume_id": resume_id_value,
                     "saved_at": now,
@@ -11990,7 +12138,7 @@ class DownloadManagerApp:
             if total_size and total_size > 0:
                 _set_task_aux_fields(task, downloaded_bytes=0, total_bytes=total_size)
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(0, total_size))
-            if (not is_mp3) and out_path and self._get_existing_file_size(out_path) >= total_size:
+            if (not is_mp3) and out_path and self._file_size_matches_expected_total(out_path, total_size):
                 self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
                 return
 
@@ -12093,7 +12241,16 @@ class DownloadManagerApp:
         total_info = self._probe_http_download_info(url, headers=headers, session=session)
         total_size = total_info.get("total_size", 0)
         range_supported = bool(total_info.get("range_supported"))
+        if total_size > 0:
+            _set_task_aux_fields(task, total_bytes=total_size)
+            self._update_task_state_entry(task, total_bytes=total_size)
         resume_bytes = self._get_existing_file_size(out_path)
+        resume_requested_for_output = self._is_resume_download_active(
+            task,
+            save_dir=os.path.dirname(out_path) or self.save_dir_var.get(),
+            is_mp3=bool(_task_field_value(task, "is_mp3", False)),
+            include_cached_resolved=True,
+        )
         if prefer_curl_stream:
             if resume_bytes > 0:
                 try:
@@ -12102,9 +12259,20 @@ class DownloadManagerApp:
                     pass
             resume_bytes = 0
             range_supported = False
-        if total_size > 0 and resume_bytes >= total_size:
+        if total_size > 0 and self._file_size_matches_expected_total(out_path, total_size):
             self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
             return
+        if total_size > 0 and resume_bytes > 0 and not resume_requested_for_output:
+            write_error_log(
+                "existing same-name output will be overwritten",
+                Exception("existing same-name output size differs from current remote total"),
+                url=url,
+                item_id=item_id,
+                output=out_path,
+                local_size=resume_bytes,
+                current_total_bytes=total_size,
+            )
+            resume_bytes = 0
         immediate_multipart = (
             not prefer_curl_stream
             and range_supported
@@ -12722,6 +12890,17 @@ class DownloadManagerApp:
         prefix = data[:128].lstrip()
         return "video/" in lowered_type or "application/octet-stream" in lowered_type
 
+    def _is_valid_parallel_hls_segment_media_bytes(self, data):
+        if not data or len(data) < 16:
+            return False
+        if data[0] == 0x47:
+            return True
+        return data[4:8] in (b"ftyp", b"moof", b"mdat", b"styp")
+
+    def _parallel_hls_allows_mislabelled_media(self, host):
+        host = str(host or "").lower()
+        return any(marker in host for marker in PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS)
+
     def _is_unsupported_parallel_hls_segment_payload(self, data, content_type=""):
         lowered_type = str(content_type or "").lower()
         if any(marker in lowered_type for marker in ("text/html", "image/", "application/json")):
@@ -12767,12 +12946,16 @@ class DownloadManagerApp:
                     data = resp.read(512)
             except Exception:
                 continue
-            if self._is_unsupported_parallel_hls_segment_payload(data, content_type):
+            allow_mislabelled_media = (
+                self._parallel_hls_allows_mislabelled_media(segment_host)
+                and self._is_valid_parallel_hls_segment_media_bytes(data)
+            )
+            if self._is_unsupported_parallel_hls_segment_payload(data, content_type) and not allow_mislabelled_media:
                 message = f"invalid HLS segment content: {content_type or 'unknown'}"
                 if "googleusercontent.com" in segment_host:
                     raise ParallelHlsUnsupportedSegmentContentException(message)
                 raise Exception(message)
-            if not self._is_valid_parallel_hls_segment_data(data, content_type):
+            if not (allow_mislabelled_media or self._is_valid_parallel_hls_segment_data(data, content_type)):
                 message = f"invalid HLS segment content: {content_type or 'unknown'}"
                 if "googleusercontent.com" in segment_host:
                     raise ParallelHlsUnsupportedSegmentContentException(message)
@@ -12963,7 +13146,11 @@ class DownloadManagerApp:
                     request_headers,
                     prefer_curl=bool(prefer_curl and not is_google_segment),
                 )
-                if not self._is_valid_parallel_hls_segment_data(data, content_type=content_type):
+                allow_mislabelled_media = (
+                    self._parallel_hls_allows_mislabelled_media(segment_host)
+                    and self._is_valid_parallel_hls_segment_media_bytes(data)
+                )
+                if not (allow_mislabelled_media or self._is_valid_parallel_hls_segment_data(data, content_type=content_type)):
                     if is_google_segment and self._is_unsupported_parallel_hls_segment_payload(data, content_type):
                         raise ParallelHlsUnsupportedSegmentContentException(
                             f"Google-backed HLS returned non-video segment content: {content_type or 'unknown'}"
@@ -13395,7 +13582,6 @@ class DownloadManagerApp:
             home_dir=native_work_dir,
             temp_dir=native_temp_dir,
             outtmpl=native_outtmpl,
-            concurrent_fragment_downloads=native_options["concurrent_fragment_downloads"],
             format_selector="best",
             http_headers=_make_hls_http_headers(referer=referer, origin=origin),
             hls_prefer_native=True,
@@ -13886,7 +14072,7 @@ class DownloadManagerApp:
         self._start_daemon_thread(probe_metadata)
 
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("movieffm", "nnyy", "xiaoyakankan") else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("missav", "movieffm", "nnyy", "xiaoyakankan") else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -13899,7 +14085,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("movieffm", "nnyy", "xiaoyakankan"):
+                    if source_site in ("missav", "movieffm", "nnyy", "xiaoyakankan"):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -14043,6 +14229,27 @@ class DownloadManagerApp:
                 except Exception:
                     total_duration = 0.0
             total_bytes = total_bytes_box.get("value")
+            stored_total_bytes = int(stored_info.get("total_bytes", 0) or 0)
+            if (
+                same_resume_target
+                and base_bytes > 0
+                and stored_total_bytes > 0
+                and total_bytes
+                and not self._total_bytes_match(stored_total_bytes, total_bytes)
+            ):
+                write_error_log(
+                    "resume total size mismatch reset",
+                    Exception("resume artifact total size differs from current page"),
+                    url=candidate_url,
+                    item_id=item_id,
+                    stored_total_bytes=stored_total_bytes,
+                    current_total_bytes=total_bytes,
+                    partial_size=partial_size,
+                    stored_bytes=stored_bytes,
+                    resume_mode=resume_mode,
+                )
+                base_bytes, resume_seconds = self._reset_resume_artifacts(temp_out_path, resume_out_path, merged_out_path, progress_path)
+                resume_mode = "reset_size_mismatch"
             if total_duration > 0 and total_bytes and base_bytes > 0:
                 estimated_resume_seconds = self._estimate_resume_seconds_from_bytes(base_bytes, total_bytes, total_duration)
                 if estimated_resume_seconds > 0:
@@ -14417,6 +14624,7 @@ class DownloadManagerApp:
                                 checkpoint_seconds,
                                 source_url=resume_key,
                                 bytes_done=checkpoint_bytes_done,
+                                total_bytes=active_total_bytes or total_bytes,
                                 min_interval_seconds=FFMPEG_RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
                                 min_bytes_delta=FFMPEG_RESUME_PROGRESS_MIN_BYTES_DELTA,
                             )
@@ -14517,6 +14725,7 @@ class DownloadManagerApp:
                                     recovered_seconds,
                                     source_url=resume_key,
                                     bytes_done=recovered_bytes,
+                                    total_bytes=total_bytes_box.get("value") or total_bytes,
                                     min_interval_seconds=0,
                                     min_bytes_delta=0,
                                     force=True,
@@ -15696,8 +15905,7 @@ class DownloadManagerApp:
                 try:
                     with ytdl_init_lock:
                         ydl = module.YoutubeDL(current_opts)
-                    ydl.download([target_url])
-                    return
+                    return ydl.extract_info(target_url, download=True)
                 except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
                     raise
                 except Exception as exc:
@@ -15769,7 +15977,15 @@ class DownloadManagerApp:
                 fallback_urls=fallback_urls or [],
             )
             safe_route_name = _safe_output_stem(page_title, fallback=default_short_name_for_url(target_url, is_mp3=is_mp3))
+            output_template_stem = safe_route_name
+            youtube_video_id = _extract_youtube_video_id(target_url) if site == "youtube" else ""
+            if youtube_video_id and f"[{youtube_video_id}]" not in output_template_stem:
+                output_template_stem = f"{output_template_stem} [{youtube_video_id}]"
             ydl_opts["outtmpl"] = {"default": f"{safe_route_name}.%(ext)s"}
+            if youtube_video_id:
+                ydl_opts["outtmpl"] = {"default": f"{output_template_stem} [%(format_id)s].%(ext)s"}
+            elif output_template_stem != safe_route_name:
+                ydl_opts["outtmpl"] = {"default": f"{output_template_stem}.%(ext)s"}
             route_log_context = log_context or f"{site or 'site'} yt-dlp route selected"
             write_error_log(
                 route_log_context,
@@ -15777,17 +15993,52 @@ class DownloadManagerApp:
                 url=target_url,
                 item_id=item_id,
                 title=page_title,
+                output_template=ydl_opts.get("outtmpl"),
                 cookies=bool(cookie_sources),
                 format=ydl_opts.get("format"),
+                format_sort=ydl_opts.get("format_sort"),
+                merge_output_format=ydl_opts.get("merge_output_format"),
             )
             try:
-                _run_yt_dlp(target_url)
+                download_info = _run_yt_dlp(target_url)
             except Exception as exc:
                 if site == "bilibili" and "requested format is not available" in str(exc).lower():
                     raise Exception("Bilibili 未取得 720p 以上可下載影片；請提供有效登入 cookies 或改用有 720p 權限的帳號後重試") from exc
                 raise
             if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "DELETED":
                 raise KeyboardInterrupt()
+            preferred_ext = ydl_opts.get("merge_output_format") or None
+            actual_output = self._find_ytdlp_site_output_path(
+                download_info,
+                save_dir,
+                safe_route_name,
+                output_template_stem=output_template_stem,
+                preferred_ext=preferred_ext,
+            )
+            if actual_output:
+                self._set_task_output_file(task, item_id, actual_output)
+                if self._is_low_quality_youtube_output(task, actual_output):
+                    media_info = self._probe_media_info(actual_output)
+                    video_stream = next((stream for stream in media_info.get("streams") or [] if stream.get("codec_type") == "video"), {})
+                    raise Exception(
+                        f"YouTube 下載結果低於 {YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT}p，"
+                        f"實際高度 {video_stream.get('height') or 0}p，未接受為完成"
+                    )
+                media_info = self._probe_media_info(actual_output)
+                video_stream = next((stream for stream in media_info.get("streams") or [] if stream.get("codec_type") == "video"), {})
+                write_error_log(
+                    f"{site or 'site'} yt-dlp output accepted",
+                    Exception(f"{site or 'site'} yt-dlp output accepted"),
+                    url=target_url,
+                    item_id=item_id,
+                    output=actual_output,
+                    height=video_stream.get("height"),
+                    width=video_stream.get("width"),
+                    format_id=(download_info or {}).get("format_id") if isinstance(download_info, dict) else None,
+                    requested_formats=(download_info or {}).get("requested_formats") if isinstance(download_info, dict) else None,
+                )
+            elif site == "youtube":
+                raise Exception("YouTube 下載完成後找不到實際輸出檔，未接受為完成")
             self._mark_task_finished(item_id)
 
         def _download_manifest_with_generic_ytdlp(target_url, referer=None, origin=None):
