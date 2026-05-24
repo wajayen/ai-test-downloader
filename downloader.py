@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260524-3110"
+APP_BUILD = "20260524-3120"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -592,6 +592,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "missav": 20,
     "njavtv": 20,
     "tktube": 20,
+    "youtube": 20,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
 HTTP_STREAM_CHUNK_SIZE = 4 * 1024 * 1024
@@ -613,6 +614,7 @@ HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
     "nnyy",
     "tktube",
     "xiaoyakankan",
+    "youtube",
 ))
 YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
     "99itv",
@@ -749,6 +751,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "facebook yt-dlp route selected",
     "instagram yt-dlp route selected",
     "youtube yt-dlp route selected",
+    "youtube multipart component download started",
+    "youtube yt-dlp output accepted",
     "instagram savereels fallback",
     "instagram extractor fallback",
     "facebook extractor fallback",
@@ -1350,6 +1354,33 @@ def _extract_youtube_video_id(url):
     if netloc == "youtu.be":
         return parsed.path.strip("/").split("/", 1)[0].strip()
     return ""
+
+
+def _extract_youtube_playlist_id(url):
+    if not isinstance(url, str):
+        return ""
+    raw = html.unescape(url).strip()
+    if not raw:
+        return ""
+    parsed = urllib.parse.urlsplit(raw)
+    netloc = parsed.netloc.lower()
+    if not (netloc in ("www.youtube.com", "youtube.com", "m.youtube.com") or netloc == "youtu.be"):
+        return ""
+    playlist_id = (urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("list") or [""])[0].strip()
+    if playlist_id and playlist_id.upper() != "WL":
+        return playlist_id
+    return ""
+
+
+def _youtube_playlist_url_for_id(playlist_id):
+    playlist_id = str(playlist_id or "").strip()
+    if not playlist_id:
+        return ""
+    return "https://www.youtube.com/playlist?list=" + urllib.parse.quote(playlist_id, safe="")
+
+
+def _is_youtube_radio_playlist_id(playlist_id):
+    return str(playlist_id or "").strip().upper().startswith("RD")
 
 
 def _split_inline_download_url_and_title(value):
@@ -3178,15 +3209,7 @@ def _avbebe_manifest_looks_downloadable(manifest_url, referer=None, origin=None,
         return False
     base_url = normalized
     lines = [line.strip() for line in manifest_text.splitlines() if line.strip()]
-    variant_url = ""
-    for index, line in enumerate(lines):
-        if line.startswith("#EXT-X-STREAM-INF"):
-            for next_line in lines[index + 1:]:
-                if not next_line.startswith("#"):
-                    variant_url = urllib.parse.urljoin(base_url, next_line)
-                    break
-        if variant_url:
-            break
+    variant_url, _variant_attrs = _select_highest_hls_variant_url(base_url, manifest_text)
     if variant_url:
         try:
             req = urllib.request.Request(variant_url, headers=headers)
@@ -4875,6 +4898,49 @@ def _make_hls_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_AG
     return headers
 
 
+def _parse_hls_attribute_line(line):
+    attrs = {}
+    payload = str(line or "").split(":", 1)[1] if ":" in str(line or "") else str(line or "")
+    for key, value in re.findall(r'([A-Z0-9-]+)=(".*?"|[^,]+)', payload):
+        attrs[key] = value.strip().strip('"')
+    return attrs
+
+
+def _hls_variant_quality_rank(attrs):
+    attrs = attrs or {}
+    try:
+        bandwidth = int(attrs.get("AVERAGE-BANDWIDTH") or attrs.get("BANDWIDTH") or 0)
+    except Exception:
+        bandwidth = 0
+    resolution = str(attrs.get("RESOLUTION") or "")
+    resolution_match = re.search(r"(\d+)\s*x\s*(\d+)", resolution, re.IGNORECASE)
+    pixel_count = 0
+    if resolution_match:
+        try:
+            pixel_count = int(resolution_match.group(1) or 0) * int(resolution_match.group(2) or 0)
+        except Exception:
+            pixel_count = 0
+    return (pixel_count, bandwidth)
+
+
+def _select_highest_hls_variant_url(master_url, playlist_text):
+    lines = [line.strip() for line in str(playlist_text or "").splitlines() if line.strip()]
+    variants = []
+    for index, line in enumerate(lines):
+        if not line.startswith("#EXT-X-STREAM-INF"):
+            continue
+        attrs = _parse_hls_attribute_line(line)
+        for next_line in lines[index + 1:]:
+            if not next_line or next_line.startswith("#"):
+                continue
+            variants.append((*_hls_variant_quality_rank(attrs), urllib.parse.urljoin(master_url, next_line), attrs))
+            break
+    if not variants:
+        return "", {}
+    _pixels, _bandwidth, variant_url, attrs = max(variants, key=lambda item: (item[0], item[1]))
+    return variant_url, attrs
+
+
 def _format_ffmpeg_header_lines(headers):
     return "".join(f"{key}: {value}\r\n" for key, value in (headers or {}).items() if value)
 
@@ -4921,6 +4987,8 @@ def _build_ytdlp_download_opts(
         "color": "never",
         "nopart": False,
         "continuedl": True,
+        "overwrites": False,
+        "nopostoverwrites": True,
         "nocheckcertificate": True,
         "retries": int(retries if retries is not None else YTDLP_DOWNLOAD_RETRIES),
         "fragment_retries": int(fragment_retries if fragment_retries is not None else YTDLP_FRAGMENT_RETRIES),
@@ -6435,6 +6503,89 @@ class DownloadManagerApp:
                 return
             self._start_video_search_download(new_url, is_mp3=is_mp3)
             return
+        youtube_playlist_id = _extract_youtube_playlist_id(new_url)
+
+        def fetch_youtube_playlist():
+            try:
+                is_radio_playlist = _is_youtube_radio_playlist_id(youtube_playlist_id)
+                playlist_url = new_url if is_radio_playlist else _youtube_playlist_url_for_id(youtube_playlist_id)
+                if not playlist_url:
+                    self._schedule_ui_call(lambda: self._final_add_download(new_url, is_mp3, inline_title or None))
+                    return
+                yt_dlp_module = get_yt_dlp_module()
+                if yt_dlp_module is None:
+                    self._schedule_ui_call(lambda: self._final_add_download(new_url, is_mp3, inline_title or None))
+                    return
+                current_video_id = _extract_youtube_video_id(new_url)
+                ydl_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "skip_download": True,
+                    "extract_flat": "in_playlist",
+                    "playlistend": 300,
+                    "ignoreerrors": True,
+                    "nocheckcertificate": True,
+                    "http_headers": _make_ytdlp_http_headers(referer="https://www.youtube.com/"),
+                    "extractor_args": {"youtube": {"player_client": ["web", "android"]}},
+                }
+                with ytdl_init_lock:
+                    ydl = yt_dlp_module.YoutubeDL(ydl_opts)
+                info = ydl.extract_info(playlist_url, download=False)
+                entries = []
+                seen = set()
+                for index, entry in enumerate((info or {}).get("entries") or [], start=1):
+                    if not isinstance(entry, dict):
+                        continue
+                    video_id = str(entry.get("id") or "").strip()
+                    entry_url = _normalize_download_url(entry.get("url") or entry.get("webpage_url") or "")
+                    if video_id:
+                        entry_url = f"https://www.youtube.com/watch?v={video_id}"
+                    if not entry_url or entry_url in seen:
+                        continue
+                    seen.add(entry_url)
+                    title = re.sub(r"\s+", " ", str(entry.get("title") or "").strip())
+                    if not title or title.lower() in {"[deleted video]", "[private video]"}:
+                        title = f"YouTube {'Song' if is_mp3 else 'EP'}{index:02d}"
+                    entries.append((entry_url, title))
+                if not entries:
+                    self._schedule_ui_call(lambda: self._final_add_download(new_url, is_mp3, inline_title or None))
+                    return
+                selected = entries[0]
+                if current_video_id:
+                    selected = next((entry for entry in entries if _extract_youtube_video_id(entry[0]) == current_video_id), selected)
+
+                def enqueue():
+                    ordered_entries = entries if is_radio_playlist or is_mp3 else _sort_download_targets_naturally(entries)
+                    selected_entry = selected if selected in ordered_entries else ordered_entries[0]
+                    if len(ordered_entries) > 1:
+                        playlist_title = re.sub(r"\s+", " ", str((info or {}).get("title") or "YouTube playlist").strip())
+                        unit = "首歌曲" if is_mp3 else "集"
+                        action = "整份清單" if is_mp3 else "整季"
+                        message = f"共找到 {len(ordered_entries)} {unit}，是否開始{action}下載？\n\n{playlist_title}"
+                        targets = ordered_entries if self._ask_warning_yesno(message) else [selected_entry]
+                    else:
+                        targets = [selected_entry]
+                    for target_url, title in targets:
+                        self._final_add_download(
+                            target_url,
+                            is_mp3,
+                            title,
+                            source_site="youtube",
+                            extra_task_data=self._build_extra_task_data(source_page=playlist_url),
+                        )
+
+                self._schedule_ui_call(enqueue)
+            except Exception as e:
+                write_error_log("youtube playlist parse failed", e, url=new_url, playlist_id=youtube_playlist_id)
+                self._schedule_ui_call(lambda: self._final_add_download(new_url, is_mp3, inline_title or None))
+
+        if youtube_playlist_id:
+            if is_mp3 and not ffmpeg_ok:
+                self.download_ffmpeg_interactive(lambda: self._start_background_parse(fetch_youtube_playlist))
+            else:
+                self._start_background_parse(fetch_youtube_playlist)
+            return
+
         if is_mp3 and not ffmpeg_ok:
             self.download_ffmpeg_interactive(lambda: self._final_add_download(new_url, is_mp3, inline_title or None))
             return
@@ -7893,9 +8044,6 @@ class DownloadManagerApp:
         primary_value = str(_task_field_value(task, "filename") or "").strip()
         secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
         filename = primary_value or secondary_value or ""
-        if filename and str(filename).lower().endswith(".mp4") and not bool(_task_field_value(task, "_windows_mp4_compat_done", False)):
-            self._ensure_windows_compatible_mp4(item_id, filename)
-            _set_task_aux_fields(task, _windows_mp4_compat_done=True)
         if filename and os.path.exists(filename):
             try:
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
@@ -9335,10 +9483,6 @@ class DownloadManagerApp:
             filename = primary_value or secondary_value or ""
         else:
             filename = ""
-        if filename and str(filename).lower().endswith(".mp4") and not bool(_task_field_value(task or {}, "_windows_mp4_compat_done", False)):
-            self._ensure_windows_compatible_mp4(item_id, filename)
-            if task:
-                _set_task_aux_fields(task, _windows_mp4_compat_done=True)
         if filename and os.path.exists(filename):
             try:
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
@@ -9449,7 +9593,7 @@ class DownloadManagerApp:
                 return value
         return 0
 
-    def _file_size_matches_expected_total(self, output_path, expected_total_bytes):
+    def _file_size_matches_expected_total(self, output_path, expected_total_bytes, tolerance_ratio=0.001):
         try:
             expected = int(expected_total_bytes or 0)
         except Exception:
@@ -9459,7 +9603,12 @@ class DownloadManagerApp:
         actual = self._get_existing_file_size(output_path)
         if actual <= 0:
             return False
-        tolerance = max(4096, int(expected * 0.001))
+        try:
+            ratio = float(tolerance_ratio or 0.001)
+        except Exception:
+            ratio = 0.001
+        ratio = max(0.001, min(ratio, 0.05))
+        tolerance = max(4096, int(expected * ratio))
         return abs(actual - expected) <= tolerance
 
     def _total_bytes_match(self, left_total_bytes, right_total_bytes):
@@ -9479,7 +9628,11 @@ class DownloadManagerApp:
         if temp:
             return True
         expected_total = int(expected_total_bytes or 0) or self._expected_total_bytes_from_task(task)
-        if not self._file_size_matches_expected_total(output_path, expected_total):
+        source_site = _task_source_site_name(task)
+        if expected_total <= 0 and source_site == "youtube":
+            return False
+        tolerance_ratio = 0.02 if source_site == "youtube" else 0.001
+        if not self._file_size_matches_expected_total(output_path, expected_total, tolerance_ratio=tolerance_ratio):
             write_error_log(
                 "existing output rejected",
                 Exception("existing output size does not match current remote total"),
@@ -9487,7 +9640,7 @@ class DownloadManagerApp:
                 output=output_path,
                 local_size=self._get_existing_file_size(output_path),
                 expected_total_bytes=expected_total,
-                source_site=_task_source_site_name(task) or None,
+                source_site=source_site or None,
             )
             return False
         if self._is_low_quality_youtube_output(task, output_path):
@@ -9496,7 +9649,7 @@ class DownloadManagerApp:
                 Exception("existing YouTube output is below the minimum accepted height"),
                 item_id=item_id,
                 output=output_path,
-                source_site=_task_source_site_name(task) or None,
+                source_site=source_site or None,
                 min_height=YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT,
             )
             return False
@@ -9833,18 +9986,7 @@ class DownloadManagerApp:
             raise Exception(f"HTTP {resp.status_code}")
         text = resp.text
         if "#EXT-X-STREAM-INF" in text:
-            variant = None
-            lines = [line.strip() for line in text.splitlines()]
-            for idx, line in enumerate(lines):
-                if not line.startswith("#EXT-X-STREAM-INF"):
-                    continue
-                if idx + 1 >= len(lines):
-                    continue
-                candidate = lines[idx + 1].strip()
-                if not candidate or candidate.startswith("#"):
-                    continue
-                variant = urllib.parse.urljoin(url, candidate)
-                break
+            variant, _variant_attrs = _select_highest_hls_variant_url(url, text)
             if variant:
                 resp = c_req.get(variant, impersonate="chrome110", timeout=15, headers=headers)
                 if resp.status_code != 200:
@@ -9871,18 +10013,7 @@ class DownloadManagerApp:
             text = resp.text
             playlist_url = url
             if "#EXT-X-STREAM-INF" in text:
-                variant = None
-                lines = [line.strip() for line in text.splitlines()]
-                for idx, line in enumerate(lines):
-                    if not line.startswith("#EXT-X-STREAM-INF"):
-                        continue
-                    if idx + 1 >= len(lines):
-                        continue
-                    candidate = lines[idx + 1].strip()
-                    if not candidate or candidate.startswith("#"):
-                        continue
-                    variant = urllib.parse.urljoin(url, candidate)
-                    break
+                variant, _variant_attrs = _select_highest_hls_variant_url(url, text)
                 if variant:
                     playlist_url = variant
                     resp = c_req.get(variant, impersonate="chrome110", timeout=15, headers=headers)
@@ -9932,13 +10063,6 @@ class DownloadManagerApp:
             if resp.status_code != 200:
                 raise Exception(f"HTTP {resp.status_code}")
             return resp.text
-
-        def _parse_attr_list(line):
-            attrs = {}
-            payload = line.split(":", 1)[1] if ":" in line else ""
-            for key, value in re.findall(r'([A-Z0-9-]+)=(".*?"|[^,]+)', payload):
-                attrs[key] = value.strip().strip('"')
-            return attrs
 
         def _probe_segment_bytes(segment_url):
             if self._shutdown_started:
@@ -10051,30 +10175,17 @@ class DownloadManagerApp:
         if "#EXT-X-STREAM-INF" in master_text:
             lines = [line.strip() for line in master_text.splitlines()]
             media_groups = {}
-            chosen_variant_url = None
-            chosen_variant_attrs = {}
 
             for line in lines:
                 if line.startswith("#EXT-X-MEDIA:"):
-                    attrs = _parse_attr_list(line)
+                    attrs = _parse_hls_attribute_line(line)
                     group_id = attrs.get("GROUP-ID")
                     media_type = attrs.get("TYPE")
                     if not group_id or not media_type:
                         continue
                     media_groups.setdefault((media_type, group_id), []).append(attrs)
 
-            for idx, line in enumerate(lines):
-                if not line.startswith("#EXT-X-STREAM-INF"):
-                    continue
-                if idx + 1 >= len(lines):
-                    continue
-                candidate = lines[idx + 1].strip()
-                if not candidate or candidate.startswith("#"):
-                    continue
-                chosen_variant_url = urllib.parse.urljoin(url, candidate)
-                chosen_variant_attrs = _parse_attr_list(line)
-                break
-
+            chosen_variant_url, chosen_variant_attrs = _select_highest_hls_variant_url(url, master_text)
             if not chosen_variant_url:
                 return None
             playlist_targets.append(chosen_variant_url)
@@ -10555,7 +10666,7 @@ class DownloadManagerApp:
                 exc,
                 item_id=item_id,
                 output=path,
-                source_site=_task_source_site_name(task) or None,
+                source_site=source_site or None,
             )
             try:
                 if os.path.exists(compat_path):
@@ -11240,18 +11351,7 @@ class DownloadManagerApp:
             text = resp.text or ""
             playlist_url = url
             if "#EXT-X-STREAM-INF" in text:
-                variant = None
-                lines = [line.strip() for line in text.splitlines()]
-                for idx, line in enumerate(lines):
-                    if not line.startswith("#EXT-X-STREAM-INF"):
-                        continue
-                    if idx + 1 >= len(lines):
-                        continue
-                    candidate = lines[idx + 1].strip()
-                    if not candidate or candidate.startswith("#"):
-                        continue
-                    variant = urllib.parse.urljoin(url, candidate)
-                    break
+                variant, _variant_attrs = _select_highest_hls_variant_url(url, text)
                 if variant:
                     playlist_url = variant
                     resp = c_req.get(variant, impersonate="chrome110", timeout=15, headers=headers)
@@ -12203,7 +12303,7 @@ class DownloadManagerApp:
             return
         self._mark_task_finished(item_id)
 
-    def _download_http_media(self, item_id, url, out_path, headers=None, session=None):
+    def _download_http_media(self, item_id, url, out_path, headers=None, session=None, mark_finished=True):
         headers = dict(headers or {})
         task = self.tasks.get(item_id, {})
         self._cache_task_resolved_link(task, url, fallback_urls=_dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=url))
@@ -12260,7 +12360,8 @@ class DownloadManagerApp:
             resume_bytes = 0
             range_supported = False
         if total_size > 0 and self._file_size_matches_expected_total(out_path, total_size):
-            self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
+            if mark_finished:
+                self._mark_existing_file_complete(item_id, self._ui_text("eta_file_exists", "檔案已存在"))
             return
         if total_size > 0 and resume_bytes > 0 and not resume_requested_for_output:
             write_error_log(
@@ -12584,7 +12685,8 @@ class DownloadManagerApp:
                 self._close_network_session(owned_session)
             if session is not None:
                 self._close_network_session(session)
-        self._mark_task_finished(item_id)
+        if mark_finished:
+            self._mark_task_finished(item_id)
 
     def _resolve_direct_media_output_path(self, media_url, save_dir, display_name, default_ext=".mp4"):
         ext = os.path.splitext(urllib.parse.urlparse(str(media_url or "")).path)[1] or default_ext
@@ -12790,32 +12892,8 @@ class DownloadManagerApp:
     def _resolve_parallel_hls_media_playlist(self, url, headers):
         playlist_url = _normalize_download_url(url)
         playlist_text = self._fetch_hls_text_for_parallel(playlist_url, headers)
-        lines = [line.strip() for line in playlist_text.splitlines() if line.strip()]
-        variants = []
-        for index, line in enumerate(lines):
-            if not line.startswith("#EXT-X-STREAM-INF"):
-                continue
-            attrs = self._parse_hls_attribute_list(line.split(":", 1)[1] if ":" in line else "")
-            for next_line in lines[index + 1:]:
-                if next_line.startswith("#"):
-                    continue
-                media_url = urllib.parse.urljoin(playlist_url, next_line)
-                try:
-                    bandwidth = int(attrs.get("AVERAGE-BANDWIDTH") or attrs.get("BANDWIDTH") or 0)
-                except Exception:
-                    bandwidth = 0
-                resolution = str(attrs.get("RESOLUTION") or "")
-                resolution_match = re.search(r"(\d+)\s*x\s*(\d+)", resolution, re.IGNORECASE)
-                pixel_count = 0
-                if resolution_match:
-                    try:
-                        pixel_count = int(resolution_match.group(1) or 0) * int(resolution_match.group(2) or 0)
-                    except Exception:
-                        pixel_count = 0
-                variants.append((bandwidth, pixel_count, media_url))
-                break
-        if variants:
-            _bandwidth, _pixel_count, media_url = max(variants, key=lambda item: (item[0], item[1]))
+        media_url, _variant_attrs = _select_highest_hls_variant_url(playlist_url, playlist_text)
+        if media_url:
             return media_url, self._fetch_hls_text_for_parallel(media_url, headers)
         return playlist_url, playlist_text
 
@@ -15914,6 +15992,190 @@ class DownloadManagerApp:
             if last_exc:
                 raise last_exc
 
+        def _extract_yt_dlp_info(target_url):
+            module = get_yt_dlp_module() if yt_dlp_module is None else yt_dlp_module
+            attempt_sources = [None]
+            for source in social_cookie_sources:
+                if source not in attempt_sources:
+                    attempt_sources.append(source)
+            last_exc = None
+            for source in attempt_sources:
+                current_opts = copy.deepcopy(ydl_opts)
+                current_opts["skip_download"] = True
+                if source:
+                    current_opts["cookiesfrombrowser"] = source
+                else:
+                    current_opts.pop("cookiesfrombrowser", None)
+                try:
+                    with ytdl_init_lock:
+                        ydl = module.YoutubeDL(current_opts)
+                    info = ydl.extract_info(target_url, download=False)
+                    if isinstance(info, dict):
+                        return info
+                except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if last_exc:
+                raise last_exc
+            return {}
+
+        def _format_has_video(fmt):
+            return bool(fmt and str(fmt.get("vcodec") or "none").lower() != "none" and fmt.get("url"))
+
+        def _format_has_audio(fmt):
+            return bool(fmt and str(fmt.get("acodec") or "none").lower() != "none" and fmt.get("url"))
+
+        def _format_rank(fmt):
+            try:
+                height = int(fmt.get("height") or 0)
+            except Exception:
+                height = 0
+            try:
+                tbr = float(fmt.get("tbr") or fmt.get("vbr") or fmt.get("abr") or 0.0)
+            except Exception:
+                tbr = 0.0
+            return (height, tbr)
+
+        def _format_expected_bytes(fmt):
+            if not isinstance(fmt, dict):
+                return 0
+            for key in ("filesize", "filesize_approx"):
+                try:
+                    value = int(fmt.get(key) or 0)
+                except Exception:
+                    value = 0
+                if value > 0:
+                    return value
+            try:
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(str(fmt.get("url") or "")).query)
+                value = int((query.get("clen") or ["0"])[0] or 0)
+            except Exception:
+                value = 0
+            return value if value > 0 else 0
+
+        def _selected_formats_expected_total(*formats):
+            sizes = [_format_expected_bytes(fmt) for fmt in formats if isinstance(fmt, dict)]
+            if sizes and all(size > 0 for size in sizes):
+                return sum(sizes)
+            return max(sizes or [0])
+
+        def _youtube_download_headers(fmt):
+            headers = dict(ydl_opts.get("http_headers") or _make_ytdlp_http_headers())
+            headers.update(dict((fmt or {}).get("http_headers") or {}))
+            headers.setdefault("Referer", "https://www.youtube.com/")
+            headers.setdefault("Origin", "https://www.youtube.com")
+            return headers
+
+        def _reset_youtube_component_path(component_path):
+            for candidate in (component_path, f"{component_path}.resume", f"{component_path}.part"):
+                try:
+                    if candidate and os.path.exists(candidate):
+                        os.remove(candidate)
+                except OSError:
+                    pass
+
+        def _validate_youtube_component(component_path, label):
+            media_info = self._probe_media_info(component_path)
+            if media_info.get("valid") and int(media_info.get("size", 0) or 0) > 0:
+                return
+            try:
+                if component_path and os.path.exists(component_path):
+                    os.remove(component_path)
+            except OSError:
+                pass
+            raise RuntimeError(f"YouTube {label} component is not a valid media file")
+
+        def _run_youtube_fast_multipart_download(target_url, output_template_stem):
+            info = _extract_yt_dlp_info(target_url)
+            requested_formats = [fmt for fmt in (info.get("requested_formats") or []) if isinstance(fmt, dict)]
+            video_formats = [fmt for fmt in requested_formats if _format_has_video(fmt)]
+            audio_formats = [fmt for fmt in requested_formats if _format_has_audio(fmt) and not _format_has_video(fmt)]
+            video_fmt = max(video_formats, key=_format_rank, default=None)
+            audio_fmt = max(audio_formats, key=_format_rank, default=None)
+            final_stem = output_template_stem
+            final_output = os.path.join(save_dir, f"{final_stem}.mkv")
+
+            if video_fmt and audio_fmt:
+                temp_dir = str((ydl_opts.get("paths") or {}).get("temp") or tempfile.gettempdir())
+                os.makedirs(temp_dir, exist_ok=True)
+                video_id = str(video_fmt.get("format_id") or "video")
+                audio_id = str(audio_fmt.get("format_id") or "audio")
+                video_ext = str(video_fmt.get("ext") or "mp4").lstrip(".") or "mp4"
+                audio_ext = str(audio_fmt.get("ext") or "m4a").lstrip(".") or "m4a"
+                safe_component_stem = _safe_output_stem(output_template_stem, fallback="youtube")
+                video_path = os.path.join(temp_dir, f"{safe_component_stem} [{video_id}].video.{video_ext}")
+                audio_path = os.path.join(temp_dir, f"{safe_component_stem} [{audio_id}].audio.{audio_ext}")
+                expected_total = _selected_formats_expected_total(video_fmt, audio_fmt)
+                if expected_total > 0:
+                    _set_task_aux_fields(
+                        task,
+                        total_bytes=expected_total,
+                        expected_total_bytes=expected_total,
+                        remote_total_bytes=expected_total,
+                    )
+                    if self._can_accept_existing_output(task, item_id, final_output, expected_total_bytes=expected_total):
+                        self._set_task_output_file(task, item_id, final_output)
+                        self._mark_existing_file_complete(item_id, self._ui_text("msg_file_exists", "檔案已存在"))
+                        return info, final_output
+                _reset_youtube_component_path(video_path)
+                _reset_youtube_component_path(audio_path)
+                write_error_log(
+                    "youtube multipart component download started",
+                    Exception("youtube multipart component download started"),
+                    url=target_url,
+                    item_id=item_id,
+                    video_format=video_id,
+                    audio_format=audio_id,
+                    video_height=video_fmt.get("height"),
+                    video_ext=video_ext,
+                    audio_ext=audio_ext,
+                )
+                self._download_http_media(item_id, video_fmt.get("url"), video_path, headers=_youtube_download_headers(video_fmt), mark_finished=False)
+                self._download_http_media(item_id, audio_fmt.get("url"), audio_path, headers=_youtube_download_headers(audio_fmt), mark_finished=False)
+                _validate_youtube_component(video_path, "video")
+                _validate_youtube_component(audio_path, "audio")
+                ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
+                startupinfo = None
+                creationflags = 0
+                if platform.system() == "Windows":
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = 0
+                    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                cmd = [ffmpeg_path, "-y", "-i", video_path, "-i", audio_path, "-c", "copy", final_output]
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo, creationflags=creationflags)
+                if result.returncode != 0:
+                    stderr = result.stderr.decode("utf-8", errors="ignore")[-1000:]
+                    raise RuntimeError(f"YouTube ffmpeg merge failed: {stderr}")
+                for component_path in (video_path, audio_path):
+                    try:
+                        os.remove(component_path)
+                    except OSError:
+                        pass
+                return info, final_output
+
+            if _format_has_video(info) and _format_has_audio(info):
+                ext = str(info.get("ext") or "mp4").lstrip(".") or "mp4"
+                final_output = os.path.join(save_dir, f"{final_stem}.{ext}")
+                expected_total = _format_expected_bytes(info)
+                if expected_total > 0:
+                    _set_task_aux_fields(
+                        task,
+                        total_bytes=expected_total,
+                        expected_total_bytes=expected_total,
+                        remote_total_bytes=expected_total,
+                    )
+                    if self._can_accept_existing_output(task, item_id, final_output, expected_total_bytes=expected_total):
+                        self._set_task_output_file(task, item_id, final_output)
+                        self._mark_existing_file_complete(item_id, self._ui_text("msg_file_exists", "檔案已存在"))
+                        return info, final_output
+                self._download_http_media(item_id, info.get("url"), final_output, headers=_youtube_download_headers(info), mark_finished=False)
+                return info, final_output
+
+            raise RuntimeError("YouTube did not expose a downloadable 720p+ media URL")
+
         def _extract_ytdlp_page_title(target_url, fallback_title="", cookie_sources=None):
             module = get_yt_dlp_module()
             if module is None:
@@ -15963,6 +16225,8 @@ class DownloadManagerApp:
         ):
             site = str(source_site or "").strip().lower()
             _apply_ytdlp_route_options(ydl_opts, route_options)
+            if is_mp3:
+                _apply_ytdlp_audio_postprocessing(ydl_opts)
             current_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
             probed_title = _extract_ytdlp_page_title(target_url, fallback_title=current_title, cookie_sources=cookie_sources)
             fallback_title = current_title or default_short_name_for_url(target_url, is_mp3=is_mp3)
@@ -15979,13 +16243,15 @@ class DownloadManagerApp:
             safe_route_name = _safe_output_stem(page_title, fallback=default_short_name_for_url(target_url, is_mp3=is_mp3))
             output_template_stem = safe_route_name
             youtube_video_id = _extract_youtube_video_id(target_url) if site == "youtube" else ""
-            if youtube_video_id and f"[{youtube_video_id}]" not in output_template_stem:
+            if youtube_video_id and site != "youtube" and f"[{youtube_video_id}]" not in output_template_stem:
                 output_template_stem = f"{output_template_stem} [{youtube_video_id}]"
             ydl_opts["outtmpl"] = {"default": f"{safe_route_name}.%(ext)s"}
-            if youtube_video_id:
+            if youtube_video_id and site != "youtube":
                 ydl_opts["outtmpl"] = {"default": f"{output_template_stem} [%(format_id)s].%(ext)s"}
             elif output_template_stem != safe_route_name:
                 ydl_opts["outtmpl"] = {"default": f"{output_template_stem}.%(ext)s"}
+            else:
+                ydl_opts["outtmpl"] = {"default": f"{safe_route_name}.%(ext)s"}
             route_log_context = log_context or f"{site or 'site'} yt-dlp route selected"
             write_error_log(
                 route_log_context,
@@ -15999,8 +16265,12 @@ class DownloadManagerApp:
                 format_sort=ydl_opts.get("format_sort"),
                 merge_output_format=ydl_opts.get("merge_output_format"),
             )
+            actual_output = ""
             try:
-                download_info = _run_yt_dlp(target_url)
+                if site == "youtube" and not is_mp3:
+                    download_info, actual_output = _run_youtube_fast_multipart_download(target_url, output_template_stem)
+                else:
+                    download_info = _run_yt_dlp(target_url)
             except Exception as exc:
                 if site == "bilibili" and "requested format is not available" in str(exc).lower():
                     raise Exception("Bilibili 未取得 720p 以上可下載影片；請提供有效登入 cookies 或改用有 720p 權限的帳號後重試") from exc
@@ -16008,23 +16278,46 @@ class DownloadManagerApp:
             if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "DELETED":
                 raise KeyboardInterrupt()
             preferred_ext = ydl_opts.get("merge_output_format") or None
-            actual_output = self._find_ytdlp_site_output_path(
-                download_info,
-                save_dir,
-                safe_route_name,
-                output_template_stem=output_template_stem,
-                preferred_ext=preferred_ext,
-            )
+            if not actual_output:
+                actual_output = self._find_ytdlp_site_output_path(
+                    download_info,
+                    save_dir,
+                    safe_route_name,
+                    output_template_stem=output_template_stem,
+                    preferred_ext=preferred_ext,
+                )
             if actual_output:
+                media_info = self._probe_media_info(actual_output)
+                output_ext = os.path.splitext(str(actual_output or ""))[1].lower()
+                if output_ext in (".mp4", ".mkv", ".webm", ".m4a", ".mp3") and (
+                    not media_info.get("exists") or int(media_info.get("size", 0) or 0) <= 0 or not media_info.get("valid")
+                ):
+                    quarantined_output = f"{actual_output}.invalid"
+                    try:
+                        if os.path.exists(quarantined_output):
+                            os.remove(quarantined_output)
+                        os.replace(actual_output, quarantined_output)
+                    except OSError:
+                        quarantined_output = ""
+                    write_error_log(
+                        f"{site or 'site'} yt-dlp output rejected",
+                        Exception("yt-dlp produced an invalid media file"),
+                        url=target_url,
+                        item_id=item_id,
+                        output=actual_output,
+                        quarantined_output=quarantined_output or None,
+                        size=media_info.get("size"),
+                        duration=media_info.get("duration"),
+                        reason=media_info.get("reason"),
+                    )
+                    raise Exception("yt-dlp 下載結果不是有效媒體檔，已拒絕標示為完成")
                 self._set_task_output_file(task, item_id, actual_output)
                 if self._is_low_quality_youtube_output(task, actual_output):
-                    media_info = self._probe_media_info(actual_output)
                     video_stream = next((stream for stream in media_info.get("streams") or [] if stream.get("codec_type") == "video"), {})
                     raise Exception(
                         f"YouTube 下載結果低於 {YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT}p，"
                         f"實際高度 {video_stream.get('height') or 0}p，未接受為完成"
                     )
-                media_info = self._probe_media_info(actual_output)
                 video_stream = next((stream for stream in media_info.get("streams") or [] if stream.get("codec_type") == "video"), {})
                 write_error_log(
                     f"{site or 'site'} yt-dlp output accepted",
