@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260525-3170"
+APP_BUILD = "20260525-3180"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -443,7 +443,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj", "jable", "missav", "njavtv", "nnyy", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "goodav17", "hohoj", "jable", "missav", "njavtv", "nnyy", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -468,6 +468,10 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "bdzybf",
     "surrit.com",
     "taopianplay1.com",
+    "streamfastpro",
+    "mushroomtrack.com",
+    "hls.sb-cd.com",
+    "cdn77.org",
 )
 PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com",)
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
@@ -495,12 +499,13 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 32,
+    "18av": 24,
     "avbebe": 24,
     "goodav17": 24,
     "hohoj": 16,
-    "jable": 12,
-    "missav": 12,
-    "njavtv": 12,
+    "jable": 24,
+    "missav": 18,
+    "njavtv": 18,
     "nnyy": 24,
     "xiaoyakankan": 24,
 }
@@ -519,7 +524,11 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
     "ggjav.com": 24,
-    "surrit.com": 12,
+    "surrit.com": 18,
+    "streamfastpro": 24,
+    "mushroomtrack.com": 24,
+    "hls.sb-cd.com": 24,
+    "cdn77.org": 24,
     "googleusercontent.com": 1,
 }
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
@@ -677,7 +686,7 @@ YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
     "hohoj",
 ))
 NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv"))
-NATIVE_HLS_NEVER_SITES = frozenset(("njavtv", "3kor", "missav"))
+NATIVE_HLS_NEVER_SITES = frozenset(("18av", "jable", "njavtv", "3kor", "missav"))
 NATIVE_HLS_DISABLED_HOST_MARKERS = ("ggjav",)
 NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "18av": ("streamfastpro",),
@@ -1589,6 +1598,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "hohoj"
         if "goodav17.com" in host:
             return "goodav17"
+        if "mushroomtrack.com" in host or "hls.sb-cd.com" in host or "cdn77.org" in host:
+            return "jable"
         if "avbebe.com" in host:
             return "avbebe"
         if "avjoy.me" in host:
@@ -2854,6 +2865,23 @@ def _hls_candidate_resolution_score(url):
     return max(scores) if scores else 0
 
 
+def _media_candidate_quality_score(url, source_site=""):
+    site = str(source_site or "").strip().lower()
+    if site == "18av":
+        return max(_hls_candidate_resolution_score(url), _18av_manifest_path_score(url))
+    text = urllib.parse.unquote(str(url or "")).lower()
+    score = _hls_candidate_resolution_score(text)
+    if re.search(r"(?<![a-z0-9])(?:4k|uhd|2160p?)(?![a-z0-9])", text, re.IGNORECASE):
+        score = max(score, 2160)
+    if re.search(r"(?<![a-z0-9])(?:2k|1440p?)(?![a-z0-9])", text, re.IGNORECASE):
+        score = max(score, 1440)
+    if re.search(r"(?<![a-z0-9])(?:fhd|fullhd|full-hd)(?![a-z0-9])", text, re.IGNORECASE):
+        score = max(score, 1080)
+    if re.search(r"(?<![a-z0-9])(?:hd)(?![a-z0-9])", text, re.IGNORECASE):
+        score = max(score, 720)
+    return score
+
+
 def _site_hls_candidate_priority(source_site, url):
     site = str(source_site or "").strip().lower()
     if site == "missav":
@@ -2876,11 +2904,21 @@ def _order_site_hls_candidates(primary_url, fallback_urls=(), source_site=""):
     site = str(source_site or "").strip().lower()
     if site in ("goodav17", "hohoj"):
         ordered = _filter_secondary_ggjav_media_groups(ordered)
-    if site not in ("missav", "movieffm", "xiaoyakankan", "nnyy"):
-        return ordered
     indexed_candidates = list(enumerate(ordered))
-    indexed_candidates.sort(key=lambda item: (_site_hls_candidate_priority(site, item[1]), item[0]))
+    indexed_candidates.sort(
+        key=lambda item: (
+            -_media_candidate_quality_score(item[1], source_site=site),
+            _site_hls_candidate_priority(site, item[1]),
+            item[0],
+        )
+    )
     return [candidate for _index, candidate in indexed_candidates]
+
+
+def _order_download_fallback_candidates(primary_url, fallback_urls=(), source_site=""):
+    ordered = _order_site_hls_candidates(primary_url, fallback_urls, source_site=source_site)
+    primary = _normalize_download_url(primary_url)
+    return [candidate for candidate in ordered if candidate and candidate != primary]
 
 
 def _select_reachable_stream_candidates(primary_url, fallback_urls=(), source_site=""):
@@ -3164,6 +3202,83 @@ def _is_18av_preview_media_url(url):
             "fbhost1.",
         )
     )
+
+
+def _18av_manifest_path_score(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return 0
+    parsed = urllib.parse.urlsplit(normalized)
+    path = urllib.parse.unquote(parsed.path or "")
+    for pattern in (
+        r"/(?:\d+)/(\d+)/[^/]+\.m3u8(?:$|\?)",
+        r"(?:^|[_-])(\d{3,4})p?(?:[_./-]|$)",
+    ):
+        match = re.search(pattern, path, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+    return 0
+
+
+def _sort_18av_manifest_candidates(candidates):
+    ordered = _dedupe_download_urls(candidates)
+    return sorted(
+        ordered,
+        key=lambda candidate: (_18av_manifest_path_score(candidate), ordered.index(candidate) * -1),
+        reverse=True,
+    )
+
+
+def _extract_18av_player_manifest_sources(player_html):
+    text = html.unescape(str(player_html or "")).replace("\\/", "/").replace("\\u002F", "/")
+    sources = []
+    for match in re.finditer(
+        r"src\s*:\s*['\"]([^'\"]+\.m3u8[^'\"]*)['\"][^{};\n]{0,240}?size\s*:\s*['\"]?(\d{3,4})['\"]?",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        url = _normalize_download_url(match.group(1))
+        if not url or url.lower().endswith(".m3u8.jpg"):
+            continue
+        try:
+            quality = int(match.group(2))
+        except ValueError:
+            quality = 0
+        sources.append((quality, url))
+    if not sources:
+        for match in re.finditer(
+            r"size\s*:\s*['\"]?(\d{3,4})['\"]?[^{};\n]{0,240}?src\s*:\s*['\"]([^'\"]+\.m3u8[^'\"]*)['\"]",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            url = _normalize_download_url(match.group(2))
+            if not url or url.lower().endswith(".m3u8.jpg"):
+                continue
+            try:
+                quality = int(match.group(1))
+            except ValueError:
+                quality = 0
+            sources.append((quality, url))
+    if not sources:
+        sources = [
+            (_18av_manifest_path_score(candidate), candidate)
+            for candidate in _extract_candidate_media_urls(text, allowed_exts=(".m3u8",))
+            if _looks_like_manifest_url(candidate) and not str(candidate).lower().endswith(".m3u8.jpg")
+        ]
+    deduped = {}
+    for quality, url in sources:
+        deduped[url] = max(int(quality or 0), deduped.get(url, 0))
+    return [
+        url
+        for quality, url in sorted(
+            ((quality, url) for url, quality in deduped.items()),
+            key=lambda item: (item[0], _18av_manifest_path_score(item[1])),
+            reverse=True,
+        )
+    ]
 
 
 def _clean_hohoj_title(raw_title, fallback_title="HoHoJ"):
@@ -3926,16 +4041,20 @@ def _resolve_18av_protected_player_media(page_url, page_html):
         except Exception:
             continue
         probe_html = str(getattr(probe_resp, "text", "") or "")
+        quality_manifest_candidates = _extract_18av_player_manifest_sources(probe_html)
         probe_candidates = _extract_candidate_media_urls(probe_html, allowed_exts=(".m3u8", ".mp4", ".mpd"))
         manifest_candidates = [
             candidate for candidate in probe_candidates
             if _looks_like_manifest_url(candidate) and not candidate.lower().endswith(".m3u8.jpg")
         ]
+        manifest_candidates = _dedupe_download_urls(quality_manifest_candidates + _sort_18av_manifest_candidates(manifest_candidates))
         direct_media_candidates = [
             candidate for candidate in probe_candidates
             if _looks_like_http_media_url(candidate) and "_preview.mp4" not in candidate.lower() and "/preview.mp4" not in candidate.lower()
         ]
         if manifest_candidates:
+            protected_player["manifest_fallback_urls"] = manifest_candidates[1:]
+            protected_player["selected_manifest_quality"] = _18av_manifest_path_score(manifest_candidates[0])
             return manifest_candidates[0], "", probe_url, protected_player
         if direct_media_candidates:
             return "", direct_media_candidates[0], probe_url, protected_player
@@ -4220,8 +4339,10 @@ def _split_stream_and_direct_candidates(candidate_urls, skip_preview=True, direc
     return manifest_candidates, direct_media_candidates
 
 
-def _pick_primary_with_fallbacks(candidates):
+def _pick_primary_with_fallbacks(candidates, source_site=""):
     ordered = _dedupe_download_urls(candidates)
+    if ordered:
+        ordered = _order_site_hls_candidates(ordered[0], ordered[1:], source_site=source_site)
     primary = ordered[0] if ordered else ""
     fallbacks = [candidate for candidate in ordered[1:] if candidate != primary] if primary else []
     return primary, fallbacks
@@ -5583,6 +5704,8 @@ def _build_ytdlp_download_opts(
         "paths": {"home": home_dir, "temp": temp_dir},
         "outtmpl": {"default": outtmpl},
         "format": format_selector,
+        "format_sort": ["res", "fps", "hdr", "vcodec", "br"],
+        "format_sort_force": True,
         "merge_output_format": merge_output_format,
         "progress_hooks": [progress_hook],
         "progress_delta": float(progress_delta),
@@ -9947,12 +10070,21 @@ class DownloadManagerApp:
         if updates:
             self._update_task_state_entry(task, **updates)
 
+    def _parallel_hls_probe_task(self, task, source_site=None):
+        site = str(source_site or "").strip().lower()
+        if not site:
+            return task
+        probe_task = dict(task or {})
+        probe_task["source_site"] = site
+        return probe_task
+
     def _log_m3u8_route_selected(self, task, item_id, media_url, source_site=None, fallback_urls=None):
         site = _task_source_site_name(task, fallback_site=source_site or "")
+        probe_task = self._parallel_hls_probe_task(task, site)
         route_label = "ffmpeg"
-        if not bool(_task_field_value(task, "is_mp3", False)) and self._should_try_parallel_hls_segments(media_url, task):
+        if not bool(_task_field_value(task, "is_mp3", False)) and self._should_try_parallel_hls_segments(media_url, probe_task):
             route_label = "parallel-hls"
-        elif _should_prefer_native_hls(media_url, task):
+        elif _should_prefer_native_hls(media_url, probe_task):
             route_label = "native"
         effective_fallback_urls = fallback_urls if fallback_urls is not None else _dedupe_download_urls(_task_field_value(task, "fallback_urls", []))
         self._cache_task_resolved_link(
@@ -9974,6 +10106,7 @@ class DownloadManagerApp:
             item_id=item_id,
             source_site=site or None,
             fallback_count=fallback_count,
+            quality_score=_media_candidate_quality_score(media_url, source_site=site),
         )
 
     def _build_ffmpeg_runtime_fields(self, ffmpeg_path, retry_count=0, cmd=None, ffmpeg_version=None, **extra):
@@ -13668,9 +13801,9 @@ class DownloadManagerApp:
         if not ordered:
             return "", []
         manifest_candidates, direct_candidates = _split_stream_and_direct_candidates(ordered)
-        media_url, fallback_urls = _pick_primary_with_fallbacks(direct_candidates)
+        media_url, fallback_urls = _pick_primary_with_fallbacks(direct_candidates, source_site="avjoy")
         if not media_url:
-            media_url, fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
+            media_url, fallback_urls = _pick_primary_with_fallbacks(manifest_candidates, source_site="avjoy")
         if not media_url:
             return "", []
         remaining = [candidate for candidate in ordered if candidate != media_url and candidate not in fallback_urls]
@@ -13678,7 +13811,11 @@ class DownloadManagerApp:
 
     def _download_routed_media_url(self, task, item_id, media_url, save_dir, display_name, is_mp3=False, source_site=None, fallback_urls=None, referer=None, origin=None, manifest_downloader=None, manifest_default_route="ffmpeg", headers=None, session=None, default_ext=".mp4", allow_audio_extract=True, persist_direct_output=False, show_direct_filename=False):
         site = source_site or _task_source_site_name(task)
-        fallbacks = list(fallback_urls or [])
+        fallbacks = _order_download_fallback_candidates(media_url, fallback_urls or [], source_site=site)
+        routed_candidates = _order_site_hls_candidates(media_url, fallbacks, source_site=site)
+        if routed_candidates:
+            media_url = routed_candidates[0]
+            fallbacks = [candidate for candidate in routed_candidates[1:] if candidate != media_url]
 
         def _handoff_manifest(candidate_url, remaining_fallbacks=None):
             self._log_m3u8_route_selected(task, item_id, candidate_url, source_site=site, fallback_urls=remaining_fallbacks or [])
@@ -13709,7 +13846,7 @@ class DownloadManagerApp:
             _set_task_aux_fields(task, filename=out_path)
             if show_direct_filename:
                 self._set_task_named_column_text(item_id, "name", out_name)
-        direct_candidates = _dedupe_download_urls([media_url] + fallbacks)
+        direct_candidates = _order_site_hls_candidates(media_url, fallbacks, source_site=site)
         last_error = None
         for index, candidate_url in enumerate(direct_candidates):
             try:
@@ -13779,7 +13916,12 @@ class DownloadManagerApp:
         return max(workers, 1)
 
     def _should_try_parallel_hls_segments(self, url, task):
-        source_site = _task_source_site_name(task)
+        source_site = _task_source_site_name(task) or _infer_source_site_from_task_urls(
+            url,
+            _task_field_value(task, "url", ""),
+            _task_field_value(task, "source_page", ""),
+            _task_field_value(task, "resolved_url", ""),
+        )
         if source_site not in PARALLEL_HLS_SEGMENT_SITES:
             return False
         normalized_url = _normalize_download_url(url)
@@ -14380,7 +14522,7 @@ class DownloadManagerApp:
         started_at = time.time()
         completed_lock = threading.Lock()
         source_site = _task_source_site_name(task)
-        prefer_curl_segments = source_site in ("movieffm", "avbebe", "goodav17", "hohoj")
+        prefer_curl_segments = source_site in ("18av", "movieffm", "avbebe", "goodav17", "hohoj", "jable", "missav", "njavtv")
         worker_count = min(self._parallel_hls_workers_for_segments(source_site, media_url, segments), total_segments)
         self._log_ffmpeg_event(
             "parallel hls download started",
@@ -14721,7 +14863,13 @@ class DownloadManagerApp:
 
     def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False, _audio_transcode_retry=False):
         task = self.tasks.get(item_id, {})
-        source_site = _task_source_site_name(task)
+        source_site = _task_source_site_name(task) or _infer_source_site_from_task_urls(
+            url,
+            _task_field_value(task, "url", ""),
+            _task_field_value(task, "source_page", ""),
+            _task_field_value(task, "resolved_url", ""),
+        )
+        probe_task = self._parallel_hls_probe_task(task, source_site)
         ext = "mp3" if is_mp3 else "mp4"
         name, safe_name, out_path = self._resolve_task_output_name_and_path(
             task,
@@ -14995,8 +15143,8 @@ class DownloadManagerApp:
             return None
 
         if (
-            _should_prefer_native_hls(url, task)
-            and not self._should_try_parallel_hls_segments(url, task)
+            _should_prefer_native_hls(url, probe_task)
+            and not self._should_try_parallel_hls_segments(url, probe_task)
             and source_site != "missav"
             and not _native_fallback_done
         ):
@@ -15097,11 +15245,11 @@ class DownloadManagerApp:
         )
         parallel_exhausted_ggjav_candidates = False
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("18av", "jable", "missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
-                if self._should_try_parallel_hls_segments(candidate, task)
+                if self._should_try_parallel_hls_segments(candidate, probe_task)
             ]
             parallel_attempted_urls = []
             parallel_setup_errors = []
@@ -15113,7 +15261,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("18av", "jable", "missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -15160,7 +15308,7 @@ class DownloadManagerApp:
                 and set(parallel_attempted_urls) >= {
                     _normalize_download_url(candidate)
                     for candidate in candidate_urls
-                    if self._should_try_parallel_hls_segments(candidate, task)
+                    if self._should_try_parallel_hls_segments(candidate, probe_task)
                 }
             )
             if source_site in ggjav_hls_source_sites and parallel_setup_errors:
@@ -17822,6 +17970,12 @@ class DownloadManagerApp:
                 and not _is_known_dead_external_fallback_url(candidate)
                 and not _is_slow_external_fallback_url_for_site(candidate, fallback_source_site)
             ]
+            if fallback_candidates:
+                fallback_candidates = _order_site_hls_candidates(
+                    fallback_candidates[0],
+                    fallback_candidates[1:],
+                    source_site=fallback_source_site,
+                )
             if not fallback_candidates:
                 return False
             next_url = fallback_candidates[0]
@@ -17894,8 +18048,8 @@ class DownloadManagerApp:
                 and not _is_known_non_download_listing_url(candidate)
                 and not _is_slow_external_fallback_url_for_site(candidate, source_site)
             ]
-            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
-            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
+            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates, source_site=source_site)
+            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates, source_site=source_site)
             if prefer_direct and media_url:
                 _dispatch_direct_media_download(
                     media_url,
@@ -20189,8 +20343,8 @@ class DownloadManagerApp:
                 parsed_javfilms_url = urllib.parse.urlparse(str(url or ""))
                 dmm_video_segments = [segment for segment in parsed_javfilms_url.path.split("/") if segment]
                 dmm_video_id = str(dmm_video_segments[-1] or "").strip() if dmm_video_segments else ""
-            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
-            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
+            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates, source_site="javfilms")
+            media_url, media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates, source_site="javfilms")
             if stream_url:
                 _dispatch_manifest_download(
                     stream_url,
@@ -20330,8 +20484,9 @@ class DownloadManagerApp:
                 candidate_urls,
                 direct_filter=lambda candidate: not _is_18av_preview_media_url(candidate),
             )
-            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates)
-            page_media_url, page_media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates)
+            manifest_candidates = _sort_18av_manifest_candidates(manifest_candidates)
+            stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates, source_site="18av")
+            page_media_url, page_media_fallback_urls = _pick_primary_with_fallbacks(direct_media_candidates, source_site="18av")
             if stream_url:
                 _dispatch_manifest_download(
                     stream_url,
@@ -20350,7 +20505,7 @@ class DownloadManagerApp:
                     name=page_title,
                     source_site="18av",
                     source_page=url,
-                    fallback_urls=[],
+                    fallback_urls=_dedupe_download_urls(protected_player.get("manifest_fallback_urls", []), primary_url=stream_url),
                     referer=url,
                     origin=site_root,
                 )
