@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260525-3180"
+APP_BUILD = "20260525-3190"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -147,12 +147,45 @@ def _ffmpeg_should_retry_with_audio_transcode(message):
 
 def _response_text_utf8(response):
     content = getattr(response, "content", None)
+    decoded_candidates = []
     if isinstance(content, (bytes, bytearray)) and content:
-        try:
-            return bytes(content).decode("utf-8")
-        except Exception:
-            pass
-    return str(getattr(response, "text", "") or "")
+        content_bytes = bytes(content)
+        encodings = []
+        for encoding in (
+            getattr(response, "encoding", None),
+            getattr(response, "apparent_encoding", None),
+            "utf-8",
+            "utf-8-sig",
+            "gb18030",
+            "big5",
+            "cp950",
+        ):
+            encoding = str(encoding or "").strip()
+            if encoding and encoding.lower() not in {item.lower() for item in encodings}:
+                encodings.append(encoding)
+        for encoding in encodings:
+            try:
+                decoded_candidates.append(content_bytes.decode(encoding))
+            except Exception:
+                continue
+    response_text = str(getattr(response, "text", "") or "")
+    if response_text:
+        decoded_candidates.append(response_text)
+    if not decoded_candidates:
+        return ""
+
+    def _decode_score(text):
+        text = str(text or "")
+        if not text:
+            return -100000
+        cjk_count = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", text))
+        bad_count = text.count("\ufffd") + len(re.findall(r"[\ue000-\uf8ff]", text))
+        score = min(len(text), 5000) + cjk_count * 8 - bad_count * 80
+        if _looks_like_garbled_text(text):
+            score -= 1000
+        return score
+
+    return max(decoded_candidates, key=_decode_score)
 
 
 def _looks_like_garbled_text(value):
@@ -472,6 +505,10 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "mushroomtrack.com",
     "hls.sb-cd.com",
     "cdn77.org",
+    "high23-playback.com",
+    "phimgood.com",
+    "ckzy3.com",
+    "bfllvip.com",
 )
 PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com",)
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
@@ -529,6 +566,10 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "mushroomtrack.com": 24,
     "hls.sb-cd.com": 24,
     "cdn77.org": 24,
+    "high23-playback.com": 24,
+    "phimgood.com": 24,
+    "ckzy3.com": 24,
+    "bfllvip.com": 24,
     "googleusercontent.com": 1,
 }
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
@@ -794,6 +835,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls purged invalid resume segments",
     "parallel hls skipped missing leading resume segments",
     "completed output renamed",
+    "download task state normalized",
+    "avbebe category page retargeted",
     "avbebe rejected playable iframe stream",
     "avbebe rejected non-video stream candidate",
     "avbebe hgcloud rejected stream candidate",
@@ -1399,6 +1442,35 @@ def _normalize_state_entry(entry):
         source_site = inferred_source_site
     normalized["source_site"] = source_site
     if source_site in ("goodav17", "hohoj"):
+        jav_code = (
+            _extract_jav_code(normalized.get("name", ""))
+            or _extract_jav_code(normalized.get("filename", ""))
+            or _extract_jav_code(normalized.get("temp_filename", ""))
+            or _extract_jav_code(normalized.get("source_page", ""))
+            or _extract_jav_code(normalized.get("url", ""))
+            or _extract_jav_code(normalized.get("resolved_url", ""))
+        )
+        if jav_code:
+            original_fallback_urls = list(normalized.get("fallback_urls", []))
+            filtered_fallback_urls = _filter_ggjav_media_groups_by_code(
+                original_fallback_urls,
+                jav_code,
+                drop_mismatched=(source_site == "hohoj"),
+            )
+            if filtered_fallback_urls != original_fallback_urls:
+                normalized["fallback_urls"] = filtered_fallback_urls
+                url_key = _ggjav_media_key(normalized.get("url", ""))
+                resolved_key = _ggjav_media_key(normalized.get("resolved_url", ""))
+                normalized_code = _normalize_jav_code_for_compare(jav_code)
+                if url_key and normalized_code not in _normalize_jav_code_for_compare(url_key):
+                    normalized["url"] = normalized.get("source_page", "") or normalized.get("url", "")
+                if resolved_key and normalized_code not in _normalize_jav_code_for_compare(resolved_key):
+                    normalized["resolved_url"] = ""
+                    normalized["resolved_url_saved_at"] = 0.0
+                if source_site == "hohoj" and not normalized.get("fallback_urls") and normalized.get("source_page"):
+                    normalized["url"] = normalized.get("source_page", "")
+                    normalized["resolved_url"] = ""
+                    normalized["resolved_url_saved_at"] = 0.0
         resolved_media_key = _ggjav_media_key(normalized.get("resolved_url", ""))
         fallback_media_key = next(
             (
@@ -2795,6 +2867,8 @@ def _movieffm_stream_priority(url):
 XIAOYAKANKAN_FAST_HLS_HOST_PRIORITY = (
     "huyall.com",
     "ijycnd.com",
+    "high23-playback.com",
+    "phimgood.com",
     "qsstvw.com",
     "qqqrst.com",
     "ppqrrs.com",
@@ -2808,6 +2882,8 @@ XIAOYAKANKAN_FAST_HLS_HOST_PRIORITY = (
     "ffzy-play",
     "yzzy",
     "yuglf.com",
+    "bfllvip.com",
+    "ckzy3.com",
 )
 
 
@@ -3176,6 +3252,8 @@ def _clean_xiaoyakankan_title(raw_title):
         return cleaned
     cleaned = re.sub(r"(?:免費)?線上看.*$", "", cleaned).strip(" -_|/")
     cleaned = re.sub(r"\s*-\s*小鴨影視.*$", "", cleaned, flags=re.IGNORECASE)
+    if _looks_like_garbled_text(cleaned):
+        return ""
     return cleaned.strip(" -_|/") or str(raw_title or "").strip()
 
 
@@ -3374,6 +3452,28 @@ def _extract_avbebe_page_title(page_text, fallback_title="Avbebe"):
         if cleaned:
             return cleaned
     return _clean_avbebe_title(fallback_title, "Avbebe")
+
+
+def _extract_avbebe_category_video_urls(page_text, base_url):
+    text = str(page_text or "")
+    base = _normalize_download_url(base_url) or "https://avbebe.com/"
+    urls = []
+    for raw_url in re.findall(r"""(?i)(?:href|data-href|data-url)=["']([^"']*)["']""", text):
+        candidate = html.unescape(str(raw_url or "")).replace("\\/", "/").strip()
+        if not re.search(r"/archives/\d+", candidate, re.IGNORECASE):
+            continue
+        normalized = _normalize_download_url(urllib.parse.urljoin(base, candidate))
+        if not normalized:
+            continue
+        parts = urllib.parse.urlsplit(normalized)
+        if "avbebe.com" not in parts.netloc.lower():
+            continue
+        path_match = re.search(r"(/archives/\d+)", parts.path, re.IGNORECASE)
+        if path_match:
+            normalized = _normalize_download_url(urllib.parse.urlunsplit((parts.scheme, parts.netloc, path_match.group(1), "", "")))
+        if normalized and normalized not in urls:
+            urls.append(normalized)
+    return urls
 
 
 def _avbebe_iframe_priority(url):
@@ -4889,6 +4989,9 @@ SLOW_EXTERNAL_FALLBACK_HOST_MARKERS_BY_SITE = {
         "embedgram.com",
         "embedrise.com",
         "streamtape.com",
+        "fileone.tv",
+        "ninjastream.",
+        "streamsb.",
         "mm984",
         "mmsi",
         "mmvh",
@@ -4990,6 +5093,55 @@ def _prefer_primary_ggjav_media_group(candidates):
     indexed = list(enumerate(ordered))
     indexed.sort(key=lambda item: (rank(item[1]), item[0]))
     return [candidate for _index, candidate in indexed]
+
+
+def _prefer_ggjav_media_group_matching_code(candidates, jav_code):
+    ordered = _dedupe_download_urls(candidates)
+    normalized_code = _normalize_jav_code_for_compare(jav_code)
+    if not normalized_code:
+        return ordered
+    matching_keys = {
+        _ggjav_media_key(candidate)
+        for candidate in ordered
+        if _ggjav_media_key(candidate)
+        and normalized_code in _normalize_jav_code_for_compare(_ggjav_media_key(candidate))
+    }
+    if not matching_keys:
+        return ordered
+
+    def rank(candidate):
+        key = _ggjav_media_key(candidate)
+        if key in matching_keys and _looks_like_manifest_url(candidate):
+            return 0
+        if key in matching_keys:
+            return 1
+        if key:
+            return 3
+        return 2
+
+    indexed = list(enumerate(ordered))
+    indexed.sort(key=lambda item: (rank(item[1]), item[0]))
+    return [candidate for _index, candidate in indexed]
+
+
+def _filter_ggjav_media_groups_by_code(candidates, jav_code, drop_mismatched=False):
+    ordered = _dedupe_download_urls(candidates)
+    normalized_code = _normalize_jav_code_for_compare(jav_code)
+    if not normalized_code:
+        return ordered
+    matching_keys = {
+        _ggjav_media_key(candidate)
+        for candidate in ordered
+        if _ggjav_media_key(candidate)
+        and normalized_code in _normalize_jav_code_for_compare(_ggjav_media_key(candidate))
+    }
+    if not matching_keys and not drop_mismatched:
+        return ordered
+    return [
+        candidate
+        for candidate in ordered
+        if not _ggjav_media_key(candidate) or (matching_keys and _ggjav_media_key(candidate) in matching_keys)
+    ]
 
 
 def _filter_unnecessary_ggjav_direct_mp4_candidates(candidates):
@@ -9172,6 +9324,7 @@ class DownloadManagerApp:
                 parsed_hohoj = parsed_search_url
                 site_root = f"{parsed_hohoj.scheme or 'https'}://{parsed_hohoj.netloc or 'hohoj.tv'}"
                 result["title"] = _clean_hohoj_title(result.get("title") or _extract_html_title(page_text, query_text), query_text)
+                jav_code = _extract_jav_code(result.get("title", "")) or _extract_jav_code(query_text)
                 embed_url = urllib.parse.urljoin(url, f"/embed?{parsed_hohoj.query}") if parsed_hohoj.query else ""
                 embed_match = re.search(r'<iframe[^>]+class=["\']player["\'][^>]+src=["\']([^"\']+)', page_text, re.IGNORECASE)
                 if embed_match:
@@ -9191,6 +9344,9 @@ class DownloadManagerApp:
                         )
                     except Exception:
                         pass
+                if jav_code:
+                    candidates.extend(_fetch_ggjav_related_candidate_urls(jav_code, c_req=c_req, max_pages=4))
+                    candidates = _prefer_ggjav_media_group_matching_code(candidates, jav_code)
             if not candidates and "xiaoyakankan." in search_host:
                 result["title"] = _clean_xiaoyakankan_title(result.get("title") or _extract_html_title(page_text, query_text))
                 play_urls = []
@@ -10456,6 +10612,8 @@ class DownloadManagerApp:
             source_site = _task_source_site_name(task)
             if not (source_site == "18av" and "streamfastpro" in host):
                 return "ffmpeg"
+        if not is_mp3 and self._should_try_parallel_hls_segments(target_url, task):
+            return "ffmpeg"
         if _should_prefer_native_hls(target_url, task):
             return "native"
         if resume_active:
@@ -14522,7 +14680,18 @@ class DownloadManagerApp:
         started_at = time.time()
         completed_lock = threading.Lock()
         source_site = _task_source_site_name(task)
-        prefer_curl_segments = source_site in ("18av", "movieffm", "avbebe", "goodav17", "hohoj", "jable", "missav", "njavtv")
+        prefer_curl_segments = source_site in (
+            "18av",
+            "movieffm",
+            "avbebe",
+            "goodav17",
+            "hohoj",
+            "jable",
+            "missav",
+            "njavtv",
+            "nnyy",
+            "xiaoyakankan",
+        )
         worker_count = min(self._parallel_hls_workers_for_segments(source_site, media_url, segments), total_segments)
         self._log_ffmpeg_event(
             "parallel hls download started",
@@ -15351,6 +15520,72 @@ class DownloadManagerApp:
                 )
                 self._set_task_parse_ui(item_id, message="GGJAV HLS 暫時不可用，改用下一個頁面來源...")
                 return self._download_task_internal(next_page_url, item_id, save_dir, self._should_use_impersonation(next_page_url, source_site), is_mp3)
+            jav_code = (
+                _extract_jav_code(_task_field_value(task, "short_name", ""))
+                or _extract_jav_code(_task_field_value(task, "name", ""))
+                or _extract_jav_code(self._get_task_source_page(task, fallback_url=url))
+                or _extract_jav_code(url)
+            )
+            if jav_code:
+                try:
+                    search_results = [
+                        result for result in self._google_video_search_results(jav_code)
+                        if _normalize_download_url(result.get("url", ""))
+                        and _normalize_download_url(result.get("url", "")) != _normalize_download_url(self._get_task_source_page(task, fallback_url=url))
+                    ]
+                    plan = self._build_video_search_download_plan(search_results, 0, jav_code, is_mp3=is_mp3)
+                    if plan and plan.get("target_url"):
+                        target_url = plan.get("target_url")
+                        source_page = plan.get("source_page") or target_url
+                        extra_task_data = plan.get("extra_task_data") or {}
+                        _set_task_aux_fields(
+                            task,
+                            url=target_url,
+                            source_site=plan.get("source_site") or self._source_site_from_search_url(source_page or target_url),
+                            source_page=source_page,
+                            fallback_urls=extra_task_data.get("fallback_urls", []),
+                            resolved_url="",
+                            resolved_url_saved_at=0.0,
+                        )
+                        self._update_task_state_entry(
+                            task,
+                            url=target_url,
+                            source_site=plan.get("source_site") or self._source_site_from_search_url(source_page or target_url),
+                            source_page=source_page,
+                            fallback_urls=extra_task_data.get("fallback_urls", []),
+                            resolved_url="",
+                            resolved_url_saved_at=0.0,
+                        )
+                        display_name = str(plan.get("custom_name") or jav_code).strip()
+                        if display_name:
+                            self._set_task_display_name(task, item_id, display_name, source_site=plan.get("source_site"), source_page=source_page)
+                        write_error_log(
+                            "ggjav hls exhausted search fallback",
+                            Exception("GGJAV HLS candidates exhausted; retrying same-code searchable source"),
+                            url=url,
+                            item_id=item_id,
+                            source_site=source_site,
+                            jav_code=jav_code,
+                            next_url=target_url,
+                            next_source_page=source_page,
+                        )
+                        self._set_task_parse_ui(item_id, message="GGJAV HLS 暫時不可用，改用同番號可下載來源...")
+                        return self._download_task_internal(
+                            target_url,
+                            item_id,
+                            save_dir,
+                            self._should_use_impersonation(target_url, plan.get("source_site")),
+                            is_mp3,
+                        )
+                except Exception as search_exc:
+                    write_error_log(
+                        "ggjav hls exhausted search fallback failed",
+                        search_exc,
+                        url=url,
+                        item_id=item_id,
+                        source_site=source_site,
+                        jav_code=jav_code,
+                    )
             raise DownloadSourceUnavailableException("all known video sources are unavailable")
 
         ffmpeg_candidate_urls = list(candidate_urls)
@@ -17183,6 +17418,25 @@ class DownloadManagerApp:
         has_anime1_lock = False
         try:
             task = self.tasks.get(item_id, {})
+            original_task_url = _normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url)
+            normalized_task = _normalize_state_entry(task)
+            if normalized_task != task:
+                task.update(normalized_task)
+                repaired_url = _normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url)
+                if repaired_url and repaired_url != _normalize_download_url(url):
+                    url = repaired_url
+                write_error_log(
+                    "download task state normalized",
+                    Exception("download task state was repaired before starting"),
+                    item_id=item_id,
+                    original_url=original_task_url,
+                    repaired_url=repaired_url,
+                    source_site=_task_source_site_name(task) or None,
+                )
+                try:
+                    self.persist_unfinished_state(force=True)
+                except Exception:
+                    pass
             cached_resolved_url = _normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""
             self._prepare_resume_low_speed_watch(task, url, save_dir, is_mp3=is_mp3)
             url_lower = url.lower()
@@ -17958,6 +18212,14 @@ class DownloadManagerApp:
                 primary_url=current_url,
             )
             fallback_candidates = _expand_known_embed_fallback_candidates(fallback_candidates)
+            fallback_jav_code = (
+                _extract_jav_code(_task_field_value(task, "short_name", ""))
+                or _extract_jav_code(_task_field_value(task, "name", ""))
+                or _extract_jav_code(_task_field_value(task, "source_page", ""))
+                or _extract_jav_code(current_url)
+            )
+            if fallback_source_site in ("goodav17", "hohoj") and fallback_jav_code:
+                fallback_candidates = _prefer_ggjav_media_group_matching_code(fallback_candidates, fallback_jav_code)
             fallback_candidates = _filter_unnecessary_ggjav_direct_mp4_candidates(
                 _prefer_primary_ggjav_media_group(fallback_candidates)
             )
@@ -18031,6 +18293,19 @@ class DownloadManagerApp:
                 candidate for candidate in _expand_known_embed_fallback_candidates(candidate_urls)
                 if not _is_known_ad_media_url(candidate)
             ]
+            candidate_jav_code = ""
+            if str(source_site or "").strip().lower() in ("goodav17", "hohoj"):
+                candidate_jav_code = (
+                    _extract_jav_code(display_name)
+                    or _extract_jav_code(_task_field_value(task, "short_name", ""))
+                    or _extract_jav_code(_task_field_value(task, "name", ""))
+                    or _extract_jav_code(source_page)
+                )
+                normalized_candidates = _filter_ggjav_media_groups_by_code(
+                    _prefer_ggjav_media_group_matching_code(normalized_candidates, candidate_jav_code),
+                    candidate_jav_code,
+                    drop_mismatched=(str(source_site or "").strip().lower() == "hohoj"),
+                )
             normalized_candidates = _filter_unnecessary_ggjav_direct_mp4_candidates(
                 _prefer_primary_ggjav_media_group(normalized_candidates)
             )
@@ -19973,6 +20248,39 @@ class DownloadManagerApp:
             page_headers = _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root)
             resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=page_headers)
             page_text = _response_text_utf8(resp)
+            if re.search(r"/archives/category(?:/|$)", parsed_url.path, re.IGNORECASE):
+                video_page_urls = _extract_avbebe_category_video_urls(page_text, url)
+                if not video_page_urls:
+                    write_error_log(
+                        "avbebe category page candidates missing",
+                        Exception("Avbebe category page did not expose video detail URLs"),
+                        item_id=item_id,
+                        url=url,
+                        **_http_response_log_fields(resp),
+                    )
+                    raise Exception("Failed to extract Avbebe category video URLs")
+                target_url = video_page_urls[0]
+                fallback_page_urls = video_page_urls[1:]
+                self._retarget_download_task(
+                    task,
+                    item_id,
+                    url,
+                    target_url,
+                    source_site="avbebe",
+                    source_page=target_url,
+                    fallback_urls=fallback_page_urls,
+                )
+                write_error_log(
+                    "avbebe category page retargeted",
+                    Exception("Avbebe category page was redirected to the first video detail URL"),
+                    item_id=item_id,
+                    original_url=url,
+                    target_url=target_url,
+                    fallback_count=len(fallback_page_urls),
+                )
+                self._set_task_parse_ui(item_id, message=f"Avbebe 分類頁已找到 {len(video_page_urls)} 個影片頁，改用第一個下載...")
+                self._download_task_internal(target_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
+                return
             page_title = _extract_avbebe_page_title(page_text, short_name or "Avbebe")
             media_candidates = _dedupe_download_urls(_extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd")))
             candidate_referers = {_normalize_download_url(candidate): url for candidate in media_candidates}
@@ -20242,6 +20550,7 @@ class DownloadManagerApp:
                 _extract_candidate_media_urls(embed_resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
             )
             candidate_urls.extend(_fetch_ggjav_related_candidate_urls(jav_code, c_req=c_req))
+            candidate_urls = _prefer_ggjav_media_group_matching_code(candidate_urls, jav_code)
             candidate_urls = _prioritize_reachable_media_candidates(
                 c_req,
                 candidate_urls,
@@ -21156,6 +21465,31 @@ class DownloadManagerApp:
                 self._set_task_parse_ui(item_id, error=e)
 
         try:
+            task = self.tasks.get(item_id, {})
+            source_page_url = self._get_task_source_page(task, fallback_url="")
+            if (
+                self._hohoj_task_should_refresh_slow_external_source(task, url)
+                and source_page_url
+                and _normalize_download_url(source_page_url) != _normalize_download_url(url)
+            ):
+                write_error_log(
+                    "hohoj external source reroute",
+                    Exception("HoHoJ external fallback URL skipped; refreshing source page"),
+                    item_id=item_id,
+                    source_url=url,
+                    source_page=source_page_url,
+                    source_site=_task_source_site_name(task) or None,
+                )
+                self._set_cached_resolved_link_state(
+                    task,
+                    resolved_url="",
+                    resolved_url_saved_at=0.0,
+                    page_refresh_candidates=[],
+                    clear_source_refresh_history=True,
+                )
+                self._set_task_parse_ui(item_id, message="HoHoJ 外部來源不可用，重新解析原頁...")
+                self._download_task_internal(source_page_url, item_id, save_dir, use_impersonate, is_mp3)
+                return
             if _is_known_dead_external_fallback_url(url):
                 dead_exc = DownloadSourceUnavailableException("dead external fallback URL skipped")
                 if _retry_next_page_fallback("dead external fallback skipped; retrying next search result", dead_exc):
