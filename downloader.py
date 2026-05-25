@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260525-3150"
+APP_BUILD = "20260525-3160"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -189,6 +189,26 @@ def _looks_like_garbled_text(value):
         "餉",
     )
     if any(marker in text for marker in markers):
+        return True
+    mojibake_markers = (
+        "銝",
+        "剖",
+        "嚗",
+        "蝎",
+        "摰",
+        "璆",
+        "皛",
+        "瘨",
+        "隞",
+        "憟",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    )
+    if sum(text.count(marker) for marker in mojibake_markers) >= 2:
         return True
     return (bad_count / max(len(text), 1)) > 0.04
 
@@ -470,7 +490,7 @@ PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 32,
     "avbebe": 24,
-    "goodav17": 16,
+    "goodav17": 24,
     "hohoj": 16,
     "missav": 12,
     "nnyy": 24,
@@ -490,7 +510,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "taopianplay1.com": 24,
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
-    "ggjav.com": 16,
+    "ggjav.com": 24,
     "surrit.com": 12,
     "googleusercontent.com": 1,
 }
@@ -519,7 +539,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "777tv": 18,
     "18jav": 24,
     "gimy": 32,
-    "goodav17": 20,
+    "goodav17": 24,
     "hohoj": 20,
     "jable": 18,
     "missav": 24,
@@ -563,7 +583,7 @@ YTDLP_HTTP_CHUNK_SIZE_BY_SITE = {
     "bilibili": 16 * 1024 * 1024,
     "facebook": 8 * 1024 * 1024,
     "gimy": 10 * 1024 * 1024,
-    "goodav17": 10 * 1024 * 1024,
+    "goodav17": 16 * 1024 * 1024,
     "instagram": 8 * 1024 * 1024,
     "movieffm": 10 * 1024 * 1024,
     "mixdrop": 10 * 1024 * 1024,
@@ -598,7 +618,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "anime1": 4,
     "avjoy": 6,
     "gimy": 24,
-    "goodav17": 20,
+    "goodav17": 24,
     "hohoj": 20,
     "jable": 20,
     "mixdrop": 18,
@@ -612,6 +632,8 @@ HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
 HTTP_STREAM_CHUNK_SIZE = 8 * 1024 * 1024
 HTTP_RANGE_CHUNK_SIZE = 8 * 1024 * 1024
 HTTP_FILE_COPY_CHUNK_SIZE = 8 * 1024 * 1024
+HTTP_RANGE_PART_MAX_ATTEMPTS = 6
+HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS = 0.6
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
     "18jav",
     "777tv",
@@ -701,6 +723,8 @@ STOP_REASON_PAUSE = "pause"
 STOP_REASON_DELETE = "delete"
 STOP_REASONS = frozenset((STOP_REASON_PAUSE, STOP_REASON_DELETE))
 MEDIA_DOWNLOAD_RETRY_MARKERS = (
+    "http 400",
+    "server returned 400 bad request",
     "http 403",
     "http 404",
     "http 410",
@@ -741,6 +765,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls setup retry next candidate",
     "parallel hls setup fallback to ffmpeg",
     "parallel hls setup candidates exhausted",
+    "ggjav ffmpeg skipped failed hls candidates",
+    "ffmpeg direct media handoff",
     "ggjav hls exhausted page fallback",
     "parallel hls skipped fmp4 playlist",
     "parallel hls skipped huge playlist",
@@ -758,6 +784,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "m3u8 total bytes invalidated",
     "download concurrency limit changed",
     "http multipart download started",
+    "http range part retry",
+    "unknown video artifact removed",
     "direct media fallback retry",
     "avjoy media refresh retry",
     "yt-dlp native hls fallback started",
@@ -1399,8 +1427,9 @@ def _normalize_download_url(url):
             query = [(key, value) for key, value in query if key not in ("list", "index", "start_radio", "pp", "feature")]
     elif netloc == "youtu.be":
         query = [(key, value) for key, value in query if key not in ("list", "index", "start_radio", "pp", "feature")]
+    normalized_path = urllib.parse.quote(urllib.parse.unquote(parsed.path or "/"), safe="/:@!$&'()*+,;=%")
     normalized_query = urllib.parse.urlencode(query, doseq=True)
-    return urllib.parse.urlunsplit((scheme, netloc, parsed.path, normalized_query, ""))
+    return urllib.parse.urlunsplit((scheme, netloc, normalized_path, normalized_query, ""))
 
 
 def _extract_youtube_video_id(url):
@@ -4662,6 +4691,21 @@ def _is_known_non_download_listing_url(url):
 
 
 SLOW_EXTERNAL_FALLBACK_HOST_MARKERS_BY_SITE = {
+    "goodav17": (
+        "filemoon.",
+        "vidoza.",
+        "streamwish.",
+        "filelions.",
+        "dood.",
+        "dooood.",
+        "mixdrop.",
+        "embedgram.com",
+        "embedrise.com",
+        "streamtape.com",
+        "mm984",
+        "mmsi",
+        "mmvh",
+    ),
     "hohoj": (
         "asianclub.tv",
         "filemoon.",
@@ -4681,6 +4725,12 @@ SLOW_EXTERNAL_FALLBACK_HOST_MARKERS_BY_SITE = {
 }
 
 
+DEAD_EXTERNAL_FALLBACK_HOST_MARKERS = (
+    "alliance4creativity.com",
+    "rapidvideo.com",
+)
+
+
 def _is_slow_external_fallback_url_for_site(url, source_site):
     site = str(source_site or "").strip().lower()
     markers = SLOW_EXTERNAL_FALLBACK_HOST_MARKERS_BY_SITE.get(site)
@@ -4691,6 +4741,14 @@ def _is_slow_external_fallback_url_for_site(url, source_site):
     if not host:
         return False
     return any(marker in host for marker in markers)
+
+
+def _is_known_dead_external_fallback_url(url):
+    parsed = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or ""))
+    host = parsed.netloc.lower()
+    if not host:
+        return False
+    return any(marker in host for marker in DEAD_EXTERNAL_FALLBACK_HOST_MARKERS)
 
 
 KNOWN_AD_MEDIA_PATH_MARKERS = (
@@ -8567,9 +8625,9 @@ class DownloadManagerApp:
     def _mark_task_finished(self, item_id):
         task = self.tasks.get(item_id)
         if not task:
-            return
+            return False
         if not self._validate_task_output_before_finish(item_id, reason="mark_task_finished"):
-            return
+            return False
         primary_value = str(_task_field_value(task, "filename") or "").strip()
         secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
         filename = primary_value or secondary_value or ""
@@ -8581,6 +8639,7 @@ class DownloadManagerApp:
         _set_task_aux_fields(task, state="FINISHED")
         self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", complete_progress=True)
         remove_from_state(_normalize_download_url(_task_field_value(task, "url", "")) or "")
+        return True
 
     def _discard_task(self, item_id):
         self._cleanup_temp_files(item_id)
@@ -11699,7 +11758,8 @@ class DownloadManagerApp:
         )
         self._set_task_output_file(task, item_id, out_path)
         self._set_task_named_column_text(item_id, "progress", "100%")
-        self._mark_task_finished(item_id)
+        if not self._mark_task_finished(item_id):
+            raise Exception("near-complete HLS resume output failed final validation")
         self._log_ffmpeg_event(
             "ffmpeg near complete resume accepted",
             Exception("near complete HLS resume base accepted"),
@@ -11733,6 +11793,43 @@ class DownloadManagerApp:
                         os.remove(artifact_path)
                 except OSError:
                     continue
+
+    def _cleanup_unknown_video_artifacts(self, save_dir, item_id=None, url=None):
+        directory = str(save_dir or "").strip()
+        if not directory or not os.path.isdir(directory):
+            return
+        patterns = ("*.unknown_video", "*.unknown_video.part", "embed-*.unknown_video*")
+        removed = []
+        seen = set()
+        for pattern in patterns:
+            for artifact_path in glob.glob(os.path.join(directory, pattern)):
+                norm_path = os.path.normcase(os.path.abspath(artifact_path))
+                if norm_path in seen or not os.path.isfile(artifact_path):
+                    continue
+                seen.add(norm_path)
+                base_name = os.path.basename(artifact_path)
+                try:
+                    artifact_size = os.path.getsize(artifact_path)
+                except OSError:
+                    artifact_size = 0
+                if not base_name.lower().startswith("embed-") and artifact_size > 2 * 1024 * 1024:
+                    info = self._probe_media_info(artifact_path)
+                    if info.get("valid"):
+                        continue
+                try:
+                    os.remove(artifact_path)
+                    removed.append({"path": artifact_path, "size": artifact_size})
+                except OSError:
+                    continue
+        if removed:
+            write_error_log(
+                "unknown video artifact removed",
+                Exception("removed yt-dlp unknown_video artifact"),
+                item_id=item_id,
+                url=url,
+                count=len(removed),
+                removed=removed[:5],
+            )
 
     def _cleanup_failed_native_hls_output(self, task, item_id, media_url, save_dir, is_mp3=False):
         if is_mp3 or str(_task_field_value(task, "state", "") or "") == "FINISHED":
@@ -12278,6 +12375,37 @@ class DownloadManagerApp:
             return {"total_size": total_size, "range_supported": range_supported, "content_type": content_type}
 
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
+        last_exc = None
+        for attempt in range(HTTP_RANGE_PART_MAX_ATTEMPTS):
+            if stop_event.is_set() or self._shutdown_started:
+                return
+            try:
+                progress_box["bytes"] = 0
+                if os.path.exists(part_path):
+                    try:
+                        os.remove(part_path)
+                    except OSError:
+                        pass
+                return self._download_http_range_part_once(url, headers, start_byte, end_byte, part_path, progress_box, stop_event)
+            except Exception as exc:
+                last_exc = exc
+                if stop_event.is_set() or self._shutdown_started or attempt >= HTTP_RANGE_PART_MAX_ATTEMPTS - 1:
+                    break
+                write_error_log(
+                    "http range part retry",
+                    exc,
+                    url=url,
+                    part_start=start_byte,
+                    part_end=end_byte,
+                    part_path=part_path,
+                    attempt=attempt + 1,
+                    max_attempts=HTTP_RANGE_PART_MAX_ATTEMPTS,
+                )
+                time.sleep(min(HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS * (2 ** attempt), 6.0))
+        if last_exc is not None:
+            raise last_exc
+
+    def _download_http_range_part_once(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
         req_headers = _make_range_http_headers(headers, f"bytes={start_byte}-{end_byte}")
         parsed_download_url = urllib.parse.urlparse(str(url or ""))
         download_netloc = parsed_download_url.netloc.lower()
@@ -12481,7 +12609,8 @@ class DownloadManagerApp:
         self._move_file_with_retry(temp_out_path, out_path)
         self._set_task_output_file(task, item_id, out_path)
         self._set_task_named_column_text(item_id, "progress", "100%")
-        self._mark_task_finished(item_id)
+        if not self._mark_task_finished(item_id):
+            raise Exception("direct audio output failed final validation")
         write_error_log("ffmpeg direct audio finished", Exception("ffmpeg direct audio finished"), url=url, item_id=item_id, output=out_path, bytes=self._get_existing_file_size(out_path))
 
     def _get_disk_free_bytes(self, target_path):
@@ -13405,8 +13534,18 @@ class DownloadManagerApp:
             return None
         out_path, _ = self._resolve_direct_media_output_path(media_url, save_dir, display_name, default_ext=default_ext)
         media_headers = dict(headers or _make_ytdlp_http_headers(referer=referer, origin=origin))
-        self._download_http_media(item_id, media_url, out_path, headers=media_headers, session=session)
-        return out_path
+        self._download_http_media(item_id, media_url, out_path, headers=media_headers, session=session, mark_finished=False)
+        task = self.tasks.get(item_id, {})
+        task_state = str(_task_field_value(task, "state", "") or "")
+        if task_state in ("PAUSED", "PAUSE_REQUESTED", "DELETED", "DELETE_REQUESTED"):
+            return out_path
+        if not self._has_nonempty_file(out_path):
+            raise FileNotFoundError(f"direct media download did not produce output: {out_path}")
+        self._set_task_output_file(task, item_id, out_path)
+        final_output_path = self._task_output_path_or_default(task, out_path)
+        if not self._mark_task_finished(item_id):
+            raise Exception("direct media output failed final validation")
+        return final_output_path
 
     def _is_retryable_media_download_error(self, exc):
         text = str(exc or "").lower()
@@ -14159,7 +14298,7 @@ class DownloadManagerApp:
         started_at = time.time()
         completed_lock = threading.Lock()
         source_site = _task_source_site_name(task)
-        prefer_curl_segments = source_site in ("movieffm", "avbebe")
+        prefer_curl_segments = source_site in ("movieffm", "avbebe", "goodav17", "hohoj")
         worker_count = min(self._parallel_hls_workers_for_segments(source_site, media_url, segments), total_segments)
         self._log_ffmpeg_event(
             "parallel hls download started",
@@ -14270,7 +14409,8 @@ class DownloadManagerApp:
             shutil.rmtree(part_dir, ignore_errors=True)
             self._set_task_output_file(task, item_id, out_path)
             self._set_task_named_column_text(item_id, "progress", "100%")
-            self._mark_task_finished(item_id)
+            if not self._mark_task_finished(item_id):
+                raise Exception("parallel HLS output failed final validation")
             logged_output_path = self._task_output_path_or_default(task, out_path)
             self._log_ffmpeg_event(
                 "parallel hls download finished",
@@ -14979,6 +15119,30 @@ class DownloadManagerApp:
             raise DownloadSourceUnavailableException("all known video sources are unavailable")
 
         ffmpeg_candidate_urls = list(candidate_urls)
+        if source_site in ggjav_hls_source_sites and parallel_setup_errors:
+            failed_parallel_urls = {
+                _normalize_download_url(failed_url)
+                for failed_url, _message in parallel_setup_errors
+                if _normalize_download_url(failed_url)
+            }
+            if failed_parallel_urls:
+                before_count = len(ffmpeg_candidate_urls)
+                ffmpeg_candidate_urls = [
+                    candidate
+                    for candidate in ffmpeg_candidate_urls
+                    if _normalize_download_url(candidate) not in failed_parallel_urls
+                ]
+                skipped_count = before_count - len(ffmpeg_candidate_urls)
+                if skipped_count > 0:
+                    write_error_log(
+                        "ggjav ffmpeg skipped failed hls candidates",
+                        Exception("skipped GGJAV HLS candidates that already failed parallel setup"),
+                        url=url,
+                        item_id=item_id,
+                        source_site=source_site,
+                        skipped_count=skipped_count,
+                        remaining_count=len(ffmpeg_candidate_urls),
+                    )
         skip_ffmpeg_same_failed_primary = False
         if failed_primary_candidate_url:
             alternate_candidates = [
@@ -14993,6 +15157,62 @@ class DownloadManagerApp:
                 ffmpeg_candidate_urls = alternate_candidates + failed_candidates
             elif source_site == "gimy":
                 skip_ffmpeg_same_failed_primary = True
+
+        if not is_mp3:
+            direct_ffmpeg_candidates = [
+                candidate
+                for candidate in _dedupe_download_urls(ffmpeg_candidate_urls)
+                if _looks_like_http_media_url(candidate) and not _looks_like_manifest_url(candidate)
+            ]
+            if direct_ffmpeg_candidates:
+                direct_headers = _make_ytdlp_http_headers(referer=referer, origin=origin)
+                last_direct_error = None
+                for direct_index, direct_url in enumerate(direct_ffmpeg_candidates):
+                    try:
+                        write_error_log(
+                            "ffmpeg direct media handoff",
+                            Exception("direct media candidate routed before ffmpeg"),
+                            url=direct_url,
+                            item_id=item_id,
+                            source_site=source_site,
+                            direct_candidate_count=len(direct_ffmpeg_candidates),
+                            candidate_index=direct_index + 1,
+                        )
+                        self._download_direct_or_audio_media(
+                            item_id,
+                            direct_url,
+                            save_dir,
+                            name,
+                            is_mp3=False,
+                            referer=referer,
+                            origin=origin,
+                            headers=direct_headers,
+                            default_ext=".mp4",
+                        )
+                        return
+                    except (
+                        StopDownloadException,
+                        KeyboardInterrupt,
+                        ResumeLowSpeedReanalysisException,
+                        ParallelHlsRetryLaterException,
+                        ParallelHlsUnsupportedSegmentContentException,
+                    ):
+                        raise
+                    except Exception as exc:
+                        last_direct_error = exc
+                        if direct_index >= len(direct_ffmpeg_candidates) - 1 or not self._is_retryable_media_download_error(exc):
+                            raise
+                        write_error_log(
+                            "direct media fallback retry",
+                            Exception("direct media fallback retry"),
+                            item_id=item_id,
+                            url=direct_url,
+                            next_url=direct_ffmpeg_candidates[direct_index + 1],
+                            source_site=source_site,
+                            reason=str(exc)[:240],
+                        )
+                if last_direct_error:
+                    raise last_direct_error
 
         for candidate_url in ffmpeg_candidate_urls:
             if skip_ffmpeg_same_failed_primary and _normalize_download_url(candidate_url) == failed_primary_candidate_url:
@@ -15609,7 +15829,8 @@ class DownloadManagerApp:
 
                 self._set_task_output_file(task, item_id, out_path)
                 self._set_task_named_column_text(item_id, "progress", "100%")
-                self._mark_task_finished(item_id)
+                if not self._mark_task_finished(item_id):
+                    raise Exception("ffmpeg output failed final validation")
                 logged_output_path = self._task_output_path_or_default(task, out_path)
                 self._log_ffmpeg_event(
                     "ffmpeg download finished",
@@ -17454,6 +17675,7 @@ class DownloadManagerApp:
                 candidate for candidate in fallback_candidates
                 if candidate != current_url and not _is_known_non_download_listing_url(candidate)
                 and not _is_known_ad_media_url(candidate)
+                and not _is_known_dead_external_fallback_url(candidate)
                 and not _is_slow_external_fallback_url_for_site(candidate, fallback_source_site)
             ]
             if not fallback_candidates:
@@ -17948,6 +18170,11 @@ class DownloadManagerApp:
             except Exception as e:
                 if _is_mixdrop_direct_media(url, direct_referer):
                     raise
+                if self._is_retryable_media_download_error(e) and _retry_next_page_fallback(
+                    "direct media failed; retrying next source",
+                    e,
+                ):
+                    return
                 self._set_task_parse_ui(item_id, message=f"Direct media download failed: {str(e)[:30]}")
 
         if "jable.tv" in parsed_url.netloc:
@@ -20590,14 +20817,23 @@ class DownloadManagerApp:
                 self._set_task_parse_ui(item_id, error=e)
 
         try:
+            if _is_known_dead_external_fallback_url(url):
+                dead_exc = DownloadSourceUnavailableException("dead external fallback URL skipped")
+                if _retry_next_page_fallback("dead external fallback skipped; retrying next search result", dead_exc):
+                    return
+                self._mark_task_error_state(item_id, dead_exc)
+                return
             _run_yt_dlp(url)
+            self._cleanup_unknown_video_artifacts(save_dir, item_id=item_id, url=url)
             if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "DELETED":
                 raise KeyboardInterrupt()
-            self._mark_task_finished(item_id)
+            if not self._mark_task_finished(item_id):
+                raise Exception("yt-dlp output failed final validation")
         except (StopDownloadException, KeyboardInterrupt):
             self._handle_stopped_download(item_id)
             raise
         except Exception as e:
+            self._cleanup_unknown_video_artifacts(save_dir, item_id=item_id, url=url)
             task = self.tasks.get(item_id, {})
             if str(_task_field_value(task, "state", "") or "") in ("DELETED", "DELETE_REQUESTED"):
                 self._discard_task(item_id)
@@ -20606,8 +20842,12 @@ class DownloadManagerApp:
                 return
             if _retry_next_page_fallback("yt-dlp failed; retrying next search result", e):
                 return
+            error_text = str(e or "").lower()
+            if _is_known_dead_external_fallback_url(url) or any(marker in error_text for marker in DEAD_EXTERNAL_FALLBACK_HOST_MARKERS):
+                self._mark_task_error_state(item_id, DownloadSourceUnavailableException("all known video sources are unavailable"))
+                return
             if _is_slow_external_fallback_url_for_site(url, _task_source_site_name(task)) and (
-                not self._is_retryable_media_download_error(e) or "unsupported url" in str(e or "").lower()
+                not self._is_retryable_media_download_error(e) or "unsupported url" in error_text
             ):
                 self._mark_task_error_state(item_id, DownloadSourceUnavailableException("all known video sources are unavailable"))
                 return
