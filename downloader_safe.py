@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260525-3160"
+APP_BUILD = "20260525-3170"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -73,6 +73,9 @@ STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
 ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
 MAX_DOWNLOADS_PER_DOMAIN = 4
+MAX_ACTIVE_DOWNLOADS_GLOBAL = 3
+STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 1
+STARTUP_RESUME_WARMUP_SECONDS = 8.0
 MAX_DOWNLOADS_PER_SOURCE_PAGE = 3
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
     "movieffm": 3,
@@ -81,7 +84,7 @@ MAX_DOWNLOADS_PER_SOURCE_SITE = 3
 MAX_DOWNLOADS_PER_SOURCE_SITE_BY_SITE = {}
 VIDEO_SEARCH_MIN_QUALITY = 720
 LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
-LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 10
+LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 3
 RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
 RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 64 * 1024
 MAX_QUEUE_TASKS = 300
@@ -159,8 +162,10 @@ def _looks_like_garbled_text(value):
     bad_count = 0
     for char in text:
         codepoint = ord(char)
-        if char == "\ufffd" or codepoint == 0xFFFD or 0xE000 <= codepoint <= 0xF8FF:
+        if char == "\ufffd" or codepoint == 0xFFFD or 0x80 <= codepoint <= 0x9F or 0xE000 <= codepoint <= 0xF8FF:
             bad_count += 1
+    if bad_count and text.count("?") >= 2:
+        return True
     markers = (
         "嚙",
         "�",
@@ -438,7 +443,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj", "missav", "nnyy", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("movieffm", "avbebe", "goodav17", "hohoj", "jable", "missav", "njavtv", "nnyy", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -482,6 +487,7 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "dytt-film.com",
     "hmrvideo.com",
     "mzm3u8.com",
+    "mushroomtrack.com",
     "vodcnd",
     "wlcdn88.com",
     "xluuss",
@@ -492,7 +498,9 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "avbebe": 24,
     "goodav17": 24,
     "hohoj": 16,
+    "jable": 12,
     "missav": 12,
+    "njavtv": 12,
     "nnyy": 24,
     "xiaoyakankan": 24,
 }
@@ -541,7 +549,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "gimy": 32,
     "goodav17": 24,
     "hohoj": 20,
-    "jable": 18,
+    "jable": 10,
     "missav": 24,
     "nnyy": 24,
     "movieffm": 32,
@@ -620,13 +628,16 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "gimy": 24,
     "goodav17": 24,
     "hohoj": 20,
-    "jable": 20,
+    "jable": 12,
     "mixdrop": 18,
     "movieffm": 24,
     "missav": 20,
     "njavtv": 20,
     "tktube": 20,
     "youtube": 20,
+}
+HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
+    "mxcontent.net": 8,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
 HTTP_STREAM_CHUNK_SIZE = 8 * 1024 * 1024
@@ -700,9 +711,9 @@ HLS_RESUME_REWIND_SEGMENT_MULTIPLIER = 2.5
 UI_THROTTLE_INTERVAL_SECONDS = 2.0
 STATUS_STYLE_REFRESH_INTERVAL_MS = 600
 SUMMARY_REFRESH_INTERVAL_MS = 1200
-STARTUP_RESUME_DELAY_MS = 250
-STARTUP_RESUME_BATCH_SIZE = 2
-STARTUP_RESUME_BATCH_DELAY_MS = 80
+STARTUP_RESUME_DELAY_MS = 1200
+STARTUP_RESUME_BATCH_SIZE = 1
+STARTUP_RESUME_BATCH_DELAY_MS = 1500
 STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS = 1200
 SHUTDOWN_ACTIVE_DOWNLOAD_WAIT_SECONDS = 1.2
 SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS = 0.8
@@ -760,6 +771,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg terminate requested",
     "ffmpeg download started",
     "ffmpeg download finished",
+    "ffmpeg resume segment preserved",
     "parallel hls download started",
     "parallel hls download finished",
     "parallel hls setup retry next candidate",
@@ -1333,7 +1345,12 @@ def _normalize_state_entry(entry):
         or _looks_like_numeric_only_title(stripped_name)
     )
     if suspicious_name:
-        code_fallback = _extract_jav_code(normalized.get("resolved_url", "")) or _extract_jav_code(url)
+        code_fallback = (
+            _extract_jav_code(stripped_name)
+            or _extract_jav_code(normalized.get("source_page", ""))
+            or _extract_jav_code(normalized.get("resolved_url", ""))
+            or _extract_jav_code(url)
+        )
         if code_fallback:
             name = code_fallback
         else:
@@ -1399,7 +1416,19 @@ def _normalize_state_entry(entry):
             or _looks_like_garbled_text(filename_stem)
             or _looks_like_numeric_only_title(filename_stem)
         ):
-            normalized["filename"] = ""
+            filename_dir = os.path.dirname(normalized["filename"])
+            filename_ext = os.path.splitext(normalized["filename"])[1]
+            if not filename_ext or not re.fullmatch(r"\.[A-Za-z0-9]{2,5}", filename_ext):
+                filename_ext = ".mp4"
+            safe_name = _safe_output_stem(
+                _extract_jav_code(normalized["name"])
+                or _extract_jav_code(normalized.get("source_page", ""))
+                or _extract_jav_code(normalized.get("url", ""))
+                or normalized.get("name", "")
+                or default_short_name_for_url(normalized.get("url", "")),
+                fallback="download",
+            )
+            normalized["filename"] = os.path.join(filename_dir, f"{safe_name}{filename_ext}") if filename_dir and safe_name else ""
     normalized["temp_filename"] = str(normalized.get("temp_filename", "") or "").strip()
     return normalized
 
@@ -2806,8 +2835,29 @@ def _nnyy_stream_priority(url):
     return 100
 
 
+def _hls_candidate_resolution_score(url):
+    text = urllib.parse.unquote(str(url or "")).lower()
+    scores = []
+    for match in re.finditer(r"(?<!\d)(2160|1440|1080|720|540|480|360|240)p(?!\d)", text):
+        try:
+            scores.append(int(match.group(1)))
+        except ValueError:
+            pass
+    for match in re.finditer(r"(?<!\d)(\d{3,4})x(\d{3,4})(?!\d)", text):
+        try:
+            width = int(match.group(1))
+            height = int(match.group(2))
+        except ValueError:
+            continue
+        if width >= 320 and height >= 180:
+            scores.append(height)
+    return max(scores) if scores else 0
+
+
 def _site_hls_candidate_priority(source_site, url):
     site = str(source_site or "").strip().lower()
+    if site == "missav":
+        return -_hls_candidate_resolution_score(url)
     if site == "movieffm":
         return _movieffm_stream_priority(url)
     if site == "xiaoyakankan":
@@ -2826,7 +2876,7 @@ def _order_site_hls_candidates(primary_url, fallback_urls=(), source_site=""):
     site = str(source_site or "").strip().lower()
     if site in ("goodav17", "hohoj"):
         ordered = _filter_secondary_ggjav_media_groups(ordered)
-    if site not in ("movieffm", "xiaoyakankan", "nnyy"):
+    if site not in ("missav", "movieffm", "xiaoyakankan", "nnyy"):
         return ordered
     indexed_candidates = list(enumerate(ordered))
     indexed_candidates.sort(key=lambda item: (_site_hls_candidate_priority(site, item[1]), item[0]))
@@ -5769,6 +5819,7 @@ def load_state():
         if not isinstance(raw, list):
             return []
         entries = [_normalize_state_entry(entry) for entry in raw]
+        normalized_changed = entries != raw
         seen_temp_paths = set()
         for entry in entries:
             temp_filename = str(entry.get("temp_filename", "") or "").strip()
@@ -5778,8 +5829,14 @@ def load_state():
             if temp_key in seen_temp_paths:
                 entry["temp_filename"] = ""
                 entry["resume_requested"] = False
+                normalized_changed = True
                 continue
             seen_temp_paths.add(temp_key)
+        if normalized_changed:
+            try:
+                save_state_entries(entries)
+            except Exception:
+                pass
         return entries
     except Exception:
         return []
@@ -6352,13 +6409,20 @@ class DownloadManagerApp:
         self._active_network_sessions_lock = threading.Lock()
         self._startup_resume_pending = False
         self._startup_resume_scheduled = False
+        self._startup_started_at = time.time()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_ui()
         if self.tree is not None:
             self.ui_throttler = UIThrottler(self.root, self.tree, update_interval=UI_THROTTLE_INTERVAL_SECONDS)
             self.throttler = self.ui_throttler
         self.root.after(STARTUP_RESUME_DELAY_MS, self._resume_unfinished_tasks_deferred)
+        self.root.after(int(STARTUP_RESUME_WARMUP_SECONDS * 1000) + 500, self._process_queue_after_startup_warmup)
         self.root.after(STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS, self._auto_install_ffmpeg_if_missing)
+
+    def _process_queue_after_startup_warmup(self):
+        if self._shutdown_started:
+            return
+        self._schedule_process_queue(delay=0)
 
     def _auto_install_ffmpeg_if_missing(self):
         if self._shutdown_started:
@@ -12786,6 +12850,16 @@ class DownloadManagerApp:
             return LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS
         return MAX_DOWNLOADS_PER_DOMAIN
 
+    def _effective_global_download_limit(self):
+        limit = int(MAX_ACTIVE_DOWNLOADS_GLOBAL)
+        try:
+            elapsed = time.time() - float(getattr(self, "_startup_started_at", 0.0) or 0.0)
+        except Exception:
+            elapsed = STARTUP_RESUME_WARMUP_SECONDS
+        if elapsed < STARTUP_RESUME_WARMUP_SECONDS:
+            limit = min(limit, int(STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS))
+        return max(1, limit)
+
     def _source_download_limits(self, source_site, domain_limit):
         site = (source_site or "").strip().lower()
         source_page_limit = int(MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE.get(site, MAX_DOWNLOADS_PER_SOURCE_PAGE))
@@ -12794,20 +12868,23 @@ class DownloadManagerApp:
             source_page_limit = min(domain_limit, source_page_limit)
         return source_page_limit, min(domain_limit, source_site_limit)
 
-    def _log_domain_limit_change(self, domain_limit, active_count, queued_count):
+    def _log_domain_limit_change(self, domain_limit, active_count, queued_count, global_limit=None):
         try:
             normalized_limit = int(domain_limit)
         except Exception:
             return
-        if self._last_reported_domain_limit == normalized_limit:
+        normalized_global_limit = int(global_limit or MAX_ACTIVE_DOWNLOADS_GLOBAL)
+        reported_limits = (normalized_limit, normalized_global_limit)
+        if self._last_reported_domain_limit == reported_limits:
             return
         previous_limit = self._last_reported_domain_limit
-        self._last_reported_domain_limit = normalized_limit
+        self._last_reported_domain_limit = reported_limits
         write_error_log(
             "download concurrency limit changed",
             Exception("download concurrency limit changed"),
             previous_limit=previous_limit,
             domain_limit=normalized_limit,
+            global_limit=normalized_global_limit,
             source_site_limit=min(normalized_limit, int(MAX_DOWNLOADS_PER_SOURCE_SITE)),
             source_page_limit=min(normalized_limit, int(MAX_DOWNLOADS_PER_SOURCE_PAGE)),
             active_count=active_count,
@@ -13393,6 +13470,11 @@ class DownloadManagerApp:
                     part_count = min(part_count, 4)
                 elif remaining_size and remaining_size < 64 * 1024 * 1024:
                     part_count = min(part_count, 12)
+                download_host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+                for host_marker, host_part_count in HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER.items():
+                    if host_marker in download_host:
+                        part_count = min(part_count, int(host_part_count))
+                        break
                 part_count = min(max(2, part_count), 24)
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
                 write_error_log(
@@ -14726,7 +14808,7 @@ class DownloadManagerApp:
                 if urllib.parse.urlsplit(_normalize_download_url(candidate) or "").netloc.lower() not in gimy_failed_stream_hosts
             ]
         candidate_urls = _order_site_hls_candidates(url, direct_fallback_urls, source_site=source_site)
-        if source_site in ("movieffm", "xiaoyakankan", "nnyy") and candidate_urls:
+        if source_site in ("missav", "movieffm", "xiaoyakankan", "nnyy") and candidate_urls:
             selected_manifest_url = candidate_urls[0]
             if _normalize_download_url(selected_manifest_url) != _normalize_download_url(url):
                 remaining_manifest_urls = [
@@ -14912,7 +14994,12 @@ class DownloadManagerApp:
                     return detail_rebuild
             return None
 
-        if _should_prefer_native_hls(url, task) and source_site != "missav" and not _native_fallback_done:
+        if (
+            _should_prefer_native_hls(url, task)
+            and not self._should_try_parallel_hls_segments(url, task)
+            and source_site != "missav"
+            and not _native_fallback_done
+        ):
             write_error_log(
                 "preferred native hls route selected",
                 Exception("preferred native hls route selected"),
@@ -15010,7 +15097,7 @@ class DownloadManagerApp:
         )
         parallel_exhausted_ggjav_candidates = False
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("missav", "movieffm", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -15026,7 +15113,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("missav", "movieffm", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -15754,9 +15841,14 @@ class DownloadManagerApp:
                     continue
                 if not is_mp3:
                     strict_hls_artifact = _task_source_site_name(task) in STRICT_HLS_ARTIFACT_SITES
+                    resumed_segment_only = (
+                        resume_anchor_seconds > 0
+                        and resume_exists
+                        and os.path.abspath(str(final_source or "")) == os.path.abspath(str(resume_out_path or ""))
+                    )
                     looks_truncated = total_duration > 30 and final_duration > 0 and final_duration < min(5.0, total_duration * 0.01)
                     looks_invalid = (not final_info.get("valid")) and final_size < 1024 * 1024
-                    if strict_hls_artifact:
+                    if strict_hls_artifact and not resumed_segment_only:
                         looks_truncated = looks_truncated or (
                             total_duration > 300.0
                             and final_duration > 0.0
@@ -15775,6 +15867,36 @@ class DownloadManagerApp:
                             base_bytes,
                             total_duration,
                         )
+                    if resumed_segment_only and final_info.get("valid") and final_duration > 0.0 and final_size >= 1024 * 1024:
+                        checkpoint_seconds = self._sanitize_resume_seconds(
+                            max(float(resume_anchor_seconds or 0.0), 0.0) + max(float(final_duration or 0.0), 0.0),
+                            total_duration,
+                        )
+                        checkpoint_bytes = max(int(base_bytes or 0), 0) + max(int(final_size or 0), 0)
+                        self._save_resume_progress(
+                            progress_path,
+                            checkpoint_seconds,
+                            source_url=resume_key,
+                            bytes_done=checkpoint_bytes,
+                            total_bytes=total_bytes_box.get("value") or total_bytes,
+                            min_interval_seconds=0,
+                            min_bytes_delta=0,
+                            force=True,
+                        )
+                        last_error = Exception("FFmpeg resume segment completed but could not be merged yet; preserved resume progress")
+                        self._log_ffmpeg_event(
+                            "ffmpeg resume segment preserved",
+                            last_error,
+                            task,
+                            item_id,
+                            candidate_url,
+                            segment_output=resume_out_path,
+                            segment_duration=final_duration,
+                            checkpoint_seconds=checkpoint_seconds,
+                            checkpoint_bytes=checkpoint_bytes,
+                            total_duration=total_duration,
+                        )
+                        continue
                     if looks_truncated or looks_invalid:
                         last_error = Exception(
                             f"FFmpeg produced an incomplete output artifact: size={final_size} duration={final_duration:.3f}"
@@ -16309,13 +16431,16 @@ class DownloadManagerApp:
         if self._shutdown_started:
             return
         domain_limit = self._effective_domain_download_limit()
+        global_limit = self._effective_global_download_limit()
         domain_counts = {}
         source_page_counts = {}
         source_site_counts = {}
         media_key_counts = {}
         queued_items = []
+        active_total = 0
         for item_id, task in self.tasks.items():
             if self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
+                active_total += 1
                 domain, source_page = (
                     self._extract_domain(_normalize_download_url(_task_field_value(task, "url", "")) or ""),
                     self._get_task_source_page(task),
@@ -16331,7 +16456,7 @@ class DownloadManagerApp:
                     media_key_counts[media_key] = media_key_counts.get(media_key, 0) + 1
             elif self._is_queued_state(str(_task_field_value(task, "state", "") or "")):
                 queued_items.append(item_id)
-        self._log_domain_limit_change(domain_limit, sum(domain_counts.values()), len(queued_items))
+        self._log_domain_limit_change(domain_limit, sum(domain_counts.values()), len(queued_items), global_limit=global_limit)
         for item_id in queued_items:
             task = self.tasks[item_id]
             domain, source_page = (
@@ -16342,6 +16467,8 @@ class DownloadManagerApp:
             source_page_limit, source_site_limit = self._source_download_limits(source_site, domain_limit)
             media_key = self._task_media_duplicate_key(task)
             if media_key and media_key_counts.get(media_key, 0) > 0:
+                continue
+            if active_total >= global_limit:
                 continue
             if domain_counts.get(domain, 0) >= domain_limit:
                 continue
@@ -16357,6 +16484,7 @@ class DownloadManagerApp:
                 source_site_counts[source_site] = source_site_counts.get(source_site, 0) + 1
             if media_key:
                 media_key_counts[media_key] = media_key_counts.get(media_key, 0) + 1
+            active_total += 1
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中")
             self._start_daemon_thread(
                 self.download_task,
@@ -17591,24 +17719,40 @@ class DownloadManagerApp:
         ):
             nonlocal safe_name
             site = source_site or _task_source_site_name(task)
+            fallback_input = fallback_urls if fallback_urls is not None else _task_field_value(task, "fallback_urls", [])
+            ordered_manifest_urls = _order_site_hls_candidates(
+                media_url,
+                fallback_input or [],
+                source_site=site,
+            )
+            if ordered_manifest_urls:
+                selected_media_url = ordered_manifest_urls[0]
+                selected_fallback_urls = [
+                    candidate
+                    for candidate in ordered_manifest_urls[1:]
+                    if _normalize_download_url(candidate) != _normalize_download_url(selected_media_url)
+                ]
+            else:
+                selected_media_url = media_url
+                selected_fallback_urls = list(fallback_urls or [])
             _set_task_identity(
                 name=name,
                 source_site=site,
                 source_page=source_page,
-                fallback_urls=fallback_urls,
+                fallback_urls=selected_fallback_urls,
             )
             if name and not _looks_like_garbled_text(name):
                 safe_name = _safe_output_stem(
                     _task_field_value(task, "short_name") or _task_field_value(task, "name") or name,
                     fallback=safe_name,
-                )
-            effective_fallbacks = _dedupe_download_urls(
-                fallback_urls if fallback_urls is not None else _task_field_value(task, "fallback_urls", []),
-                primary_url=media_url,
             )
-            self._log_m3u8_route_selected(task, item_id, media_url, source_site=site, fallback_urls=effective_fallbacks)
+            effective_fallbacks = _dedupe_download_urls(
+                selected_fallback_urls,
+                primary_url=selected_media_url,
+            )
+            self._log_m3u8_route_selected(task, item_id, selected_media_url, source_site=site, fallback_urls=effective_fallbacks)
             _download_manifest_with_site_strategy(
-                media_url,
+                selected_media_url,
                 referer=referer,
                 origin=origin,
                 default_route=default_route,
@@ -19498,6 +19642,46 @@ class DownloadManagerApp:
                 origin=hanime_site_root,
                 default_route="ffmpeg",
             )
+            return
+
+        if "99itv.net" in parsed_url.netloc and re.search(r"/(?:detail|voddetail)/\d+\.html$", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, key="eta_site_99itv", fallback="正在解析 99iTV 詳情頁...")
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+            headers = _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root)
+            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=headers)
+            page_text = _response_text_utf8(resp)
+            page_title = _clean_99itv_title(_extract_html_title(page_text, short_name or "99iTV"))
+            stream_candidates = _extract_m3u8_candidates_from_text(page_text, base_url=url)
+            if stream_candidates:
+                stream_url = stream_candidates[0]
+                fallback_urls = _dedupe_download_urls(stream_candidates[1:], primary_url=stream_url)
+                _set_task_identity(name=page_title, source_site="99itv", source_page=url, fallback_urls=fallback_urls)
+                self._log_m3u8_route_selected(task, item_id, stream_url, source_site="99itv", fallback_urls=fallback_urls)
+                _download_manifest_with_site_strategy(
+                    stream_url,
+                    referer=url,
+                    origin=site_root,
+                    default_route="ffmpeg",
+                )
+                return
+            play_candidates = []
+            for attr_url in re.findall(r'(?:href|data-href|data-url)=["\']([^"\']+)["\']', page_text, re.IGNORECASE):
+                candidate = html.unescape(str(attr_url or "")).strip()
+                if not candidate or not re.search(r"/(?:vodplay|play)/", candidate, re.IGNORECASE):
+                    continue
+                normalized_candidate = _normalize_download_url(urllib.parse.urljoin(url, candidate))
+                if normalized_candidate and "99itv.net" in urllib.parse.urlsplit(normalized_candidate).netloc.lower():
+                    play_candidates.append(normalized_candidate)
+            for path_candidate in re.findall(r'/(?:vodplay|play)/\d+(?:-\d+){0,3}\.html', page_text, re.IGNORECASE):
+                normalized_candidate = _normalize_download_url(urllib.parse.urljoin(url, html.unescape(path_candidate)))
+                if normalized_candidate and "99itv.net" in urllib.parse.urlsplit(normalized_candidate).netloc.lower():
+                    play_candidates.append(normalized_candidate)
+            play_candidates = _dedupe_download_urls(play_candidates)
+            if not play_candidates:
+                raise Exception("99iTV detail page did not expose a playable stream URL")
+            _set_task_identity(name=page_title, source_site="99itv", source_page=url, fallback_urls=play_candidates[1:])
+            self._download_task_internal(play_candidates[0], item_id, save_dir, True, is_mp3)
             return
 
         if "99itv.net" in parsed_url.netloc and "/vodplay/" in parsed_url.path:
