@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260525-3190"
+APP_BUILD = "20260526-3200"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -72,8 +72,8 @@ CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
 STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
 ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
-MAX_DOWNLOADS_PER_DOMAIN = 4
-MAX_ACTIVE_DOWNLOADS_GLOBAL = 3
+MAX_DOWNLOADS_PER_DOMAIN = 3
+MAX_ACTIVE_DOWNLOADS_GLOBAL = 12
 STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 1
 STARTUP_RESUME_WARMUP_SECONDS = 8.0
 MAX_DOWNLOADS_PER_SOURCE_PAGE = 3
@@ -188,6 +188,31 @@ def _response_text_utf8(response):
     return max(decoded_candidates, key=_decode_score)
 
 
+def _decode_html_bytes_best_effort(raw_bytes):
+    if not isinstance(raw_bytes, (bytes, bytearray)) or not raw_bytes:
+        return ""
+    content_bytes = bytes(raw_bytes)
+    decoded_candidates = []
+    for encoding in ("utf-8", "utf-8-sig", "gb18030", "big5", "cp950"):
+        try:
+            decoded_candidates.append(content_bytes.decode(encoding))
+        except Exception:
+            continue
+    if not decoded_candidates:
+        return content_bytes.decode("utf-8", "ignore")
+
+    def _score(text):
+        text = str(text or "")
+        cjk_count = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", text))
+        bad_count = text.count("\ufffd") + len(re.findall(r"[\ue000-\uf8ff]", text))
+        score = min(len(text), 5000) + cjk_count * 8 - bad_count * 80
+        if _looks_like_garbled_text(text):
+            score -= 1000
+        return score
+
+    return max(decoded_candidates, key=_score)
+
+
 def _looks_like_garbled_text(value):
     text = str(value or "").strip()
     if not text:
@@ -286,6 +311,25 @@ def _extract_jav_code(value):
         return ""
     suffix = (match.group(3) or "").upper()
     return f"{match.group(1).upper()}-{match.group(2)}{suffix}"
+
+
+def _clean_missav_title(raw_title, page_url="", fallback_title="MissAV"):
+    cleaned = html.unescape(str(raw_title or "")).replace("\xa0", " ")
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = re.sub(r"\s*[-|]\s*MissAV.*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*[-|]\s*(?:線上看|線上看完整版).*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip(" -|/,._")
+    code = _extract_jav_code(cleaned) or _extract_jav_code(fallback_title) or _extract_jav_code(page_url)
+    url_text = str(page_url or "").lower()
+    has_chinese_subtitle = "chinese-subtitle" in url_text or "中文字幕" in cleaned
+    if _looks_like_garbled_text(cleaned) or _output_title_is_suspicious_value(cleaned):
+        if code:
+            return f"{code} 中文字幕" if has_chinese_subtitle else code
+        return str(fallback_title or "MissAV").strip() or "MissAV"
+    if code and _looks_like_code_only_title(cleaned) and has_chinese_subtitle:
+        return f"{code} 中文字幕"
+    return cleaned or (f"{code} 中文字幕" if code and has_chinese_subtitle else code) or str(fallback_title or "MissAV").strip()
 
 
 def _looks_like_video_search_text(value):
@@ -476,7 +520,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "goodav17", "hohoj", "jable", "missav", "njavtv", "nnyy", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "gimy", "goodav17", "hohoj", "jable", "missav", "njavtv", "nnyy", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -499,6 +543,8 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "ffzy-play",
     "yzzy",
     "bdzybf",
+    "dytt-see.com",
+    "vip.dytt-see.com",
     "surrit.com",
     "taopianplay1.com",
     "streamfastpro",
@@ -538,10 +584,11 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 32,
     "18av": 24,
     "avbebe": 24,
+    "gimy": 24,
     "goodav17": 24,
-    "hohoj": 16,
+    "hohoj": 24,
     "jable": 24,
-    "missav": 18,
+    "missav": 24,
     "njavtv": 18,
     "nnyy": 24,
     "xiaoyakankan": 24,
@@ -554,6 +601,8 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "qqqrst.com": 32,
     "ppqrrs.com": 32,
     "bdzybf": 24,
+    "dytt-see.com": 24,
+    "vip.dytt-see.com": 24,
     "lz-cdn.com": 24,
     "yuglf.com": 24,
     "premilkyway.com": 24,
@@ -561,7 +610,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
     "ggjav.com": 24,
-    "surrit.com": 18,
+    "surrit.com": 24,
     "streamfastpro": 24,
     "mushroomtrack.com": 24,
     "hls.sb-cd.com": 24,
@@ -681,7 +730,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "jable": 12,
     "mixdrop": 18,
     "movieffm": 24,
-    "missav": 20,
+    "missav": 24,
     "njavtv": 20,
     "tktube": 20,
     "youtube": 20,
@@ -836,6 +885,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls skipped missing leading resume segments",
     "completed output renamed",
     "download task state normalized",
+    "garbled download thread title repaired",
     "avbebe category page retargeted",
     "avbebe rejected playable iframe stream",
     "avbebe rejected non-video stream candidate",
@@ -1420,6 +1470,12 @@ def _normalize_state_entry(entry):
                 name = ""
     normalized["url"] = url
     normalized["name"] = name
+    if "short_name" in normalized:
+        short_name = str(normalized.get("short_name", "") or "").strip()
+        if _looks_like_garbled_text(short_name) or (short_name.count("?") / max(len(short_name), 1)) > 0.4:
+            normalized["short_name"] = name or _extract_jav_code(short_name) or default_short_name_for_url(url)
+        else:
+            normalized["short_name"] = short_name
     normalized["is_mp3"] = bool(normalized.get("is_mp3", False))
     normalized["resume_requested"] = bool(normalized.get("resume_requested", False))
     fallback_urls = normalized.get("fallback_urls", [])
@@ -2277,7 +2333,7 @@ def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=Non
     headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     headers["Accept-Language"] = "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=headers)
-    media_candidates = _extract_missav_media_candidates(resp.text)
+    media_candidates = _extract_missav_media_candidates(_response_text_utf8(resp))
     candidates = media_candidates.get("manifests") or []
     direct_media_candidates = media_candidates.get("direct_media") or []
     if candidates or direct_media_candidates:
@@ -2297,7 +2353,7 @@ def _fetch_missav_media_candidates_with_retry(c_req, url, site_root, item_id=Non
         for header_index, retry_header in enumerate(retry_headers, start=1):
             try:
                 retry_resp = c_req.get(retry_url, impersonate="chrome120", timeout=25, headers=retry_header)
-                retry_text = retry_resp.text or ""
+                retry_text = _response_text_utf8(retry_resp)
                 retry_candidates = _extract_missav_media_candidates(retry_text)
                 retry_manifests = retry_candidates.get("manifests") or []
                 retry_direct = retry_candidates.get("direct_media") or []
@@ -3668,14 +3724,37 @@ def _avjoy_title_from_url_slug(page_url):
     return _clean_avjoy_title(slug, fallback_title="AVJOY")
 
 
-def _clean_gimy_title(raw_title):
+def _gimy_fallback_title(page_url="", fallback_title="Gimy"):
+    fallback = re.sub(r"\s+", " ", str(fallback_title or "")).strip()
+    if fallback and not _looks_like_garbled_text(fallback):
+        return fallback
+    normalized_url = _normalize_download_url(page_url)
+    if normalized_url:
+        parsed = urllib.parse.urlsplit(normalized_url)
+        path = parsed.path.strip("/")
+        match = re.search(r"(?:watch|play|eps)/([^/?#]+?)(?:\.html)?$", path, re.IGNORECASE)
+        if match:
+            token = re.sub(r"[-_]+", "-", match.group(1)).strip("-")
+            if token:
+                return f"Gimy {token}"
+        for key in ("id", "vod_id", "video_id"):
+            value = (urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get(key) or [""])[0]
+            if value:
+                return f"Gimy {value}"
+    return "Gimy"
+
+
+def _clean_gimy_title(raw_title, fallback_title="Gimy", page_url=""):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
-        return cleaned
+        return _gimy_fallback_title(page_url=page_url, fallback_title=fallback_title)
     cleaned = cleaned.replace("線上看", " ").replace("正片", " ").strip()
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = re.sub(r"\s*(?:[-|｜]\s*Gimy.*)$", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+    cleaned = cleaned.strip(" -|/,")
+    if _looks_like_garbled_text(cleaned) or _output_title_is_suspicious_value(cleaned):
+        return _gimy_fallback_title(page_url=page_url, fallback_title=fallback_title)
+    return cleaned or _gimy_fallback_title(page_url=page_url, fallback_title=fallback_title)
 
 
 def _extract_gimy_parse_candidates(parse_text, base_url=""):
@@ -4583,6 +4662,11 @@ def _classify_gimy_stream_candidate(url):
     return "", normalized
 
 
+def _is_gimy_play_path(path):
+    path_text = str(path or "").lower()
+    return any(marker in path_text for marker in ("/play/", "/vodplay/", "/video/", "/watch/"))
+
+
 SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "gimy",
     "movieffm",
@@ -4611,6 +4695,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "gimy.cc",
     "gimy01.co",
     "gimy01.tv",
+    "gimy.tube",
     "xiaoyakankan",
     "yfsp.tv",
     "tiktok.com",
@@ -4635,6 +4720,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "gimy.cc",
     "gimy01.co",
     "gimy01.tv",
+    "gimy.tube",
     "avbebe.com",
     "avjoy.me",
     "bilibili.com",
@@ -4664,6 +4750,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "gimy.cc": 14,
     "gimy01.co": 15,
     "gimy01.tv": 16,
+    "gimy.tube": 17,
     "avbebe.com": 18,
     "avjoy.me": 20,
     "goodav17.com": 30,
@@ -8722,6 +8809,19 @@ class DownloadManagerApp:
             )
             self._show_warning("下載網址是空的，已取消建立下載任務。")
             return
+        short_name = str(short_name or "").strip()
+        if _looks_like_garbled_text(short_name):
+            repaired_short_name = _extract_jav_code(short_name) or default_short_name_for_url(url, is_mp3=is_mp3)
+            write_error_log(
+                "garbled download thread title repaired",
+                Exception("garbled download thread title repaired"),
+                item_id=existing_item_id or "",
+                url=url,
+                source_site=source_site or None,
+                rejected_title=short_name,
+                repaired_title=repaired_short_name,
+            )
+            short_name = repaired_short_name
         extra_task_data = extra_task_data or {}
         item_id = existing_item_id
         if item_id is None:
@@ -8740,7 +8840,7 @@ class DownloadManagerApp:
                     if "text/html" not in (resp.headers.get("Content-Type", "") or "").lower():
                         return
                     resp = c_req.get(url, impersonate="chrome110", timeout=5)
-                    txt = resp.text
+                    txt = _response_text_utf8(resp)
                 except Exception:
                     try:
                         req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT}, method="HEAD")
@@ -8748,7 +8848,7 @@ class DownloadManagerApp:
                         if "text/html" not in (resp.headers.get("Content-Type", "") or "").lower():
                             return
                         req.method = "GET"
-                        txt = urllib.request.urlopen(req, timeout=5).read(102400).decode("utf-8", "ignore")
+                        txt = _decode_html_bytes_best_effort(urllib.request.urlopen(req, timeout=5).read(102400))
                     except Exception:
                         return
                 m = re.search(r"<title>(.*?)</title>", txt, re.IGNORECASE)
@@ -8765,7 +8865,7 @@ class DownloadManagerApp:
                 title = "".join(c for c in title if c not in '\\/:*?"<>|')
                 if title and str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") == "QUEUED":
                     cleaned_title = str(title or "").strip()
-                    if cleaned_title:
+                    if cleaned_title and not _looks_like_garbled_text(cleaned_title):
                         self.tasks[item_id]["short_name"] = cleaned_title
                         self.tasks[item_id]["name"] = cleaned_title
                         self._schedule_tree_update(item_id, "name", cleaned_title)
@@ -9564,16 +9664,17 @@ class DownloadManagerApp:
 
         def fetch_gimy_results():
             collected = []
-            for domain in ("gimy.cc", "gimy01.co", "gimy01.tv"):
-                query = f"{primary_query} site:{domain}/detail"
-                try:
-                    append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
-                except Exception:
-                    pass
-                try:
-                    append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
-                except Exception:
-                    pass
+            for domain in ("gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube"):
+                for path_marker in ("/detail", "/title", "/watch"):
+                    query = f"{primary_query} site:{domain}{path_marker}"
+                    try:
+                        append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                    except Exception:
+                        pass
+                    try:
+                        append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                    except Exception:
+                        pass
             return collected
 
         def collect_parallel(search_jobs, timeout_seconds):
@@ -14207,6 +14308,11 @@ class DownloadManagerApp:
             return True
         return data[4:8] in (b"ftyp", b"moof", b"mdat", b"styp")
 
+    def _is_parallel_hls_transport_stream_payload(self, data):
+        if not data or len(data) < 188:
+            return False
+        return data[0] == 0x47
+
     def _parallel_hls_allows_mislabelled_media(self, host):
         host = str(host or "").lower()
         return any(marker in host for marker in PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS)
@@ -14224,7 +14330,7 @@ class DownloadManagerApp:
         try:
             with open(path, "rb") as part_f:
                 head = part_f.read(512)
-            return self._is_valid_parallel_hls_segment_data(head, content_type="application/octet-stream")
+            return self._is_parallel_hls_transport_stream_payload(head)
         except Exception:
             return False
 
@@ -14270,6 +14376,10 @@ class DownloadManagerApp:
                 if "googleusercontent.com" in segment_host:
                     raise ParallelHlsUnsupportedSegmentContentException(message)
                 raise Exception(message)
+            if not self._is_parallel_hls_transport_stream_payload(data):
+                raise ParallelHlsUnsupportedSegmentContentException(
+                    "parallel HLS native concat requires MPEG-TS segments; falling back to ffmpeg"
+                )
         if not google_segments:
             return
         for segment in google_segments[:3]:
@@ -14363,7 +14473,10 @@ class DownloadManagerApp:
                     head = part_f.read(512)
             except OSError:
                 continue
-            if self._is_unsupported_parallel_hls_segment_payload(head, "application/octet-stream"):
+            if (
+                self._is_unsupported_parallel_hls_segment_payload(head, "application/octet-stream")
+                or not self._is_parallel_hls_transport_stream_payload(head)
+            ):
                 count = len(part_files)
                 shutil.rmtree(part_dir, ignore_errors=True)
                 return count
@@ -14498,6 +14611,8 @@ class DownloadManagerApp:
         raise last_exc or Exception("parallel HLS segment download failed")
 
     def _remux_parallel_hls_transport_stream(self, ffmpeg_path, source_ts_path, out_path):
+        if not self._has_nonempty_file(source_ts_path):
+            raise Exception("parallel HLS remux source is empty")
         startupinfo = None
         creationflags = 0
         if platform.system() == "Windows":
@@ -14517,27 +14632,20 @@ class DownloadManagerApp:
                 "-i",
                 source_ts_path,
         ]
-        copy_cmd = base_cmd + [
+        attempts = [
+            ("copy-faststart", base_cmd + [
                 "-c",
                 "copy",
                 "-movflags",
                 "+faststart",
                 out_path,
-        ]
-        result = subprocess.run(
-            copy_cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            startupinfo=startupinfo,
-            creationflags=creationflags,
-            timeout=900,
-        )
-        if result.returncode != 0:
-            message = (result.stderr or result.stdout or "").strip()
-            if _ffmpeg_should_retry_with_audio_transcode(message):
-                transcode_cmd = base_cmd + [
+            ]),
+            ("copy-plain", base_cmd + [
+                "-c",
+                "copy",
+                out_path,
+            ]),
+            ("audio-transcode", base_cmd + [
                     "-c:v",
                     "copy",
                     "-c:a",
@@ -14547,21 +14655,34 @@ class DownloadManagerApp:
                     "-movflags",
                     "+faststart",
                     out_path,
-                ]
-                result = subprocess.run(
-                    transcode_cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="ignore",
-                    startupinfo=startupinfo,
-                    creationflags=creationflags,
-                    timeout=900,
-                )
-                if result.returncode == 0:
+            ]),
+        ]
+        errors = []
+        for label, cmd in attempts:
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except OSError:
+                pass
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+                timeout=900,
+            )
+            message = (result.stderr or result.stdout or "").strip()
+            if result.returncode == 0:
+                if self._has_nonempty_file(out_path):
                     return
-                message = (result.stderr or result.stdout or message or "").strip()
-            raise Exception(f"parallel HLS remux failed: {message[:240]}")
+                message = message or "ffmpeg created empty output"
+            errors.append(f"{label}: {message or f'ffmpeg exited with code {result.returncode}'}")
+            if label == "copy-faststart" and message and not _ffmpeg_should_retry_with_audio_transcode(message):
+                continue
+        raise Exception(f"parallel HLS remux failed: {' | '.join(errors)[:360]}")
 
     def _try_parallel_hls_segment_download(self, item_id, url, out_path, temp_out_path, progress_path, headers, ffmpeg_path, ffmpeg_version=""):
         task = self.tasks.get(item_id, {})
@@ -15414,7 +15535,7 @@ class DownloadManagerApp:
         )
         parallel_exhausted_ggjav_candidates = False
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("18av", "jable", "missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("18av", "gimy", "jable", "missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -15430,7 +15551,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("18av", "jable", "missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("18av", "gimy", "jable", "missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -19352,10 +19473,10 @@ class DownloadManagerApp:
                 resp_text,
             ):
                 raise Exception("Gimy detail page did not expose episode links")
-            drama_name = _clean_gimy_title(short_name or "Gimy")
+            drama_name = _clean_gimy_title(short_name or "Gimy", fallback_title=short_name or "Gimy", page_url=url)
             title_match = re.search(r"<title>(.*?)</title>", resp_text, re.IGNORECASE | re.DOTALL)
             if title_match:
-                drama_name = _clean_gimy_title(html.unescape(title_match.group(1)).split("-")[0].strip()) or drama_name
+                drama_name = _clean_gimy_title(html.unescape(title_match.group(1)).split("-")[0].strip(), fallback_title=drama_name, page_url=url) or drama_name
                 drama_name = "".join(c for c in drama_name if c not in '\\/:*?"<>|')
             entries = self._extract_gimy_detail_entries(resp_text, base, drama_name)
             if not entries:
@@ -19395,7 +19516,7 @@ class DownloadManagerApp:
                         fallback_urls.append(entry_url)
                 ordered_episode_urls = [first_episode_url] + [candidate for candidate in fallback_urls if candidate != first_episode_url]
             _set_task_aux_fields(task, _gimy_source_refresh_history=[])
-            _set_task_identity(name=_clean_gimy_title(first_episode_name or drama_name), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
+            _set_task_identity(name=_clean_gimy_title(first_episode_name or drama_name, fallback_title=drama_name, page_url=url), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
             last_episode_error = None
             for attempt_index, episode_url in enumerate(ordered_episode_urls):
                 try:
@@ -19651,7 +19772,7 @@ class DownloadManagerApp:
                 external_url = supported_external_pages[0]
                 fallback_urls = [candidate for candidate in (supported_external_pages[1:] + deferred_episode_urls) if candidate and candidate != external_url]
                 _set_task_aux_fields(task, _gimy_page_refresh_candidates=_filter_gimy_untried_page_candidates(task, deferred_episode_urls), _gimy_source_refresh_history=[])
-                _set_task_identity(name=_clean_gimy_title(page_title), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
+                _set_task_identity(name=_clean_gimy_title(page_title, fallback_title=short_name or "Gimy", page_url=url), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
                 self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                 self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
@@ -19665,7 +19786,10 @@ class DownloadManagerApp:
                         refresh_history.append(normalized_current_candidate)
                 episode_refresh_attempts = sum(
                     1 for candidate in refresh_history
-                    if "/eps/" in urllib.parse.urlsplit(_normalize_download_url(candidate)).path.lower()
+                    if (
+                        "/eps/" in urllib.parse.urlsplit(_normalize_download_url(candidate)).path.lower()
+                        or _is_gimy_play_path(urllib.parse.urlsplit(_normalize_download_url(candidate)).path)
+                    )
                 )
                 if "/eps/" in urllib.parse.urlsplit(_normalize_download_url(current_page_url or url)).path.lower():
                     episode_refresh_attempts = max(episode_refresh_attempts - 1, 0)
@@ -19898,11 +20022,12 @@ class DownloadManagerApp:
             )
             return
 
-        if "gimy" in parsed_url.netloc and ("/play/" in parsed_url.path or "/vodplay/" in parsed_url.path or "/video/" in parsed_url.path):
+        if "gimy" in parsed_url.netloc and _is_gimy_play_path(parsed_url.path):
             self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
-            player_data = _safe_extract_player_js_object(resp.text, "player_data", "player_aaaa")
+            resp_text = _response_text_utf8(resp)
+            player_data = _safe_extract_player_js_object(resp_text, "player_data", "player_aaaa")
             direct_fallback_candidates = []
             external_source_urls = []
             if player_data:
@@ -19914,10 +20039,10 @@ class DownloadManagerApp:
                     elif candidate_kind == "external" and normalized_candidate:
                         external_source_urls.append(normalized_candidate)
             candidates = _collect_player_m3u8_candidates(player_data, base_url=url) if player_data else []
-            for candidate_url in _extract_m3u8_candidates_from_text(resp.text, base_url=url):
+            for candidate_url in _extract_m3u8_candidates_from_text(resp_text, base_url=url):
                 if candidate_url not in candidates:
                     candidates.append(candidate_url)
-            iframe_urls = _extract_gimy_inline_iframe_urls(resp.text, url)
+            iframe_urls = _extract_gimy_inline_iframe_urls(resp_text, url)
             if player_data:
                 for iframe_url in _build_gimy_iframe_urls(url, player_data):
                     if iframe_url not in iframe_urls:
@@ -19987,7 +20112,7 @@ class DownloadManagerApp:
                     external_url = supported_external_pages[0]
                     fallback_urls = [candidate for candidate in supported_external_pages[1:] if candidate and candidate != external_url]
                     _set_task_aux_fields(task, _gimy_page_refresh_candidates=[], _gimy_source_refresh_history=[])
-                    _set_task_identity(name=_clean_gimy_title(_extract_html_title(resp.text, short_name)), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
+                    _set_task_identity(name=_clean_gimy_title(_extract_html_title(resp_text, short_name), fallback_title=short_name or "Gimy", page_url=url), source_site="gimy", source_page=url, fallback_urls=fallback_urls)
                     self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
                     self._download_task_internal(external_url, item_id, save_dir, use_impersonate, is_mp3)
                     return
@@ -20030,7 +20155,7 @@ class DownloadManagerApp:
                     self._download_task_internal(refresh_url, item_id, save_dir, use_impersonate, is_mp3)
                     return
                 raise Exception("Gimy stream URL missing")
-            page_title = _clean_gimy_title(_extract_html_title(resp.text, short_name))
+            page_title = _clean_gimy_title(_extract_html_title(resp_text, short_name), fallback_title=short_name or "Gimy", page_url=url)
             fallback_urls = (candidates[1:] if len(candidates) > 1 else []) + [
                 candidate for candidate in direct_fallback_candidates
                 if candidate and candidate != stream_url and candidate not in candidates
@@ -20476,7 +20601,12 @@ class DownloadManagerApp:
                     has_m3u8_token=".m3u8" in (resp.text or "").lower(),
                 )
                 raise Exception("Failed to extract MissAV stream URL")
-            page_title = _extract_html_title(resp.text, short_name)
+            page_text = _response_text_utf8(resp)
+            page_title = _clean_missav_title(
+                _extract_html_title(page_text, short_name),
+                page_url=url,
+                fallback_title=short_name,
+            )
             if direct_media_candidates and not candidates:
                 direct_media_url = direct_media_candidates[0]
                 _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=direct_media_candidates[1:])
