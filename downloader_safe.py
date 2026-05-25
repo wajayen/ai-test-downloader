@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260524-3140"
+APP_BUILD = "20260525-3150"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -73,15 +73,12 @@ STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
 ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
 MAX_DOWNLOADS_PER_DOMAIN = 4
-MAX_DOWNLOADS_PER_SOURCE_PAGE = MAX_DOWNLOADS_PER_DOMAIN
+MAX_DOWNLOADS_PER_SOURCE_PAGE = 3
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
-    "avbebe": 4,
     "movieffm": 3,
 }
-MAX_DOWNLOADS_PER_SOURCE_SITE = {
-    "avbebe": 4,
-    "movieffm": 3,
-}
+MAX_DOWNLOADS_PER_SOURCE_SITE = 3
+MAX_DOWNLOADS_PER_SOURCE_SITE_BY_SITE = {}
 VIDEO_SEARCH_MIN_QUALITY = 720
 LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
 LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 10
@@ -178,6 +175,18 @@ def _looks_like_garbled_text(value):
         "甇",
         "撌",
         "隞",
+        "蝢",
+        "瞏",
+        "摰",
+        "撥",
+        "憚",
+        "雿",
+        "鋆",
+        "璊",
+        "嫘",
+        "釭",
+        "蝷",
+        "餉",
     )
     if any(marker in text for marker in markers):
         return True
@@ -211,6 +220,9 @@ def _output_title_is_suspicious_value(title):
 
 def _extract_jav_code(value):
     text = html.unescape(str(value or "")).strip()
+    fc2_match = re.search(r"\bFC2[-_\s]*PPV[-_\s]*(\d{3,10})\b", text, re.IGNORECASE)
+    if fc2_match:
+        return f"FC2-PPV-{fc2_match.group(1)}"
     match = re.search(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})([A-Za-z])?\b", text)
     if not match:
         return ""
@@ -597,9 +609,9 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "youtube": 20,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
-HTTP_STREAM_CHUNK_SIZE = 4 * 1024 * 1024
-HTTP_RANGE_CHUNK_SIZE = 4 * 1024 * 1024
-HTTP_FILE_COPY_CHUNK_SIZE = 4 * 1024 * 1024
+HTTP_STREAM_CHUNK_SIZE = 8 * 1024 * 1024
+HTTP_RANGE_CHUNK_SIZE = 8 * 1024 * 1024
+HTTP_FILE_COPY_CHUNK_SIZE = 8 * 1024 * 1024
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
     "18jav",
     "777tv",
@@ -734,6 +746,10 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls skipped huge playlist",
     "parallel hls purged invalid resume segments",
     "parallel hls skipped missing leading resume segments",
+    "completed output renamed",
+    "avbebe rejected playable iframe stream",
+    "avbebe rejected non-video stream candidate",
+    "avbebe hgcloud rejected stream candidate",
     "windows compatible mp4 remuxed",
     "windows compatible mp4 remux failed",
     "windows compatible mp4 transcoded",
@@ -754,6 +770,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "resume invalid partial reset",
     "resume low speed reanalysis requested",
     "cached media link refresh",
+    "cached resolved url unavailable",
     "missav parser retry recovered",
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
@@ -3462,6 +3479,8 @@ def _clean_ggjav_title_for_display(raw_title, fallback_title=""):
     cleaned = re.sub(r"\s*-\s*GGJAV\s*\|.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*-\s*搜尋\s*-\s*第\d+頁\s*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.strip(" -|/,")
+    if _looks_like_garbled_text(cleaned):
+        return _extract_jav_code(cleaned) or _extract_jav_code(fallback_title) or str(fallback_title or "").strip()
     return cleaned or str(fallback_title or "").strip()
 
 
@@ -4653,8 +4672,11 @@ SLOW_EXTERNAL_FALLBACK_HOST_MARKERS_BY_SITE = {
         "dooood.",
         "mixdrop.",
         "embedgram.com",
+        "embedrise.com",
         "streamtape.com",
         "mm984",
+        "mmsi",
+        "mmvh",
     ),
 }
 
@@ -8546,6 +8568,8 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         if not task:
             return
+        if not self._validate_task_output_before_finish(item_id, reason="mark_task_finished"):
+            return
         primary_value = str(_task_field_value(task, "filename") or "").strip()
         secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
         filename = primary_value or secondary_value or ""
@@ -10002,11 +10026,98 @@ class DownloadManagerApp:
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
             except OSError:
                 pass
+        if task and not self._validate_task_output_before_finish(item_id, reason="mark_existing_file_complete"):
+            return
         if task:
             _set_task_aux_fields(task, state="FINISHED", resume_requested=False)
         self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", message, complete_progress=True)
         if task:
             remove_from_state(_normalize_download_url(_task_field_value(task, "url", "")) or "")
+
+    def _validate_task_output_before_finish(self, item_id, reason="finish"):
+        task = self.tasks.get(item_id)
+        if not task:
+            return False
+        candidates = []
+        for path in (
+            str(_task_field_value(task, "filename") or "").strip(),
+            str(_task_field_value(task, "temp_filename") or "").strip(),
+        ):
+            if path and path not in candidates:
+                candidates.append(path)
+        output_path = next((path for path in candidates if path and os.path.exists(path)), candidates[0] if candidates else "")
+        if not output_path or not os.path.exists(output_path):
+            recovered_output_path = self._recover_finished_output_path(task, output_path)
+            if recovered_output_path:
+                output_path = recovered_output_path
+        if not output_path:
+            exc = Exception("download completed without an output file")
+            write_error_log("finish rejected missing output", exc, item_id=item_id, reason=reason, source_site=_task_source_site_name(task) or None)
+            self._mark_task_error_state(item_id, exc)
+            return False
+        if not os.path.exists(output_path):
+            exc = Exception("download output file is missing")
+            write_error_log("finish rejected missing output", exc, item_id=item_id, output=output_path, reason=reason, source_site=_task_source_site_name(task) or None)
+            self._mark_task_error_state(item_id, exc)
+            return False
+        try:
+            output_size = os.path.getsize(output_path)
+        except OSError:
+            output_size = 0
+        if output_size <= 0:
+            exc = Exception("download output file is empty")
+            write_error_log("finish rejected empty output", exc, item_id=item_id, output=output_path, reason=reason, source_site=_task_source_site_name(task) or None)
+            self._mark_task_error_state(item_id, exc)
+            return False
+        output_ext = os.path.splitext(str(output_path or ""))[1].lower()
+        if output_ext in (".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".m4v", ".ts"):
+            media_info = self._probe_media_info(output_path)
+            if not media_info.get("valid"):
+                exc = Exception("download output is not a valid media file")
+                write_error_log(
+                    "finish rejected invalid media",
+                    exc,
+                    item_id=item_id,
+                    output=output_path,
+                    size=output_size,
+                    reason=media_info.get("reason") or reason,
+                    source_site=_task_source_site_name(task) or None,
+                )
+                self._mark_task_error_state(item_id, exc)
+                return False
+        self._set_task_output_file(task, item_id, output_path)
+        self._set_task_named_column_text(item_id, "size", format_transfer_size(output_size))
+        return True
+
+    def _recover_finished_output_path(self, task, missing_output_path=""):
+        save_dir = os.path.dirname(str(missing_output_path or "").strip())
+        if not save_dir:
+            save_dir = self.save_dir_var.get() if hasattr(self, "save_dir_var") else ""
+        save_dir = save_dir or _APP_DIR
+        stems = []
+        for candidate in (
+            missing_output_path,
+            _task_field_value(task, "filename", ""),
+            _task_field_value(task, "temp_filename", ""),
+            _task_field_value(task, "short_name", ""),
+            _task_field_value(task, "name", ""),
+            _task_field_value(task, "resolved_url", ""),
+            _task_field_value(task, "source_page", ""),
+            _task_field_value(task, "url", ""),
+        ):
+            code = _extract_jav_code(candidate)
+            if code and code not in stems:
+                stems.append(code)
+            stem = os.path.splitext(os.path.basename(str(candidate or "").strip()))[0].strip()
+            if stem and not _output_title_is_suspicious_value(stem):
+                safe_stem = _safe_output_stem(stem, fallback="")
+                if safe_stem and safe_stem not in stems:
+                    stems.append(safe_stem)
+        for stem in stems:
+            found_path = self._find_output_file_candidate(save_dir, stem)
+            if found_path:
+                return found_path
+        return ""
 
     def _has_resume_artifact_state(self, task, save_dir=None, is_mp3=None):
         if not task:
@@ -10146,7 +10257,7 @@ class DownloadManagerApp:
         if expected_total <= 0 and source_site == "youtube":
             return False
         tolerance_ratio = 0.02 if source_site == "youtube" else 0.001
-        if not self._file_size_matches_expected_total(output_path, expected_total, tolerance_ratio=tolerance_ratio):
+        if expected_total > 0 and not self._file_size_matches_expected_total(output_path, expected_total, tolerance_ratio=tolerance_ratio):
             write_error_log(
                 "existing output rejected",
                 Exception("existing output size does not match current remote total"),
@@ -10284,17 +10395,75 @@ class DownloadManagerApp:
         output_ext = os.path.splitext(clean_output_path)[1] or ".mp4"
         output_stem = os.path.splitext(os.path.basename(clean_output_path))[0]
         if _looks_like_garbled_text(clean_output_path) or _output_title_is_suspicious_value(output_stem):
+            stable_code = _extract_jav_code(output_stem) or _extract_jav_code(clean_output_path)
             fallback_title = self._task_output_title_fallback(
                 task,
-                _task_field_value(task, "resolved_url", "") or _task_field_value(task, "url", ""),
+                clean_output_path,
                 fallback_name="Video",
             )
+            if stable_code:
+                fallback_title = stable_code
             safe_stem = _safe_output_stem(fallback_title, fallback="Video")
             if safe_stem:
-                clean_output_path = os.path.join(output_dir or _APP_DIR, f"{safe_stem}{output_ext}")
+                desired_output_path = os.path.join(output_dir or _APP_DIR, f"{safe_stem}{output_ext}")
+                clean_output_path = self._retarget_completed_output_file(
+                    clean_output_path,
+                    desired_output_path,
+                    item_id=item_id,
+                    reason="garbled_output_name",
+                )
         _set_task_aux_fields(task, filename=clean_output_path)
         self._set_task_named_column_text(item_id, "name", os.path.basename(str(clean_output_path or "").strip()) or "")
         self._update_task_state_entry(task, filename=clean_output_path)
+
+    def _unique_output_path_for_retarget(self, desired_path):
+        desired_path = str(desired_path or "").strip()
+        if not desired_path or not os.path.exists(desired_path):
+            return desired_path
+        root, ext = os.path.splitext(desired_path)
+        for index in range(1, 1000):
+            candidate = f"{root} ({index}){ext}"
+            if not os.path.exists(candidate):
+                return candidate
+        return f"{root} ({int(time.time())}){ext}"
+
+    def _retarget_completed_output_file(self, current_path, desired_path, item_id=None, reason="retarget_output"):
+        current_path = str(current_path or "").strip()
+        desired_path = str(desired_path or "").strip()
+        if not desired_path:
+            return current_path
+        if not current_path:
+            return desired_path
+        try:
+            if os.path.normcase(os.path.abspath(current_path)) == os.path.normcase(os.path.abspath(desired_path)):
+                return current_path
+        except Exception:
+            pass
+        if not os.path.exists(current_path):
+            return desired_path
+        target_path = self._unique_output_path_for_retarget(desired_path)
+        try:
+            os.makedirs(os.path.dirname(target_path) or _APP_DIR, exist_ok=True)
+            self._move_file_with_retry(current_path, target_path, attempts=24, delay_seconds=0.25)
+            write_error_log(
+                "completed output renamed",
+                Exception("completed output renamed"),
+                item_id=item_id,
+                reason=reason,
+                source=current_path,
+                output=target_path,
+            )
+            return target_path
+        except Exception as exc:
+            write_error_log(
+                "completed output rename failed",
+                exc,
+                item_id=item_id,
+                reason=reason,
+                source=current_path,
+                desired_output=target_path,
+            )
+            return current_path
 
     def _set_task_resume_temp_file(self, task, item_id, temp_path):
         clean_temp_path = str(temp_path or "").strip()
@@ -11528,6 +11697,7 @@ class DownloadManagerApp:
         self._remove_artifact_paths(
             *(path for path in (resume_out_path, merged_out_path, progress_path) if path != out_path)
         )
+        self._set_task_output_file(task, item_id, out_path)
         self._set_task_named_column_text(item_id, "progress", "100%")
         self._mark_task_finished(item_id)
         self._log_ffmpeg_event(
@@ -12309,6 +12479,7 @@ class DownloadManagerApp:
             except OSError:
                 pass
         self._move_file_with_retry(temp_out_path, out_path)
+        self._set_task_output_file(task, item_id, out_path)
         self._set_task_named_column_text(item_id, "progress", "100%")
         self._mark_task_finished(item_id)
         write_error_log("ffmpeg direct audio finished", Exception("ffmpeg direct audio finished"), url=url, item_id=item_id, output=out_path, bytes=self._get_existing_file_size(out_path))
@@ -12489,12 +12660,10 @@ class DownloadManagerApp:
     def _source_download_limits(self, source_site, domain_limit):
         site = (source_site or "").strip().lower()
         source_page_limit = int(MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE.get(site, MAX_DOWNLOADS_PER_SOURCE_PAGE))
-        source_site_limit = int(MAX_DOWNLOADS_PER_SOURCE_SITE.get(site, MAX_DOWNLOADS_PER_DOMAIN))
+        source_site_limit = int(MAX_DOWNLOADS_PER_SOURCE_SITE_BY_SITE.get(site, MAX_DOWNLOADS_PER_SOURCE_SITE))
         if source_page_limit == MAX_DOWNLOADS_PER_SOURCE_PAGE:
-            source_page_limit = domain_limit
-        if source_site_limit == MAX_DOWNLOADS_PER_DOMAIN:
-            source_site_limit = domain_limit
-        return source_page_limit, source_site_limit
+            source_page_limit = min(domain_limit, source_page_limit)
+        return source_page_limit, min(domain_limit, source_site_limit)
 
     def _log_domain_limit_change(self, domain_limit, active_count, queued_count):
         try:
@@ -12510,6 +12679,8 @@ class DownloadManagerApp:
             Exception("download concurrency limit changed"),
             previous_limit=previous_limit,
             domain_limit=normalized_limit,
+            source_site_limit=min(normalized_limit, int(MAX_DOWNLOADS_PER_SOURCE_SITE)),
+            source_page_limit=min(normalized_limit, int(MAX_DOWNLOADS_PER_SOURCE_PAGE)),
             active_count=active_count,
             queued_count=queued_count,
             low_speed_threshold_bps=LOW_SPEED_CONCURRENCY_THRESHOLD_BPS,
@@ -12534,6 +12705,13 @@ class DownloadManagerApp:
                 if self._maybe_auto_pause_for_disk_space(item_id, target_path, required_bytes=required_bytes, note=self._disk_full_pause_note()):
                     raise StopDownloadException("disk space low")
             if status == "finished":
+                target_path, downloaded, total = _event_transfer_metrics(d, default_path="", default_downloaded=0)
+                if target_path and os.path.isfile(target_path):
+                    self._set_task_output_file(task, item_id, target_path)
+                    try:
+                        self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(target_path)))
+                    except OSError:
+                        pass
                 return
             if status != "downloading":
                 return
@@ -13981,7 +14159,7 @@ class DownloadManagerApp:
         started_at = time.time()
         completed_lock = threading.Lock()
         source_site = _task_source_site_name(task)
-        prefer_curl_segments = source_site == "movieffm"
+        prefer_curl_segments = source_site in ("movieffm", "avbebe")
         worker_count = min(self._parallel_hls_workers_for_segments(source_site, media_url, segments), total_segments)
         self._log_ffmpeg_event(
             "parallel hls download started",
@@ -14090,16 +14268,18 @@ class DownloadManagerApp:
                 self._move_file_with_retry(merged_path, out_path, attempts=48, delay_seconds=0.5)
             self._remove_artifact_paths(temp_out_path, transport_path, progress_path)
             shutil.rmtree(part_dir, ignore_errors=True)
+            self._set_task_output_file(task, item_id, out_path)
             self._set_task_named_column_text(item_id, "progress", "100%")
             self._mark_task_finished(item_id)
+            logged_output_path = self._task_output_path_or_default(task, out_path)
             self._log_ffmpeg_event(
                 "parallel hls download finished",
                 Exception("parallel hls finished"),
                 task,
                 item_id,
                 media_url,
-                output=out_path,
-                bytes=self._get_existing_file_size(out_path),
+                output=logged_output_path,
+                bytes=self._get_existing_file_size(logged_output_path),
                 segments=total_segments,
                 workers=worker_count,
             )
@@ -14297,6 +14477,7 @@ class DownloadManagerApp:
                     self._remove_artifact_paths(final_output_path, temp_out_path, resume_out_path, merged_out_path, progress_path)
                 raise artifact_exc
         if self._has_nonempty_file(final_output_path):
+            self._set_task_output_file(task, item_id, final_output_path)
             self._mark_task_finished(item_id)
             self._log_ytdlp_native_hls_finished(task, item_id, url, final_output_path)
             return
@@ -15426,16 +15607,18 @@ class DownloadManagerApp:
                     *(stale_path for stale_path in (temp_out_path, resume_out_path, merged_out_path, progress_path) if stale_path != out_path)
                 )
 
+                self._set_task_output_file(task, item_id, out_path)
                 self._set_task_named_column_text(item_id, "progress", "100%")
                 self._mark_task_finished(item_id)
+                logged_output_path = self._task_output_path_or_default(task, out_path)
                 self._log_ffmpeg_event(
                     "ffmpeg download finished",
                     Exception("ffmpeg finished"),
                     task,
                     item_id,
                     candidate_url,
-                    output=out_path,
-                    bytes=self._get_existing_file_size(out_path),
+                    output=logged_output_path,
+                    bytes=self._get_existing_file_size(logged_output_path),
                 )
                 return
 
@@ -16162,8 +16345,12 @@ class DownloadManagerApp:
 
     def _task_output_title_fallback(self, task, source_url="", fallback_name="Video"):
         candidates = [
-            _task_field_value(task, "resolved_url", ""),
             source_url,
+            _task_field_value(task, "short_name", ""),
+            _task_field_value(task, "name", ""),
+            _task_field_value(task, "filename", ""),
+            _task_field_value(task, "temp_filename", ""),
+            _task_field_value(task, "resolved_url", ""),
             _task_field_value(task, "source_page", ""),
             _task_field_value(task, "url", ""),
             fallback_name,
@@ -16432,6 +16619,24 @@ class DownloadManagerApp:
             ResumeLowSpeedReanalysisException,
         ):
             raise
+        except DownloadSourceUnavailableException as cached_exc:
+            write_error_log(
+                "cached resolved url unavailable",
+                cached_exc,
+                item_id=item_id,
+                source_url=source_url,
+                resolved_url=cached_resolved_url,
+                source_site=_task_source_site_name(task) or None,
+            )
+            self._set_cached_resolved_link_state(
+                task,
+                resolved_url="",
+                resolved_url_saved_at=0.0,
+                page_refresh_candidates=[],
+                clear_source_refresh_history=False,
+            )
+            self._mark_task_error_state(item_id, cached_exc)
+            return True
         except Exception as cached_exc:
             write_error_log(
                 "cached resolved url failed",
@@ -19503,7 +19708,7 @@ class DownloadManagerApp:
             page_text = _response_text_utf8(resp)
             page_title = _goodav_title_for_display(_extract_html_title(page_text, short_name or "GoodAV"))
             candidate_urls = _extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
-            for iframe_src in re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', page_text, re.IGNORECASE):
+            for iframe_src in re.findall(r'<iframe[^>]+(?:src|data-src)=["\']([^"\']+)["\']', page_text, re.IGNORECASE):
                 iframe_url = urllib.parse.urljoin(url, iframe_src)
                 decoded_embed_media = _decode_goodav_embed_media_url(iframe_url)
                 if decoded_embed_media:
@@ -19524,7 +19729,16 @@ class DownloadManagerApp:
                         )
                     except Exception:
                         pass
+            jav_code = _extract_jav_code(page_title) or _extract_jav_code(page_text) or _extract_jav_code(url)
+            if jav_code:
+                candidate_urls.extend(_fetch_ggjav_related_candidate_urls(jav_code, c_req=c_req))
             candidate_urls = _expand_ggjav_video_host_fallbacks(candidate_urls)
+            candidate_urls = _prioritize_reachable_media_candidates(
+                c_req,
+                candidate_urls,
+                referer=url,
+                origin=site_root,
+            )
             _dispatch_extracted_media_candidates(
                 candidate_urls,
                 page_title,
@@ -20391,6 +20605,11 @@ class DownloadManagerApp:
             if str(_task_field_value(task, "state", "") or "") in PAUSED_TASK_STATES:
                 return
             if _retry_next_page_fallback("yt-dlp failed; retrying next search result", e):
+                return
+            if _is_slow_external_fallback_url_for_site(url, _task_source_site_name(task)) and (
+                not self._is_retryable_media_download_error(e) or "unsupported url" in str(e or "").lower()
+            ):
+                self._mark_task_error_state(item_id, DownloadSourceUnavailableException("all known video sources are unavailable"))
                 return
             write_error_log(
                 "yt_dlp download failure",
