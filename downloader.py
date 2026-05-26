@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3232"
+APP_BUILD = "20260526-3233"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -931,6 +931,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls purged invalid resume segments",
     "parallel hls skipped missing leading resume segments",
     "completed output renamed",
+    "existing output rejected",
     "download task state normalized",
     "garbled download thread title repaired",
     "avbebe category page retargeted",
@@ -952,6 +953,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "yt-dlp native hls fallback started",
     "yt-dlp native hls fallback finished",
     "native hls artifact rejected",
+    "existing output quarantined",
     "native hls handoff to ffmpeg",
     "gimy native hls handoff to ffmpeg",
     "native hls failed output removed",
@@ -11738,6 +11740,37 @@ class DownloadManagerApp:
             return True
         return False
 
+    def _quarantine_rejected_existing_output(self, task, item_id, output_path, reason="existing output rejected"):
+        if not output_path or not self._has_nonempty_file(output_path):
+            return ""
+        if self._can_accept_existing_output(task, item_id, output_path):
+            return ""
+        root, ext = os.path.splitext(output_path)
+        quarantine_path = f"{root}.invalid.{time.strftime('%Y%m%d%H%M%S')}{ext or '.bin'}"
+        try:
+            os.replace(output_path, quarantine_path)
+        except OSError as exc:
+            write_error_log(
+                "existing output quarantine failed",
+                exc,
+                item_id=item_id,
+                output=output_path,
+                quarantine_path=quarantine_path,
+                source_site=_task_source_site_name(task) or None,
+                reason=reason,
+            )
+            return ""
+        write_error_log(
+            "existing output quarantined",
+            Exception("rejected existing output moved aside before redownload"),
+            item_id=item_id,
+            output=output_path,
+            quarantine_path=quarantine_path,
+            source_site=_task_source_site_name(task) or None,
+            reason=reason,
+        )
+        return quarantine_path
+
     def _find_output_file_candidate(self, save_dir, safe_name, preferred_ext=None):
         if not save_dir or not safe_name:
             return ""
@@ -16031,6 +16064,12 @@ class DownloadManagerApp:
         native_route_profile["concurrent_fragment_downloads"] = native_options["concurrent_fragment_downloads"]
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
             return
+        self._quarantine_rejected_existing_output(
+            task,
+            item_id,
+            out_path,
+            reason="native hls redownload blocked by invalid final output",
+        )
 
         progress_hook = self._make_yt_dlp_progress_hook(task, item_id, save_dir)
 
