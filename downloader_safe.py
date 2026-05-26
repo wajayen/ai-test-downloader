@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3210"
+APP_BUILD = "20260526-3220"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -626,6 +626,26 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "surrit.com": 60,
 }
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
+PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS = 1800
+PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS = 32
+PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
+    "ggjav.com",
+    "mushroomtrack.com",
+    "hls.sb-cd.com",
+    "cdn77.org",
+    "high23-playback.com",
+    "phimgood.com",
+    "ckzy3.com",
+    "bfllvip.com",
+    "dytt-see.com",
+    "vip.dytt-see.com",
+    "lz-cdn.com",
+    "yuglf.com",
+    "premilkyway.com",
+    "taopianplay1.com",
+    "streamfastpro",
+    "surrit.com",
+)
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 30
 PARALLEL_HLS_SEGMENT_RETRIES = 5
@@ -728,7 +748,7 @@ HTTP_MULTIPART_PART_COUNT_DEFAULT = 20
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "18jav": 20,
     "anime1": 4,
-    "avjoy": 6,
+    "avjoy": 12,
     "gimy": 24,
     "goodav17": 24,
     "hohoj": 20,
@@ -10334,6 +10354,13 @@ class DownloadManagerApp:
         if updates:
             self._update_task_state_entry(task, **updates)
 
+    def _set_task_active_media_url(self, task, media_url):
+        if not task:
+            return ""
+        normalized_url = _normalize_download_url(media_url)
+        _set_task_aux_fields(task, _active_media_url=normalized_url)
+        return normalized_url
+
     def _parallel_hls_probe_task(self, task, source_site=None):
         site = str(source_site or "").strip().lower()
         if not site:
@@ -10477,6 +10504,26 @@ class DownloadManagerApp:
             elif state in counts:
                 total += counts[state]
         return total
+
+    def _process_handle_is_running(self, proc):
+        if proc is None:
+            return False
+        try:
+            return proc.poll() is None
+        except Exception:
+            return True
+
+    def _count_active_downloads_for_close_warning(self):
+        active_item_ids = set()
+        for item_id, task in self.tasks.items():
+            state = str(_task_field_value(task, "state", "") or "")
+            proc = _task_field_value(task, "_proc", None)
+            if state in ("DOWNLOADING", "PAUSE_REQUESTED") or self._process_handle_is_running(proc):
+                active_item_ids.add(item_id)
+        for item_id, _task, proc in list(self._iter_active_process_handles()):
+            if self._process_handle_is_running(proc):
+                active_item_ids.add(item_id)
+        return len(active_item_ids)
 
     def _build_persistable_task_snapshot(self):
         entries = []
@@ -13267,7 +13314,7 @@ class DownloadManagerApp:
             if task is not None:
                 _set_task_aux_fields(task, _last_status_text=str(status_text))
             updates["status"] = status_text
-        self.update_tree_many(item_id, updates, force=True)
+        self.update_tree_many(item_id, updates, force=False)
 
     def _effective_domain_download_limit(self):
         active_tasks = []
@@ -13680,6 +13727,7 @@ class DownloadManagerApp:
     def _download_http_media(self, item_id, url, out_path, headers=None, session=None, mark_finished=True):
         headers = dict(headers or {})
         task = self.tasks.get(item_id, {})
+        self._set_task_active_media_url(task, url)
         self._cache_task_resolved_link(task, url, fallback_urls=_dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=url))
         self._set_task_resume_temp_file(task, item_id, out_path)
         pause_note = self._disk_full_pause_note()
@@ -14076,12 +14124,16 @@ class DownloadManagerApp:
                 self._close_network_session(session)
         final_size = self._get_existing_file_size(out_path)
         elapsed_seconds = max(time.time() - start_time, 0.001)
+        final_download_host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
         write_error_log(
             "http media download finished",
             Exception("http media download finished"),
             url=url,
             item_id=item_id,
             source_site=_task_source_site_name(task) or None,
+            download_host=final_download_host,
+            host_active_downloads=self._active_hls_downloads_for_host(final_download_host),
+            host_worker_budget=self._hls_host_worker_budget(final_download_host),
             output=out_path,
             bytes=final_size,
             elapsed_seconds=round(elapsed_seconds, 3),
@@ -14271,6 +14323,19 @@ class DownloadManagerApp:
             dominant_host = max(segment_hosts, key=lambda host: sum(1 for segment in (segments or []) if urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower() == host))
         host_peer_count = self._active_hls_downloads_for_host(dominant_host)
         host_budget = self._hls_host_worker_budget(dominant_host)
+        if (
+            host_peer_count <= 1
+            and len(segments or []) >= int(PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS)
+            and any(marker in dominant_host for marker in PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS)
+        ):
+            workers = max(
+                workers,
+                min(
+                    int(PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS),
+                    int(host_budget),
+                    max(len(segments or []), 1),
+                ),
+            )
         if host_peer_count > 1:
             per_task_budget = max(
                 int(PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK),
@@ -14310,10 +14375,8 @@ class DownloadManagerApp:
         for task in self.tasks.values():
             if not self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
                 continue
-            candidates = [
-                _task_field_value(task, "resolved_url", ""),
-                *(_task_field_value(task, "fallback_urls", []) or []),
-            ]
+            active_url = _normalize_download_url(_task_field_value(task, "_active_media_url", "") or "")
+            candidates = [active_url] if active_url else [_task_field_value(task, "resolved_url", "")]
             if any(urllib.parse.urlsplit(_normalize_download_url(candidate) or "").netloc.lower() == normalized_host for candidate in candidates):
                 count += 1
         return max(count, 1)
@@ -14687,6 +14750,15 @@ class DownloadManagerApp:
                 continue
         raise last_exc or Exception("parallel HLS segment fetch failed")
 
+    def _parallel_hls_segment_error_is_rate_limited(self, exc):
+        try:
+            if int(getattr(exc, "code", 0) or 0) == 429:
+                return True
+        except Exception:
+            pass
+        text = str(exc or "").lower()
+        return "429" in text or "too many requests" in text or "rate limit" in text
+
     def _download_parallel_hls_segment(self, segment, part_path, headers, key_cache, stop_event, prefer_curl=False):
         if stop_event.is_set() or self._shutdown_started:
             raise StopDownloadException("stop requested")
@@ -14704,6 +14776,12 @@ class DownloadManagerApp:
         is_google_segment = "googleusercontent.com" in segment_host
         retry_count = PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES if is_google_segment else PARALLEL_HLS_SEGMENT_RETRIES
         last_exc = None
+        temp_part_path = f"{part_path}.tmp"
+        try:
+            if os.path.exists(temp_part_path):
+                os.remove(temp_part_path)
+        except OSError:
+            pass
         for attempt in range(retry_count):
             try:
                 if stop_event.is_set() or self._shutdown_started:
@@ -14734,7 +14812,6 @@ class DownloadManagerApp:
                         self._parallel_hls_iv_for_segment(key_info, segment.get("sequence", segment.get("index", 0))),
                     )
                     data = self._remove_parallel_hls_aes_padding(cipher.decrypt(data))
-                temp_part_path = f"{part_path}.tmp"
                 with open(temp_part_path, "wb") as out_f:
                     out_f.write(data)
                 os.replace(temp_part_path, part_path)
@@ -14745,10 +14822,15 @@ class DownloadManagerApp:
                 raise
             except Exception as exc:
                 last_exc = exc
+                try:
+                    if os.path.exists(temp_part_path):
+                        os.remove(temp_part_path)
+                except OSError:
+                    pass
                 if is_google_segment:
                     delay = PARALLEL_HLS_GOOGLE_RETRY_DELAYS[min(attempt, len(PARALLEL_HLS_GOOGLE_RETRY_DELAYS) - 1)]
                     time.sleep(delay)
-                elif int(getattr(exc, "code", 0) or 0) == 429:
+                elif self._parallel_hls_segment_error_is_rate_limited(exc):
                     time.sleep(min(2.0 * (attempt + 1), 12.0))
                 else:
                     time.sleep(min(0.5 * (attempt + 1), 3.0))
@@ -15013,6 +15095,8 @@ class DownloadManagerApp:
         completed_duration = 0.0
         completed_segments = 0
         started_at = time.time()
+        last_segment_ui_update = 0.0
+        last_segment_ui_bytes = 0
         completed_lock = threading.Lock()
         source_site = _task_source_site_name(task)
         prefer_curl_segments = source_site in (
@@ -15076,7 +15160,7 @@ class DownloadManagerApp:
         pending_segments = [segment for segment in segments if int(segment["index"]) not in completed_segment_indexes]
 
         def _download_one(segment):
-            nonlocal completed_bytes, completed_duration, completed_segments
+            nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes
             task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if self._is_pause_requested_state(task_state) or self._is_delete_requested_state(task_state):
                 stop_event.set()
@@ -15094,24 +15178,35 @@ class DownloadManagerApp:
                 completed_bytes += int(part_size or 0)
                 completed_duration += max(float(segment.get("duration", 0.0) or 0.0), 0.0)
                 completed_segments += 1
-                elapsed = max(time.time() - started_at, 0.001)
+                now = time.time()
+                elapsed = max(now - started_at, 0.001)
                 speed_bps = completed_bytes / elapsed
                 eta = elapsed / completed_segments * (total_segments - completed_segments) if completed_segments and total_segments > completed_segments else None
-                if total_duration > 0:
+                is_complete = completed_segments >= total_segments
+                should_refresh_progress_ui = (
+                    is_complete
+                    or last_segment_ui_update <= 0.0
+                    or (now - last_segment_ui_update) >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS
+                    or abs(completed_bytes - last_segment_ui_bytes) >= FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA
+                )
+                if total_duration > 0 and should_refresh_progress_ui:
                     percent = min((completed_duration / total_duration) * 100.0, 99.0)
                     self.update_tree_many(item_id, {
                         "progress": f"{percent:.1f}%",
                         "size": f"{completed_segments}/{total_segments}",
                         "speed_eta": f"{format_transfer_rate(speed_bps)} | {format_eta(eta)}" if eta else format_transfer_rate(speed_bps),
-                    }, force=True)
-                self._save_resume_progress(
-                    progress_path,
-                    completed_duration,
-                    source_url=_normalize_download_url(url) or url,
-                    bytes_done=completed_bytes,
-                    min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
-                    min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
-                )
+                    }, force=False)
+                    last_segment_ui_update = now
+                    last_segment_ui_bytes = completed_bytes
+                if should_refresh_progress_ui:
+                    self._save_resume_progress(
+                        progress_path,
+                        completed_duration,
+                        source_url=_normalize_download_url(url) or url,
+                        bytes_done=completed_bytes,
+                        min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
+                        min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
+                    )
             return part_size
 
         try:
@@ -15180,6 +15275,9 @@ class DownloadManagerApp:
                 bytes=logged_output_size,
                 segments=total_segments,
                 workers=worker_count,
+                hls_host=hls_host,
+                hls_host_active_downloads=hls_host_active_downloads,
+                hls_host_worker_budget=hls_host_worker_budget,
                 remux_strategy=remux_strategy,
                 elapsed_seconds=round(elapsed_seconds, 3),
                 average_speed_bps=int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0,
@@ -15409,6 +15507,7 @@ class DownloadManagerApp:
 
     def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False, _audio_transcode_retry=False):
         task = self.tasks.get(item_id, {})
+        self._set_task_active_media_url(task, url)
         source_site = _task_source_site_name(task) or _infer_source_site_from_task_urls(
             url,
             _task_field_value(task, "url", ""),
@@ -17105,7 +17204,8 @@ class DownloadManagerApp:
     def _request_shutdown_stop_for_active_tasks(self):
         for item_id, task in self.tasks.items():
             state = str(_task_field_value(task, "state", "") or "")
-            if state == "DOWNLOADING":
+            proc = _task_field_value(task, "_proc", None)
+            if state in ("DOWNLOADING", "PAUSE_REQUESTED") or self._process_handle_is_running(proc):
                 _set_task_aux_fields(task, state="PAUSE_REQUESTED", _stop_reason=STOP_REASON_PAUSE, resume_requested=True)
                 self._set_task_status_mode_ui(item_id, self._paused_status_text())
             elif state == "QUEUED":
@@ -20941,6 +21041,48 @@ class DownloadManagerApp:
             )
             candidate_urls.extend(_fetch_ggjav_related_candidate_urls(jav_code, c_req=c_req))
             candidate_urls = _prefer_ggjav_media_group_matching_code(candidate_urls, jav_code)
+            if jav_code and candidate_urls:
+                code_filtered_candidates = _filter_ggjav_media_groups_by_code(candidate_urls, jav_code, drop_mismatched=True)
+                if not code_filtered_candidates:
+                    write_error_log(
+                        "hohoj mismatched media reroute",
+                        Exception("HoHoJ embed media code mismatch; retrying same-code searchable source"),
+                        url=url,
+                        item_id=item_id,
+                        jav_code=jav_code,
+                        mismatched_candidate_count=len(candidate_urls),
+                    )
+                    search_results = [
+                        result for result in self._google_video_search_results(jav_code)
+                        if _normalize_download_url(result.get("url", ""))
+                        and _normalize_download_url(result.get("url", "")) != _normalize_download_url(url)
+                    ]
+                    plan = self._build_video_search_download_plan(search_results, 0, jav_code, is_mp3=is_mp3)
+                    target_url = _normalize_download_url((plan or {}).get("target_url", ""))
+                    if target_url:
+                        source_page = (plan or {}).get("source_page") or target_url
+                        source_site = (plan or {}).get("source_site") or self._source_site_from_search_url(source_page or target_url)
+                        extra_task_data = (plan or {}).get("extra_task_data") or {}
+                        fallback_urls = _dedupe_download_urls(extra_task_data.get("fallback_urls", []), primary_url=target_url)
+                        self._retarget_download_task(
+                            task,
+                            item_id,
+                            old_url=_normalize_download_url(_task_field_value(task, "url", "")) or url,
+                            target_url=target_url,
+                            name=(plan or {}).get("custom_name") or page_title or jav_code,
+                            source_site=source_site,
+                            source_page=source_page,
+                            fallback_urls=fallback_urls,
+                        )
+                        self._set_task_parse_ui(item_id, message="HoHoJ 串流番號不符，改用同番號可下載來源...")
+                        return self._download_task_internal(
+                            target_url,
+                            item_id,
+                            save_dir,
+                            self._should_use_impersonation(target_url, source_site),
+                            is_mp3,
+                        )
+                    raise DownloadSourceUnavailableException("HoHoJ source stream code mismatch and no alternate same-code source was found")
             candidate_urls = _prioritize_reachable_media_candidates(
                 c_req,
                 candidate_urls,
@@ -21928,9 +22070,9 @@ class DownloadManagerApp:
     def on_closing(self):
         if self._shutdown_started:
             return
-        current_downloading = self._count_tasks_in_states("DOWNLOADING")
+        current_downloading = self._count_active_downloads_for_close_warning()
         if current_downloading > 0:
-            if self._ask_warning_yesno(t("msg_close_warn", count=current_downloading)):
+            if self._ask_warning_yesno(t("msg_close_warn", count=current_downloading), parent=self.root):
                 try:
                     self._prepare_shutdown_resume_state()
                     self._wait_for_shutdown_downloads()
