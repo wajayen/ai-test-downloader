@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3241"
+APP_BUILD = "20260527-3242"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -5923,9 +5923,13 @@ def _video_search_quality_is_allowed(result, min_quality=VIDEO_SEARCH_MIN_QUALIT
     return quality <= 0 or quality >= int(min_quality or 0)
 
 
-def _filter_video_search_candidates_by_quality(candidate_urls, min_quality=VIDEO_SEARCH_MIN_QUALITY):
+def _filter_video_search_candidates_by_quality(candidate_urls, min_quality=VIDEO_SEARCH_MIN_QUALITY, source_site=""):
     filtered = []
     for candidate in _dedupe_download_urls(candidate_urls):
+        if _is_known_dead_external_fallback_url(candidate) or _is_known_ad_media_url(candidate):
+            continue
+        if source_site and _is_slow_external_fallback_url_for_site(candidate, source_site):
+            continue
         quality = _video_search_quality_score(candidate)
         if quality and quality < int(min_quality or 0):
             continue
@@ -6014,12 +6018,17 @@ def _video_search_result_is_downloadable(result):
     url = _normalize_download_url((result or {}).get("url", ""))
     if not url:
         return False
+    if _is_known_dead_external_fallback_url(url) or _is_known_ad_media_url(url):
+        return False
+    source_site = _video_search_site_for_url(url)
+    if _is_slow_external_fallback_url_for_site(url, source_site):
+        return False
     candidate_urls = _dedupe_download_urls((result or {}).get("candidate_urls", []))
     if candidate_urls:
-        return True
+        return bool(_filter_video_search_candidates_by_quality(candidate_urls, source_site=source_site))
     if _looks_like_manifest_url(url) or _infer_media_extension_from_url(url) in (".mp4", ".mkv", ".webm", ".m4a", ".mp3"):
         return True
-    site = _video_search_site_for_url(url)
+    site = source_site
     if site == "iq.com":
         path = urllib.parse.urlsplit(url).path.lower()
         if "/play/best-episode" in path or not re.search(r"/play/.+-[a-z0-9]{8,}", path, re.IGNORECASE):
@@ -10116,7 +10125,8 @@ class DownloadManagerApp:
                     and "screenshot" not in str(candidate or "").lower()
                 ]
             if candidates:
-                result["candidate_urls"] = _filter_video_search_candidates_by_quality(candidates)
+                result_site = _video_search_site_for_url(result.get("url", ""))
+                result["candidate_urls"] = _filter_video_search_candidates_by_quality(candidates, source_site=result_site)
                 if not result["candidate_urls"]:
                     result["quality"] = max(_video_search_quality_score(candidate) for candidate in candidates)
                     result["quality_below_min"] = True
@@ -10509,13 +10519,22 @@ class DownloadManagerApp:
                 }
             )
         playlist_entries = _sort_download_targets_naturally(playlist_entries)
-        candidate_urls = _dedupe_download_urls(best.get("candidate_urls", []))
+        candidate_urls = _filter_video_search_candidates_by_quality(
+            best.get("candidate_urls", []),
+            source_site=_video_search_site_for_url(target_url),
+        )
         source_page = target_url
-        fallback_urls = [
-            result.get("url", "")
-            for index, result in enumerate(results)
-            if index != selected_index and result.get("url")
-        ]
+        fallback_urls = []
+        for index, result in enumerate(results):
+            if index == selected_index:
+                continue
+            fallback_url = _normalize_download_url(result.get("url", ""))
+            if not fallback_url or _is_known_dead_external_fallback_url(fallback_url) or _is_known_ad_media_url(fallback_url):
+                continue
+            fallback_site = _video_search_site_for_url(fallback_url)
+            if _is_slow_external_fallback_url_for_site(fallback_url, fallback_site):
+                continue
+            fallback_urls.append(fallback_url)
         if playlist_entries:
             source_page = target_url
             target_url = playlist_entries[0]["url"]
