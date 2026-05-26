@@ -114,6 +114,7 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "99itv",
     "hayav",
     "hohoj",
+    "ikanbot",
     "jable",
     "missav",
     "njav",
@@ -670,6 +671,7 @@ YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "777tv": 15.0,
     "18jav": 15.0,
     "hohoj": 15.0,
+    "ikanbot": 15.0,
     "nnyy": 15.0,
     "movieffm": 15.0,
     "missav": 15.0,
@@ -685,11 +687,12 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "gimy": 32,
     "goodav17": 24,
     "hohoj": 20,
+    "ikanbot": 24,
     "jable": 10,
     "missav": 24,
     "nnyy": 24,
     "movieffm": 32,
-    "xiaoyakankan": 18,
+    "xiaoyakankan": 24,
 }
 YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "99itv": False,
@@ -699,6 +702,7 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "gimy": True,
     "goodav17": False,
     "hohoj": False,
+    "ikanbot": False,
     "jable": False,
     "movieffm": False,
     "missav": True,
@@ -865,7 +869,7 @@ GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
 GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
-IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "tktube", "bilibili")
+IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "tktube", "bilibili", "ikanbot")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
 STOP_REQUEST_TASK_STATES = frozenset(("PAUSE_REQUESTED", "DELETE_REQUESTED"))
@@ -1782,6 +1786,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "avjoy"
         if "av01.media" in host or "av01.tv" in host:
             return "av01"
+        if "ikanbot.com" in host:
+            return "ikanbot"
         if "movieffm.net" in host:
             return "movieffm"
         if "gimy" in host:
@@ -4758,6 +4764,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "hayav.com",
     "hglink.to",
     "av01.media",
+    "ikanbot.com",
     "avhd101.com",
 )
 
@@ -4792,6 +4799,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "hohoj.tv",
     "hayav.com",
     "av01.media",
+    "ikanbot.com",
     "avhd101.com",
 )
 
@@ -4818,6 +4826,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "hayav.com": 18,
     "avjoy.me": 20,
     "av01.media": 25,
+    "ikanbot.com": 26,
     "goodav17.com": 30,
     "avhd101.com": 35,
     "njavtv.com": 40,
@@ -4927,6 +4936,23 @@ VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
         {
             "url": "https://anime1.me/category/2026%E5%B9%B4%E6%98%A5%E5%AD%A3/re%E5%BE%9E%E9%9B%B6%E9%96%8B%E5%A7%8B%E7%9A%84%E7%95%B0%E4%B8%96%E7%95%8C%E7%94%9F%E6%B4%BB-%E7%AC%AC%E5%9B%9B%E5%AD%A3",
             "title": "Re:從零開始的異世界生活 第四季 Anime1",
+            "snippet": "known verified search seed",
+        },
+    ],
+    "超異能特工": [
+        {
+            "url": "https://tw.xiaoyakankan.io/vod/detail/id/840z2355.html",
+            "title": "超異能特工 超異能特攻",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://tw.xiaoyakankan.io/vod/detail/id/dr34g83b.html",
+            "title": "超異能特工 超異能特攻",
+            "snippet": "known verified search seed",
+        },
+        {
+            "url": "https://www.movieffm.net/movies/hi-five/",
+            "title": "超異能特攻 Hi-Five",
             "snippet": "known verified search seed",
         },
     ],
@@ -5202,6 +5228,10 @@ def _video_search_query_variants(query_text):
         text = re.sub(r"\s+", " ", str(raw or "").strip())
         if text and text not in variants:
             variants.append(text)
+        if "特工" in text:
+            alternate = text.replace("特工", "特攻")
+            if alternate and alternate not in variants:
+                variants.append(alternate)
     return variants
 
 
@@ -5765,6 +5795,69 @@ def _av01_manifest_has_real_media(manifest_url, referer="https://www.av01.media/
         return int(getattr(segment_resp, "status_code", 0) or 0) < 400 and len(segment_bytes) >= 4096
     except Exception:
         return False
+
+
+def _clean_ikanbot_title(raw_title, fallback="Ikanbot"):
+    title = html.unescape(str(raw_title or "")).strip()
+    title = re.sub(r"<[^>]+>", " ", title)
+    title = re.sub(r"\s+", " ", title).strip()
+    title = re.sub(r"\s*[-|]\s*(?:免费在线观看|免費在線觀看|在线观看|線上看).*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*[-|]\s*(?:爱看机器人|愛看機器人|ikanbot).*?$", "", title, flags=re.IGNORECASE)
+    title = title.strip(" -|_/.,")
+    if not title or _looks_like_garbled_text(title):
+        title = str(fallback or "Ikanbot").strip() or "Ikanbot"
+    return title
+
+
+def _extract_ikanbot_hidden_value(page_text, field_id):
+    field = re.escape(str(field_id or ""))
+    patterns = (
+        rf'id=["\']{field}["\'][^>]*value=["\']([^"\']*)',
+        rf'value=["\']([^"\']*)["\'][^>]*id=["\']{field}["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, str(page_text or ""), re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1)).strip()
+    return ""
+
+
+def _extract_ikanbot_media_candidates(value, base_url="https://www1.ikanbot.com/"):
+    candidates = []
+    seen_containers = set()
+
+    def visit(node):
+        marker = id(node)
+        if marker in seen_containers:
+            return
+        if isinstance(node, (dict, list, tuple)):
+            seen_containers.add(marker)
+        if isinstance(node, dict):
+            for item in node.values():
+                visit(item)
+            return
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+            return
+        if not isinstance(node, str):
+            return
+        text = html.unescape(node).replace("\\/", "/").strip()
+        if not text:
+            return
+        candidates.extend(_extract_candidate_media_urls(text, allowed_exts=(".m3u8", ".mp4", ".mpd")))
+        for raw_url in re.findall(r"""(?:url|src|playurl|playUrl)\s*[:=]\s*["']([^"']+)["']""", text, re.IGNORECASE):
+            normalized = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(raw_url).replace("\\/", "/").strip()))
+            if normalized and re.search(r"\.(?:m3u8|mp4|mpd)(?:[?#]|$)", normalized, re.IGNORECASE):
+                candidates.append(normalized)
+        if len(text) < 200000 and text[:1] in ("{", "["):
+            try:
+                visit(json.loads(text))
+            except Exception:
+                pass
+
+    visit(value)
+    return _dedupe_download_urls(candidates)
 
 
 def _video_search_quality_score(value):
@@ -6700,7 +6793,7 @@ def _should_force_native_hls_before_parallel(url, task=None):
     parsed = urllib.parse.urlparse(str(url or ""))
     host = str(parsed.netloc or "").strip().lower()
     source_site = _task_source_site_name(task)
-    if source_site == "movieffm" and "huyall.com" in host:
+    if source_site in ("movieffm", "xiaoyakankan", "nnyy") and "huyall.com" in host:
         return True
     return False
 
@@ -9780,6 +9873,7 @@ class DownloadManagerApp:
             "hayav.com": "hayav",
             "njav.com": "njav",
             "av01.media": "av01",
+            "ikanbot.com": "ikanbot",
             "avhd101.com": "avhd101",
         }.get(site, "missav" if site == "missav" else site.replace(".com", "").replace(".tv", ""))
 
@@ -19634,6 +19728,113 @@ class DownloadManagerApp:
                 manifest_url=manifest_url,
             )
             raise DownloadSourceUnavailableException("AV01 stream is currently unavailable")
+        if "ikanbot.com" in parsed_url.netloc.lower() and "/play/" in parsed_url.path.lower():
+            self._set_task_parse_ui(item_id, message="正在解析 Ikanbot 影片來源...")
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+            session = c_req.Session(impersonate="chrome120")
+            page_resp = session.get(
+                url,
+                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                headers=_make_ytdlp_http_headers(referer=site_root + "/"),
+            )
+            page_text = _response_text_utf8(page_resp)
+            page_title = _clean_ikanbot_title(_extract_html_title(page_text, short_name or "Ikanbot"), fallback=short_name or "Ikanbot")
+            direct_candidates = _extract_ikanbot_media_candidates(page_text, base_url=url)
+            video_id = _extract_ikanbot_hidden_value(page_text, "current_id")
+            mtype = _extract_ikanbot_hidden_value(page_text, "mtype") or "0"
+            token_candidates = []
+            v_tks_match = re.search(r"window\.v_tks\s*=\s*['\"]([^'\"]*)", page_text, re.IGNORECASE)
+            if v_tks_match:
+                token_candidates.append(html.unescape(v_tks_match.group(1)).strip())
+            e_token = _extract_ikanbot_hidden_value(page_text, "e_token")
+            token_candidates.extend(["", e_token])
+            if e_token.startswith("wa") and "ve" in e_token:
+                token_candidates.extend((e_token[2:], e_token[2:-2], e_token[2:34]))
+            if video_id:
+                api_headers = _make_ytdlp_http_headers(referer=url, origin=site_root)
+                api_headers.update(
+                    {
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Sec-Fetch-Site": "same-origin",
+                        "Sec-Fetch-Mode": "cors",
+                        "Sec-Fetch-Dest": "empty",
+                    }
+                )
+                for token in dict.fromkeys(token_candidates):
+                    api_url = site_root + "/api/getResN?" + urllib.parse.urlencode(
+                        {"videoId": video_id, "mtype": mtype, "token": token or ""}
+                    )
+                    try:
+                        api_resp = session.get(api_url, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS, headers=api_headers)
+                        direct_candidates.extend(_extract_ikanbot_media_candidates(_response_text_utf8(api_resp), base_url=url))
+                    except Exception as exc:
+                        write_error_log("ikanbot api candidate failure", exc, url=url, item_id=item_id, token_present=bool(token))
+            direct_candidates = _filter_video_search_candidates_by_quality(_dedupe_download_urls(direct_candidates))
+            if direct_candidates:
+                _dispatch_extracted_media_candidates(
+                    direct_candidates,
+                    page_title,
+                    "ikanbot",
+                    source_page=url,
+                    referer=url,
+                    origin=site_root,
+                    manifest_default_route="generic",
+                    session=session,
+                    missing_message="Ikanbot media URL missing",
+                )
+                return
+            query_text = page_title
+            if not _looks_like_video_search_text(query_text):
+                raise DownloadSourceUnavailableException("Ikanbot stream is locked and no searchable title could be resolved")
+            search_results = [
+                result for result in self._google_video_search_results(query_text)
+                if _normalize_download_url(result.get("url", ""))
+                and "ikanbot.com" not in urllib.parse.urlsplit(_normalize_download_url(result.get("url", ""))).netloc.lower()
+            ]
+            plan = self._build_video_search_download_plan(search_results, 0, query_text, is_mp3=is_mp3)
+            target_url = _normalize_download_url((plan or {}).get("target_url", ""))
+            if not target_url:
+                write_error_log(
+                    "ikanbot reroute unavailable",
+                    Exception("Ikanbot API returned no media and no downloadable alternate source was found"),
+                    url=url,
+                    item_id=item_id,
+                    title=query_text,
+                )
+                raise DownloadSourceUnavailableException("Ikanbot stream is locked and no downloadable alternate source was found")
+            source_page = (plan or {}).get("source_page") or target_url
+            source_site = (plan or {}).get("source_site") or self._source_site_from_search_url(source_page or target_url)
+            extra_task_data = (plan or {}).get("extra_task_data") or {}
+            fallback_urls = _dedupe_download_urls(extra_task_data.get("fallback_urls", []), primary_url=target_url)
+            self._retarget_download_task(
+                task,
+                item_id,
+                old_url=_normalize_download_url(_task_field_value(task, "url", "")) or url,
+                target_url=target_url,
+                name=(plan or {}).get("custom_name") or page_title,
+                source_site=source_site,
+                source_page=source_page,
+                fallback_urls=fallback_urls,
+            )
+            write_error_log(
+                "ikanbot stream fallback",
+                Exception("Ikanbot API returned no media; retrying downloadable search source"),
+                url=url,
+                item_id=item_id,
+                title=query_text,
+                next_url=target_url,
+                next_source_page=source_page,
+            )
+            self._set_task_parse_ui(item_id, message="Ikanbot 串流無法直接取得，改用可下載來源...")
+            return self._download_task_internal(
+                target_url,
+                item_id,
+                save_dir,
+                self._should_use_impersonation(target_url, source_site),
+                is_mp3,
+            )
         if "hayav.com" in parsed_url.netloc.lower() and "/video/" in parsed_url.path.lower():
             self._set_task_parse_ui(item_id, message="正在解析 HayAV 影片來源...")
             c_req = get_curl_cffi_requests()
