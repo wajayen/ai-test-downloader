@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3246"
+APP_BUILD = "20260527-3247"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -87,6 +87,7 @@ LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
 LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 3
 RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
 RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 64 * 1024
+CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS = 5.0
 MAX_QUEUE_TASKS = 300
 DISK_SPACE_RESERVE_BYTES = 256 * 1024 * 1024
 STATE_PERSIST_INTERVAL_SECONDS = 2.5
@@ -965,6 +966,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg near complete resume accepted",
     "resume invalid partial reset",
     "resume low speed reanalysis requested",
+    "cached resolved url startup timeout",
     "cached media link refresh",
     "cached resolved url unavailable",
     "missav parser retry recovered",
@@ -18313,7 +18315,7 @@ class DownloadManagerApp:
         )
         return True
 
-    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False, failed_resolved_url=""):
+    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False, failed_resolved_url="", reason_message=None):
         if failed_resolved_url:
             self._clear_resume_artifacts_for_url(task, failed_resolved_url, save_dir, is_mp3=is_mp3)
         self._set_cached_resolved_link_state(
@@ -18323,7 +18325,9 @@ class DownloadManagerApp:
             page_refresh_candidates=[],
             clear_source_refresh_history=True,
         )
-        if expired:
+        if reason_message:
+            self._set_task_parse_ui(item_id, message=reason_message)
+        elif expired:
             self._set_task_parse_ui(item_id, message="已記錄連結已過期，重新分析頁面...")
         else:
             self._set_task_parse_ui(item_id, message="已記錄連結失效，重新分析頁面...")
@@ -18332,6 +18336,78 @@ class DownloadManagerApp:
             self._download_task_internal(retry_url, item_id, save_dir, use_impersonate, is_mp3)
             return
         self._download_task_internal(source_url, item_id, save_dir, use_impersonate, is_mp3)
+
+    def _cached_resolved_link_probe_headers(self, task, probe_url, source_url):
+        source_page = self._get_task_source_page(task, fallback_url=source_url) or source_url
+        parsed_source = urllib.parse.urlsplit(str(source_page or ""))
+        origin = f"{parsed_source.scheme}://{parsed_source.netloc}" if parsed_source.scheme and parsed_source.netloc else None
+        base_headers = _make_hls_http_headers(referer=source_page, origin=origin) if _looks_like_manifest_url(probe_url) else _make_ytdlp_http_headers(referer=source_page, origin=origin)
+        return _make_range_http_headers(base_headers, "bytes=0-0")
+
+    def _read_probe_url_start_bytes(self, probe_url, headers, timeout_seconds):
+        request_headers = dict(headers or {})
+        request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        req = urllib.request.Request(probe_url, headers=request_headers)
+        with urllib.request.urlopen(req, timeout=max(float(timeout_seconds or 0.0), 1.0)) as resp:
+            status = int(getattr(resp, "status", 0) or resp.getcode() or 0)
+            if status >= 400:
+                raise Exception(f"HTTP {status}")
+            content_type = str(resp.headers.get("Content-Type") or "").lower()
+            data = resp.read(512)
+        return data or b"", content_type
+
+    def _cached_resolved_link_can_start_download(self, task, cached_resolved_url, source_url, timeout_seconds=CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS):
+        normalized_url = _normalize_download_url(cached_resolved_url)
+        if not normalized_url:
+            return False, Exception("cached resolved URL is empty")
+        deadline = time.time() + max(float(timeout_seconds or 0.0), 1.0)
+
+        def _remaining_timeout():
+            return max(deadline - time.time(), 0.5)
+
+        try:
+            headers = self._cached_resolved_link_probe_headers(task, normalized_url, source_url)
+            if not _looks_like_manifest_url(normalized_url):
+                data, content_type = self._read_probe_url_start_bytes(normalized_url, headers, _remaining_timeout())
+                if _is_non_video_probe_payload(data, content_type):
+                    raise Exception(f"cached resolved URL returned non-video payload: {content_type or 'unknown'}")
+                return bool(data), None
+
+            manifest_data, content_type = self._read_probe_url_start_bytes(
+                normalized_url,
+                _make_range_http_headers(headers, ""),
+                _remaining_timeout(),
+            )
+            manifest_text = manifest_data.decode("utf-8", "ignore")
+            if "#EXTM3U" not in manifest_text:
+                raise Exception(f"cached HLS URL did not return a playlist: {content_type or 'unknown'}")
+            variant_url, _variant_attrs = _select_highest_hls_variant_url(normalized_url, manifest_text)
+            media_playlist_url = variant_url or normalized_url
+            if variant_url:
+                variant_data, _variant_content_type = self._read_probe_url_start_bytes(
+                    variant_url,
+                    _make_range_http_headers(headers, ""),
+                    _remaining_timeout(),
+                )
+                manifest_text = variant_data.decode("utf-8", "ignore")
+                if "#EXTM3U" not in manifest_text:
+                    raise Exception("cached HLS variant did not return a playlist")
+            first_segment_url = ""
+            for line in manifest_text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or ".m3u8" in line.lower():
+                    continue
+                first_segment_url = urllib.parse.urljoin(media_playlist_url, line)
+                break
+            if not first_segment_url:
+                return True, None
+            segment_headers = self._cached_resolved_link_probe_headers(task, first_segment_url, source_url)
+            data, content_type = self._read_probe_url_start_bytes(first_segment_url, segment_headers, _remaining_timeout())
+            if _is_non_video_probe_payload(data, content_type):
+                raise Exception(f"cached HLS segment returned non-video payload: {content_type or 'unknown'}")
+            return bool(data), None
+        except Exception as exc:
+            return False, exc
 
     def _cached_resolved_link_needs_source_refresh(self, task, cached_resolved_url):
         source_site = _task_source_site_name(task)
@@ -18675,6 +18751,34 @@ class DownloadManagerApp:
                 is_mp3,
                 expired=False,
                 failed_resolved_url=cached_resolved_url,
+            )
+            return True
+        can_start_cached_link, cached_start_exc = self._cached_resolved_link_can_start_download(
+            task,
+            cached_resolved_url,
+            source_url,
+            timeout_seconds=CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS,
+        )
+        if not can_start_cached_link:
+            write_error_log(
+                "cached resolved url startup timeout",
+                cached_start_exc or Exception("cached resolved URL did not start within timeout"),
+                item_id=item_id,
+                source_url=source_url,
+                resolved_url=cached_resolved_url,
+                source_site=_task_source_site_name(task) or None,
+                timeout_seconds=CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS,
+            )
+            self._retry_source_after_cached_link_failure(
+                task,
+                item_id,
+                source_url,
+                save_dir,
+                use_impersonate,
+                is_mp3,
+                expired=False,
+                failed_resolved_url=cached_resolved_url,
+                reason_message="已記錄連結 5 秒內未開始下載，重新分析來源頁...",
             )
             return True
         try:
