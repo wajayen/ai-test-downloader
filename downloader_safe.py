@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3231"
+APP_BUILD = "20260526-3232"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -11021,7 +11021,9 @@ class DownloadManagerApp:
         site = _task_source_site_name(task, fallback_site=source_site or "")
         probe_task = self._parallel_hls_probe_task(task, site)
         route_label = "ffmpeg"
-        if not bool(_task_field_value(task, "is_mp3", False)) and self._should_try_parallel_hls_segments(media_url, probe_task):
+        if _should_force_native_hls_before_parallel(media_url, probe_task) and _should_prefer_native_hls(media_url, probe_task):
+            route_label = "native"
+        elif not bool(_task_field_value(task, "is_mp3", False)) and self._should_try_parallel_hls_segments(media_url, probe_task):
             route_label = "parallel-hls"
         elif _should_prefer_native_hls(media_url, probe_task):
             route_label = "native"
@@ -11413,6 +11415,12 @@ class DownloadManagerApp:
     def _select_manifest_download_route(self, target_url, task, save_dir, is_mp3=False, default_route="generic", force_ffmpeg=False):
         if force_ffmpeg:
             return "ffmpeg"
+        if (
+            not is_mp3
+            and _should_force_native_hls_before_parallel(target_url, task)
+            and _should_prefer_native_hls(target_url, task)
+        ):
+            return "native"
         resume_active = self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
         if resume_active:
             parsed = urllib.parse.urlparse(str(target_url or ""))
@@ -15049,6 +15057,8 @@ class DownloadManagerApp:
         if not _looks_like_manifest_url(normalized_url):
             return False
         host = urllib.parse.urlsplit(normalized_url).netloc.lower()
+        if _should_force_native_hls_before_parallel(normalized_url, self._parallel_hls_probe_task(task, source_site)):
+            return False
         lowered = normalized_url.lower()
         return any(marker in host or marker in lowered for marker in PARALLEL_HLS_SEGMENT_HOST_MARKERS)
 
