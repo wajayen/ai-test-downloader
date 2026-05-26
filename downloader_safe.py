@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3220"
+APP_BUILD = "20260526-3230"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -112,9 +112,11 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "18jav",
     "777tv",
     "99itv",
+    "hayav",
     "hohoj",
     "jable",
     "missav",
+    "njav",
     "movieffm",
     "njavtv",
     "nnyy",
@@ -133,6 +135,7 @@ STRICT_HLS_ARTIFACT_SITES = frozenset((
     "hohoj",
     "movieffm",
     "missav",
+    "njav",
     "njavtv",
     "xiaoyakankan",
     "99itv",
@@ -443,6 +446,7 @@ JAV_DUPLICATE_SOURCE_SITES = frozenset((
     "jable",
     "javfilms",
     "missav",
+    "njav",
     "njavtv",
 ))
 JAV_DUPLICATE_HOST_MARKERS = {
@@ -454,6 +458,7 @@ JAV_DUPLICATE_HOST_MARKERS = {
     "jable.tv": "jable",
     "javfilms.com": "javfilms",
     "missav": "missav",
+    "njav.com": "njav",
     "njavtv.com": "njavtv",
 }
 
@@ -520,7 +525,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "gimy", "goodav17", "hohoj", "jable", "missav", "njavtv", "nnyy", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "gimy", "goodav17", "hayav", "hohoj", "jable", "missav", "njav", "njavtv", "nnyy", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -546,6 +551,8 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "dytt-see.com",
     "vip.dytt-see.com",
     "surrit.com",
+    "upload18.org",
+    "321watch.workers.dev",
     "taopianplay1.com",
     "streamfastpro",
     "mushroomtrack.com",
@@ -589,6 +596,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "hohoj": 24,
     "jable": 24,
     "missav": 24,
+    "njav": 18,
     "njavtv": 18,
     "nnyy": 24,
     "xiaoyakankan": 24,
@@ -627,6 +635,9 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
 }
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
 PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS = 1800
+PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS_BY_HOST = {
+    "surrit.com": 1500,
+}
 PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS = 32
 PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "ggjav.com",
@@ -670,6 +681,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "99itv": 18,
     "777tv": 18,
     "18jav": 24,
+    "av01": 24,
     "gimy": 32,
     "goodav17": 24,
     "hohoj": 20,
@@ -683,6 +695,7 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "99itv": False,
     "777tv": False,
     "18jav": False,
+    "av01": False,
     "gimy": True,
     "goodav17": False,
     "hohoj": False,
@@ -735,6 +748,7 @@ YTDLP_PROGRESS_DELTA_SECONDS = 0.5
 YTDLP_WINDOWS_TRIM_FILE_NAME = 180
 YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT = 720
 YTDLP_RETRY_PROFILE_BY_SITE = {
+    "av01": {"fragment_retries": 40},
     "bilibili": {"extractor_retries": 8, "fragment_retries": 40},
     "youtube": {"extractor_retries": 8, "fragment_retries": 40},
     "missav": {"fragment_retries": 40, "file_access_retries": 15},
@@ -756,6 +770,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "mixdrop": 18,
     "movieffm": 24,
     "missav": 24,
+    "njav": 20,
     "njavtv": 20,
     "tktube": 20,
     "youtube": 20,
@@ -781,6 +796,7 @@ HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
     "missav",
     "mixdrop",
     "movieffm",
+    "njav",
     "njavtv",
     "nnyy",
     "tktube",
@@ -801,7 +817,7 @@ YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
     "hohoj",
 ))
 NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv"))
-NATIVE_HLS_NEVER_SITES = frozenset(("18av", "jable", "njavtv", "3kor", "missav"))
+NATIVE_HLS_NEVER_SITES = frozenset(("18av", "jable", "njav", "njavtv", "3kor", "missav"))
 NATIVE_HLS_DISABLED_HOST_MARKERS = ("ggjav",)
 NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "18av": ("streamfastpro",),
@@ -849,7 +865,7 @@ GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
 GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
-IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njavtv", "anime1", "avbebe", "tktube", "bilibili")
+IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "tktube", "bilibili")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
 STOP_REQUEST_TASK_STATES = frozenset(("PAUSE_REQUESTED", "DELETE_REQUESTED"))
@@ -990,6 +1006,11 @@ FORCED_M3U8_SITE_RULES = {
         "hosts": (),
         "origin": "https://missav.ws",
         "referer": "https://missav.ws/",
+    },
+    "njav": {
+        "hosts": ("upload18.org", "321watch.workers.dev"),
+        "origin": "https://upload18.org",
+        "referer": "https://upload18.org/",
     },
     "njavtv": {
         "hosts": ("surrit.com",),
@@ -1759,6 +1780,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "avbebe"
         if "avjoy.me" in host:
             return "avjoy"
+        if "av01.media" in host or "av01.tv" in host:
+            return "av01"
         if "movieffm.net" in host:
             return "movieffm"
         if "gimy" in host:
@@ -1767,6 +1790,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "xiaoyakankan"
         if "missav" in host:
             return "missav"
+        if "njav.com" in host or "upload18.org" in host or "321watch.workers.dev" in host:
+            return "njav"
         if "njavtv.com" in host:
             return "njavtv"
         if "nnyy.in" in host:
@@ -3590,6 +3615,8 @@ def _avbebe_hgcloud_embed_url(url):
     host = parsed.netloc.lower()
     if "masukestin.com" in host:
         return normalized
+    if "hglink.to" in host:
+        return urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path or "/", parsed.query, ""))
     if "hgcloud.to" not in host:
         return ""
     return urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path or "/", parsed.query, ""))
@@ -4461,7 +4488,7 @@ def _looks_like_manifest_url(url):
     if not normalized:
         return False
     lower = normalized.lower()
-    return ".m3u8" in lower or ".mpd" in lower
+    return ".m3u8" in lower or ".mpd" in lower or ("upload18.org" in lower and "/play/token_hash" in lower)
 
 
 def _resolve_forced_m3u8_site(normalized_url, task):
@@ -4715,6 +4742,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "jable",
     "njavtv",
     "nnyy.in",
+    "njav.com",
     "iq.com",
     "youtube.com",
     "youtu.be",
@@ -4727,6 +4755,10 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "yfsp.tv",
     "tiktok.com",
     "tktube.com",
+    "hayav.com",
+    "hglink.to",
+    "av01.media",
+    "avhd101.com",
 )
 
 VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
@@ -4753,10 +4785,14 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "bilibili.com",
     "goodav17.com",
     "njavtv.com",
+    "njav.com",
     "missav",
     "javfilms.com",
     "18jav.tv",
     "hohoj.tv",
+    "hayav.com",
+    "av01.media",
+    "avhd101.com",
 )
 
 VIDEO_SEARCH_SITE_PRIORITY = {
@@ -4779,9 +4815,13 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "gimy01.tv": 16,
     "gimy.tube": 17,
     "avbebe.com": 18,
+    "hayav.com": 18,
     "avjoy.me": 20,
+    "av01.media": 25,
     "goodav17.com": 30,
+    "avhd101.com": 35,
     "njavtv.com": 40,
+    "njav.com": 45,
     "missav": 50,
     "javfilms.com": 60,
     "18jav.tv": 70,
@@ -5039,8 +5079,134 @@ def _video_search_site_for_url(url):
     return ""
 
 
+SIMPLIFIED_TO_TRADITIONAL_SEARCH_CHARS = str.maketrans({
+    "异": "異", "国": "國", "台": "臺", "后": "後", "发": "發", "复": "復", "尽": "盡",
+    "里": "裡", "冲": "衝", "丑": "醜", "并": "並", "别": "別", "卧": "臥", "卷": "捲",
+    "只": "隻", "叶": "葉", "吁": "籲", "听": "聽", "启": "啟", "吴": "吳", "周": "週",
+    "呆": "獃", "员": "員", "响": "響", "唇": "脣", "问": "問", "啸": "嘯", "喂": "餵",
+    "团": "團", "园": "園", "围": "圍", "图": "圖", "圆": "圓", "圣": "聖", "场": "場",
+    "坏": "壞", "块": "塊", "坚": "堅", "坛": "壇", "坝": "壩", "坞": "塢", "坟": "墳",
+    "垫": "墊", "垦": "墾", "垩": "堊", "垫": "墊", "城": "城", "堕": "墮", "墙": "牆",
+    "壮": "壯", "声": "聲", "壳": "殼", "壶": "壺", "处": "處", "备": "備", "复": "複",
+    "头": "頭", "夸": "誇", "夹": "夾", "夺": "奪", "奋": "奮", "奖": "獎", "奥": "奧",
+    "妆": "妝", "妇": "婦", "妈": "媽", "妩": "嫵", "姗": "姍", "姬": "姬", "娱": "娛",
+    "婴": "嬰", "孙": "孫", "学": "學", "宁": "寧", "宝": "寶", "实": "實", "审": "審",
+    "宫": "宮", "宽": "寬", "宾": "賓", "寻": "尋", "导": "導", "寿": "壽", "将": "將",
+    "尔": "爾", "尘": "塵", "尝": "嘗", "尧": "堯", "尸": "屍", "层": "層", "届": "屆",
+    "属": "屬", "岁": "歲", "岂": "豈", "岛": "島", "峡": "峽", "崭": "嶄", "嵘": "嶸",
+    "巅": "巔", "币": "幣", "帅": "帥", "师": "師", "帐": "帳", "带": "帶", "帮": "幫",
+    "帧": "幀", "广": "廣", "庄": "莊", "庆": "慶", "庐": "廬", "库": "庫", "应": "應",
+    "庙": "廟", "废": "廢", "开": "開", "异": "異", "弃": "棄", "张": "張", "弥": "彌",
+    "弯": "彎", "弹": "彈", "强": "強", "归": "歸", "当": "當", "录": "錄", "彻": "徹",
+    "径": "徑", "忆": "憶", "忧": "憂", "怀": "懷", "态": "態", "总": "總", "恋": "戀",
+    "恒": "恆", "恶": "惡", "恼": "惱", "悦": "悅", "悬": "懸", "惊": "驚", "惨": "慘",
+    "惩": "懲", "爱": "愛", "惫": "憊", "惯": "慣", "愤": "憤", "愿": "願", "戏": "戲",
+    "战": "戰", "户": "戶", "扎": "紮", "扑": "撲", "托": "託", "执": "執", "扩": "擴",
+    "扫": "掃", "扬": "揚", "扰": "擾", "抚": "撫", "抛": "拋", "抢": "搶", "护": "護",
+    "报": "報", "担": "擔", "拟": "擬", "拢": "攏", "拥": "擁", "择": "擇", "挂": "掛",
+    "挚": "摯", "挛": "攣", "挥": "揮", "损": "損", "换": "換", "据": "據", "掳": "擄",
+    "掷": "擲", "揽": "攬", "摄": "攝", "摆": "擺", "摇": "搖", "摊": "攤", "撑": "撐",
+    "撵": "攆", "敌": "敵", "敛": "斂", "数": "數", "斋": "齋", "斗": "鬥", "斩": "斬",
+    "断": "斷", "无": "無", "旧": "舊", "时": "時", "晋": "晉", "晒": "曬", "晓": "曉",
+    "暂": "暫", "术": "術", "机": "機", "杀": "殺", "杂": "雜", "权": "權", "条": "條",
+    "来": "來", "杨": "楊", "杰": "傑", "极": "極", "构": "構", "枪": "槍", "柜": "櫃",
+    "标": "標", "栈": "棧", "栋": "棟", "栏": "欄", "树": "樹", "样": "樣", "桥": "橋",
+    "桦": "樺", "梦": "夢", "检": "檢", "楼": "樓", "欢": "歡", "欧": "歐", "欲": "慾",
+    "残": "殘", "殴": "毆", "气": "氣", "汉": "漢", "汤": "湯", "沟": "溝", "没": "沒",
+    "沪": "滬", "泪": "淚", "洁": "潔", "浅": "淺", "浆": "漿", "浊": "濁", "测": "測",
+    "济": "濟", "浑": "渾", "浓": "濃", "涌": "湧", "涛": "濤", "涡": "渦", "润": "潤",
+    "涧": "澗", "涨": "漲", "涩": "澀", "渊": "淵", "渐": "漸", "渔": "漁", "渗": "滲",
+    "温": "溫", "湾": "灣", "湿": "濕", "满": "滿", "滥": "濫", "滨": "濱", "滩": "灘",
+    "灭": "滅", "灯": "燈", "灵": "靈", "灾": "災", "炉": "爐", "点": "點", "炼": "煉",
+    "烂": "爛", "烛": "燭", "烟": "煙", "烦": "煩", "烧": "燒", "热": "熱", "焕": "煥",
+    "爱": "愛", "爷": "爺", "牵": "牽", "牺": "犧", "状": "狀", "犹": "猶", "狈": "狽",
+    "独": "獨", "狭": "狹", "狮": "獅", "狱": "獄", "猎": "獵", "兽": "獸", "现": "現",
+    "环": "環", "玺": "璽", "玛": "瑪", "珑": "瓏", "琐": "瑣", "琼": "瓊", "瑶": "瑤",
+    "电": "電", "画": "畫", "畅": "暢", "畴": "疇", "疗": "療", "疟": "瘧", "疮": "瘡",
+    "疯": "瘋", "痒": "癢", "痕": "痕", "痨": "癆", "瘾": "癮", "皱": "皺", "盘": "盤",
+    "着": "著", "睁": "睜", "睐": "睞", "瞒": "瞞", "矫": "矯", "矿": "礦", "码": "碼",
+    "砖": "磚", "砚": "硯", "硕": "碩", "确": "確", "础": "礎", "礼": "禮", "祷": "禱",
+    "祸": "禍", "禀": "稟", "种": "種", "称": "稱", "积": "積", "稳": "穩", "穷": "窮",
+    "窃": "竊", "窍": "竅", "窑": "窯", "竞": "競", "笃": "篤", "笔": "筆", "笋": "筍",
+    "筑": "築", "筛": "篩", "筹": "籌", "签": "簽", "简": "簡", "篮": "籃", "类": "類",
+    "粪": "糞", "粮": "糧", "紧": "緊", "纠": "糾", "红": "紅", "纤": "纖", "约": "約",
+    "级": "級", "纪": "紀", "纯": "純", "纳": "納", "纵": "縱", "纷": "紛", "纸": "紙",
+    "纹": "紋", "纺": "紡", "纽": "紐", "线": "線", "练": "練", "组": "組", "细": "細",
+    "织": "織", "终": "終", "绍": "紹", "经": "經", "结": "結", "绝": "絕", "绞": "絞",
+    "络": "絡", "给": "給", "统": "統", "丝": "絲", "绑": "綁", "绣": "繡", "继": "繼",
+    "绩": "績", "绪": "緒", "续": "續", "绳": "繩", "维": "維", "绵": "綿", "综": "綜",
+    "绿": "綠", "缚": "縛", "缝": "縫", "缠": "纏", "缨": "纓", "网": "網", "罗": "羅",
+    "罚": "罰", "罢": "罷", "羁": "羈", "翘": "翹", "耻": "恥", "联": "聯", "聪": "聰",
+    "肃": "肅", "肠": "腸", "肤": "膚", "肮": "骯", "肿": "腫", "胀": "脹", "胆": "膽",
+    "胜": "勝", "胧": "朧", "脉": "脈", "脚": "腳", "脱": "脫", "脸": "臉", "腊": "臘",
+    "腻": "膩", "腾": "騰", "舆": "輿", "舰": "艦", "舱": "艙", "艺": "藝", "节": "節",
+    "芜": "蕪", "苏": "蘇", "苹": "蘋", "范": "範", "茧": "繭", "荆": "荊", "荐": "薦",
+    "荡": "蕩", "荣": "榮", "荤": "葷", "荧": "熒", "药": "藥", "莲": "蓮", "获": "獲",
+    "莹": "瑩", "萝": "蘿", "萤": "螢", "营": "營", "萧": "蕭", "萨": "薩", "蓝": "藍",
+    "蓦": "驀", "蔑": "衊", "蔷": "薔", "蕴": "蘊", "虚": "虛", "虫": "蟲", "虽": "雖",
+    "虾": "蝦", "蚀": "蝕", "蚁": "蟻", "蚂": "螞", "蚕": "蠶", "蛮": "蠻", "蛰": "蟄",
+    "蜕": "蛻", "蝇": "蠅", "蝉": "蟬", "蝎": "蠍", "衅": "釁", "衔": "銜", "补": "補",
+    "衬": "襯", "袭": "襲", "装": "裝", "裆": "襠", "裤": "褲", "见": "見", "观": "觀",
+    "规": "規", "视": "視", "览": "覽", "觉": "覺", "触": "觸", "订": "訂", "计": "計",
+    "认": "認", "讥": "譏", "讨": "討", "让": "讓", "训": "訓", "议": "議", "讯": "訊",
+    "记": "記", "讲": "講", "讳": "諱", "讶": "訝", "许": "許", "论": "論", "讼": "訟",
+    "讽": "諷", "设": "設", "访": "訪", "证": "證", "评": "評", "识": "識", "诈": "詐",
+    "诉": "訴", "诊": "診", "词": "詞", "译": "譯", "试": "試", "诗": "詩", "诚": "誠",
+    "话": "話", "诞": "誕", "询": "詢", "该": "該", "详": "詳", "语": "語", "误": "誤",
+    "诱": "誘", "诲": "誨", "说": "說", "诵": "誦", "请": "請", "诸": "諸", "诺": "諾",
+    "读": "讀", "课": "課", "谁": "誰", "调": "調", "谅": "諒", "谈": "談", "谋": "謀",
+    "谎": "謊", "谐": "諧", "谓": "謂", "谚": "諺", "谜": "謎", "谦": "謙", "谢": "謝",
+    "谣": "謠", "谨": "謹", "谱": "譜", "贝": "貝", "贞": "貞", "负": "負", "贡": "貢",
+    "财": "財", "责": "責", "贤": "賢", "败": "敗", "账": "帳", "货": "貨", "质": "質",
+    "贩": "販", "贪": "貪", "贫": "貧", "贬": "貶", "购": "購", "贯": "貫", "贱": "賤",
+    "贴": "貼", "贵": "貴", "贷": "貸", "贸": "貿", "费": "費", "贺": "賀", "贼": "賊",
+    "贾": "賈", "贿": "賄", "赁": "賃", "资": "資", "赐": "賜", "赏": "賞", "赔": "賠",
+    "赖": "賴", "赚": "賺", "赛": "賽", "赞": "讚", "赠": "贈", "赃": "贓", "赢": "贏",
+    "赵": "趙", "赶": "趕", "趋": "趨", "跃": "躍", "践": "踐", "踊": "踴", "踪": "蹤",
+    "车": "車", "轨": "軌", "轩": "軒", "转": "轉", "轮": "輪", "软": "軟", "轰": "轟",
+    "轴": "軸", "轻": "輕", "载": "載", "辉": "輝", "辈": "輩", "辑": "輯", "输": "輸",
+    "辖": "轄", "辩": "辯", "边": "邊", "辽": "遼", "达": "達", "迁": "遷", "过": "過",
+    "迈": "邁", "运": "運", "还": "還", "这": "這", "进": "進", "远": "遠", "违": "違",
+    "连": "連", "迟": "遲", "迹": "跡", "适": "適", "选": "選", "递": "遞", "逊": "遜",
+    "逻": "邏", "遗": "遺", "遥": "遙", "邮": "郵", "邻": "鄰", "郁": "鬱", "郑": "鄭",
+    "酝": "醞", "酱": "醬", "酿": "釀", "释": "釋", "里": "裡", "鉴": "鑑", "针": "針",
+    "钉": "釘", "钓": "釣", "钙": "鈣", "钝": "鈍", "钟": "鐘", "钢": "鋼", "钥": "鑰",
+    "钦": "欽", "钧": "鈞", "钩": "鉤", "钮": "鈕", "钱": "錢", "钳": "鉗", "钻": "鑽",
+    "铁": "鐵", "铃": "鈴", "铅": "鉛", "铉": "鉉", "铜": "銅", "铝": "鋁", "铭": "銘",
+    "银": "銀", "铺": "鋪", "链": "鏈", "销": "銷", "锁": "鎖", "锅": "鍋", "锋": "鋒",
+    "锐": "銳", "错": "錯", "录": "錄", "锤": "錘", "锦": "錦", "锯": "鋸", "锵": "鏘",
+    "键": "鍵", "镇": "鎮", "镜": "鏡", "长": "長", "门": "門", "闪": "閃", "闭": "閉",
+    "问": "問", "闯": "闖", "闲": "閒", "间": "間", "闷": "悶", "闹": "鬧", "阁": "閣",
+    "阅": "閱", "阎": "閻", "阔": "闊", "队": "隊", "阳": "陽", "阴": "陰", "阵": "陣",
+    "阶": "階", "际": "際", "陆": "陸", "陇": "隴", "陈": "陳", "陕": "陝", "险": "險",
+    "随": "隨", "隐": "隱", "隶": "隸", "难": "難", "雏": "雛", "双": "雙", "雾": "霧",
+    "霁": "霽", "霉": "黴", "静": "靜", "顶": "頂", "顷": "頃", "项": "項", "顺": "順",
+    "须": "須", "顽": "頑", "顾": "顧", "顿": "頓", "颁": "頒", "预": "預", "领": "領",
+    "颇": "頗", "频": "頻", "题": "題", "颜": "顏", "额": "額", "风": "風", "飞": "飛",
+    "饥": "飢", "饭": "飯", "饮": "飲", "饰": "飾", "饱": "飽", "饲": "飼", "饼": "餅",
+    "饿": "餓", "馀": "餘", "馆": "館", "首": "首", "马": "馬", "驭": "馭", "驰": "馳",
+    "驱": "驅", "驳": "駁", "驻": "駐", "骑": "騎", "骗": "騙", "骚": "騷", "验": "驗",
+    "惊": "驚", "体": "體", "髓": "髓", "鱼": "魚", "鲁": "魯", "鲜": "鮮", "鲍": "鮑",
+    "鸟": "鳥", "鸡": "雞", "鸣": "鳴", "鸭": "鴨", "鸦": "鴉", "鸽": "鴿", "鸿": "鴻",
+    "鹤": "鶴", "麦": "麥", "黄": "黃", "齐": "齊", "齿": "齒", "龙": "龍", "龟": "龜",
+})
+
+
+def _to_traditional_search_text(value):
+    return str(value or "").translate(SIMPLIFIED_TO_TRADITIONAL_SEARCH_CHARS)
+
+
+def _video_search_query_variants(query_text):
+    variants = []
+    for raw in (query_text, _to_traditional_search_text(query_text)):
+        text = re.sub(r"\s+", " ", str(raw or "").strip())
+        if text and text not in variants:
+            variants.append(text)
+    return variants
+
+
 def _normalize_video_search_text_for_match(value):
-    text = html.unescape(str(value or "")).strip().lower()
+    text = html.unescape(_to_traditional_search_text(value)).strip().lower()
     text = text.replace("：", ":").replace("冏", "囧")
     return re.sub(r"\s+", "", text)
 
@@ -5319,6 +5485,25 @@ def _extract_anime1_catalog_search_results(page_text, base_url, query_text):
 def _known_video_search_seed_results(query_text):
     normalized_query = _normalize_known_video_search_key(query_text)
     results = []
+    jav_code = _extract_jav_code(query_text)
+    if jav_code:
+        code_slug = jav_code.lower()
+        results.extend(
+            [
+                {
+                    "url": f"https://www.movieffm.net/chinese-subtitles/{code_slug}/",
+                    "title": f"{jav_code} MovieFFM 中文字幕",
+                    "snippet": "jav code pattern seed",
+                    "quality": 720,
+                },
+                {
+                    "url": f"https://hayav.com/video/chinese-subtitles/{code_slug}c/",
+                    "title": f"{jav_code} HayAV 中文字幕",
+                    "snippet": "jav code pattern seed",
+                    "quality": 720,
+                },
+            ]
+        )
     for key, seeds in VIDEO_SEARCH_KNOWN_RESULT_SEEDS.items():
         normalized_key = _normalize_known_video_search_key(key)
         if not normalized_key:
@@ -5331,6 +5516,255 @@ def _known_video_search_seed_results(query_text):
             if result.get("url"):
                 results.append(result)
     return results
+
+
+def _extract_njav_video_id(page_text):
+    text = str(page_text or "")
+    for pattern in (
+        r"Video\(\{id:\s*['\"]?(\d+)",
+        r"v-scope=[\"']Video\(\{id:\s*['\"]?(\d+)",
+        r"data-id=[\"'](\d+)[\"']",
+    ):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _clean_njav_title(title, fallback=""):
+    value = html.unescape(str(title or "")).strip()
+    value = re.sub(r"^\s*nJAV\.com\s*[:：-]\s*", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^\s*(?:觀看|Watch)\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+(?:高清免費在線觀看JAV|Watch Online,?\s*nJAV\.com).*$", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s+", " ", value).strip(" -|")
+    return value or str(fallback or "").strip() or "NJAV"
+
+
+def _extract_njav_slug(page_url):
+    normalized = _normalize_download_url(page_url)
+    path = urllib.parse.urlsplit(normalized).path if normalized else ""
+    slug = path.rstrip("/").split("/")[-1]
+    return urllib.parse.unquote(slug or "").strip()
+
+
+def _extract_njav_player_m3u8(player_text, player_url):
+    text = str(player_text or "")
+    patterns = (
+        r"PLAYER_CONFIG\s*=\s*\{.*?m3u8\s*:\s*['\"]([^'\"]+)['\"]",
+        r"\bm3u8\s*:\s*['\"]([^'\"]+)['\"]",
+        r"\bfile\s*:\s*['\"]([^'\"]+(?:\.m3u8|/play/token_hash)[^'\"]*)['\"]",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        candidate = html.unescape(match.group(1)).replace("\\/", "/").strip()
+        resolved = _normalize_download_url(urllib.parse.urljoin(player_url, candidate))
+        if resolved:
+            return resolved
+    return ""
+
+
+def _extract_njav_media_candidates(page_url, page_text="", session=None):
+    normalized_page = _normalize_download_url(page_url)
+    if not normalized_page:
+        return [], "", ""
+    parsed = urllib.parse.urlsplit(normalized_page)
+    site_root = f"{parsed.scheme or 'https'}://{parsed.netloc or 'www.njav.com'}"
+    c_req = session or get_curl_cffi_requests()
+    page_text = str(page_text or "")
+    if not page_text:
+        page_resp = c_req.get(
+            normalized_page,
+            impersonate="chrome120",
+            timeout=20,
+            headers=_make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
+        )
+        page_text = _response_text_utf8(page_resp)
+    fallback_title = (_extract_jav_code(normalized_page) or _extract_njav_slug(normalized_page) or "NJAV").upper()
+    title = _clean_njav_title(_extract_html_title(page_text, fallback_title), fallback=fallback_title)
+    video_id = _extract_njav_video_id(page_text)
+    if not video_id:
+        raise Exception("NJAV video id missing")
+    api_url = f"{site_root}/api/v/{video_id}/videos"
+    api_resp = c_req.get(
+        api_url,
+        impersonate="chrome120",
+        timeout=20,
+        headers={
+            **_make_ytdlp_http_headers(referer=normalized_page, origin=site_root),
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+        },
+    )
+    try:
+        api_payload = api_resp.json()
+    except Exception:
+        api_payload = json.loads(_response_text_utf8(api_resp) or "{}")
+    entries = api_payload.get("data") if isinstance(api_payload, dict) else []
+    if not isinstance(entries, list):
+        entries = []
+    candidates = []
+    player_pages = []
+    poster_match = re.search(r'data-poster=["\']([^"\']+)', page_text, re.IGNORECASE)
+    poster = html.unescape(poster_match.group(1)).strip() if poster_match else ""
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        vv_url = _normalize_download_url(urllib.parse.urljoin(site_root + "/", str(entry.get("url") or "")))
+        if not vv_url:
+            continue
+        vv_query_url = vv_url
+        if poster and "poster=" not in urllib.parse.urlsplit(vv_query_url).query:
+            separator = "&" if urllib.parse.urlsplit(vv_query_url).query else "?"
+            vv_query_url = vv_query_url + separator + urllib.parse.urlencode({"poster": poster})
+        vv_resp = c_req.get(
+            vv_query_url,
+            impersonate="chrome120",
+            timeout=20,
+            headers=_make_ytdlp_http_headers(referer=normalized_page, origin=site_root),
+        )
+        vv_text = _response_text_utf8(vv_resp)
+        iframe_match = re.search(r'videoFrame\.src\s*=\s*["\']([^"\']+)', vv_text, re.IGNORECASE)
+        player_url = _normalize_download_url(urllib.parse.urljoin(str(getattr(vv_resp, "url", vv_query_url)), iframe_match.group(1))) if iframe_match else ""
+        if not player_url:
+            continue
+        player_resp = c_req.get(
+            player_url,
+            impersonate="chrome120",
+            timeout=20,
+            headers=_make_ytdlp_http_headers(referer=vv_query_url, origin=site_root),
+        )
+        final_player_url = str(getattr(player_resp, "url", player_url) or player_url)
+        player_pages.append(final_player_url)
+        media_url = _extract_njav_player_m3u8(_response_text_utf8(player_resp), final_player_url)
+        if media_url:
+            candidates.append(media_url)
+    return _dedupe_download_urls(candidates), title, (player_pages[0] if player_pages else "")
+
+
+HAYAV_SECRET_KEY = "MySuperSecretKey2026"
+
+
+def _decode_hayav_secret(secret):
+    encrypted = str(secret or "").strip()
+    if not encrypted:
+        return ""
+    try:
+        payload = base64.b64decode(encrypted)
+    except Exception:
+        return ""
+    key = HAYAV_SECRET_KEY.encode("utf-8")
+    if not key:
+        return ""
+    decoded = bytes(byte ^ key[index % len(key)] for index, byte in enumerate(payload))
+    return decoded.decode("utf-8", "ignore")
+
+
+def _extract_hayav_embed_candidates(page_text, base_url=""):
+    text = str(page_text or "")
+    candidates = []
+    for secret in re.findall(r"""data-secret=["']([^"']+)["']""", text, re.IGNORECASE):
+        decoded = _decode_hayav_secret(html.unescape(secret))
+        for raw_url in re.findall(r"""(?:src|href)=["']([^"']+)["']""", decoded, re.IGNORECASE):
+            normalized = _normalize_download_url(urllib.parse.urljoin(base_url or "https://hayav.com/", html.unescape(raw_url).replace("\\/", "/").strip()))
+            if normalized:
+                candidates.append(normalized)
+    candidates.extend(_extract_candidate_media_urls(text, allowed_exts=(".m3u8", ".mp4", ".mpd")))
+    expanded = []
+    for candidate in _dedupe_download_urls(candidates):
+        expanded.append(candidate)
+        parsed = urllib.parse.urlsplit(candidate)
+        if "hglink.to" in parsed.netloc.lower() and "/e/" in parsed.path.lower():
+            expanded.append(urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path, parsed.query, "")))
+    return _dedupe_download_urls(expanded)
+
+
+def _extract_av01_video_id(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized)
+    match = re.search(r"/video/(\d+)(?:/|$)", parsed.path, re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _av01_title_from_api(video_data, fallback="AV01"):
+    data = video_data if isinstance(video_data, dict) else {}
+    code = str(data.get("dvd_id") or "").strip()
+    translations = data.get("title_translations") if isinstance(data.get("title_translations"), dict) else {}
+    title = (
+        str(translations.get("tw") or translations.get("hk") or translations.get("cn") or translations.get("en") or "").strip()
+        or str(data.get("title") or "").strip()
+        or str(fallback or "AV01").strip()
+    )
+    title = html.unescape(re.sub(r"\s+", " ", title)).strip()
+    if code and title and code.lower() not in title.lower():
+        return f"{code} {title}"
+    return title or code or str(fallback or "AV01").strip() or "AV01"
+
+
+def _av01_manifest_url(video_id, storage_base=""):
+    video_id = str(video_id or "").strip()
+    if not video_id:
+        return ""
+    manifest_url = f"https://www.av01.media/api/v1/videos/{video_id}/manifest/master.m3u8"
+    storage_base = str(storage_base or "").strip()
+    if storage_base:
+        try:
+            heartbeat = hashlib.sha256(storage_base.encode("utf-8")).hexdigest()[:16]
+        except Exception:
+            heartbeat = ""
+        if heartbeat:
+            manifest_url += "?" + urllib.parse.urlencode({"hb": heartbeat})
+    return manifest_url
+
+
+def _av01_manifest_has_real_media(manifest_url, referer="https://www.av01.media/"):
+    normalized_manifest = _normalize_download_url(manifest_url)
+    if not normalized_manifest:
+        return False
+    try:
+        c_req = get_curl_cffi_requests()
+        headers = _make_hls_http_headers(referer=referer, origin="https://www.av01.media")
+        manifest_resp = c_req.get(
+            normalized_manifest,
+            impersonate="chrome120",
+            timeout=20,
+            headers=headers,
+        )
+        manifest_text = _response_text_utf8(manifest_resp)
+        media_playlist_url = normalized_manifest
+        for line in manifest_text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                media_playlist_url = _normalize_download_url(urllib.parse.urljoin(normalized_manifest, line))
+                break
+        media_resp = c_req.get(
+            media_playlist_url,
+            impersonate="chrome120",
+            timeout=20,
+            headers=headers,
+        )
+        media_text = _response_text_utf8(media_resp)
+        segment_url = ""
+        for line in media_text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                segment_url = _normalize_download_url(urllib.parse.urljoin(media_playlist_url, line))
+                break
+        if not segment_url:
+            return False
+        segment_resp = c_req.get(
+            segment_url,
+            impersonate="chrome120",
+            timeout=20,
+            headers=headers,
+        )
+        segment_bytes = bytes(getattr(segment_resp, "content", b"") or b"")
+        return int(getattr(segment_resp, "status_code", 0) or 0) < 400 and len(segment_bytes) >= 4096
+    except Exception:
+        return False
 
 
 def _video_search_quality_score(value):
@@ -5471,7 +5905,9 @@ def _video_search_result_is_downloadable(result):
         "anime1.pw",
         "avjoy.me",
         "hohoj.tv",
+        "hayav.com",
         "movieffm.net",
+        "njav.com",
         "nnyy.in",
         "tktube.com",
         "yfsp.tv",
@@ -5869,6 +6305,15 @@ def _make_hls_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_AG
     return headers
 
 
+def _make_njav_hls_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_AGENT):
+    headers = _make_hls_http_headers(referer=referer, origin=origin, user_agent=user_agent)
+    headers["Accept"] = "application/vnd.apple.mpegurl, application/x-mpegURL, */*"
+    headers["Sec-Fetch-Dest"] = "empty"
+    headers["Sec-Fetch-Mode"] = "cors"
+    headers["Sec-Fetch-Site"] = "same-origin"
+    return headers
+
+
 def _parse_hls_attribute_line(line):
     attrs = {}
     payload = str(line or "").split(":", 1)[1] if ":" in str(line or "") else str(line or "")
@@ -6247,6 +6692,15 @@ def _should_prefer_native_hls(url, task=None):
     if any(marker in host for marker in site_markers):
         return True
     if any(marker in host for marker in NATIVE_HLS_GLOBAL_HOST_MARKERS):
+        return True
+    return False
+
+
+def _should_force_native_hls_before_parallel(url, task=None):
+    parsed = urllib.parse.urlparse(str(url or ""))
+    host = str(parsed.netloc or "").strip().lower()
+    source_site = _task_source_site_name(task)
+    if source_site == "movieffm" and "huyall.com" in host:
         return True
     return False
 
@@ -8241,6 +8695,22 @@ class DownloadManagerApp:
                 write_error_log("njavtv parse failure", exc, url=new_url)
                 self._final_add_download(new_url, is_mp3=is_mp3)
 
+        def fetch_njav_single():
+            try:
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome120",
+                    timeout=20,
+                    headers=_make_ytdlp_http_headers(referer="https://www.njav.com/", origin="https://www.njav.com"),
+                )
+                fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "NJAV"
+                page_title = _clean_njav_title(_extract_html_title(_response_text_utf8(resp), fallback_title), fallback=fallback_title)
+                self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="njav")
+            except Exception as exc:
+                write_error_log("njav parse failure", exc, url=new_url)
+                self._final_add_download(new_url, is_mp3=is_mp3, source_site="njav")
+
         def fetch_18av_single():
             try:
                 c_req = get_curl_cffi_requests()
@@ -8383,6 +8853,9 @@ class DownloadManagerApp:
             return
         if "99itv.net" in lowered and re.search(r"/vodplay/\d+-\d+-\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
             self._start_background_parse(fetch_99itv_single)
+            return
+        if "njav.com" in lowered and "/xvideos/" in lowered:
+            self._start_background_parse(fetch_njav_single)
             return
         if "njavtv.com" in lowered:
             self._start_background_parse(fetch_njavtv_single)
@@ -9304,6 +9777,10 @@ class DownloadManagerApp:
             "javfilms.com": "javfilms",
             "18jav.tv": "18jav",
             "hohoj.tv": "hohoj",
+            "hayav.com": "hayav",
+            "njav.com": "njav",
+            "av01.media": "av01",
+            "avhd101.com": "avhd101",
         }.get(site, "missav" if site == "missav" else site.replace(".com", "").replace(".tv", ""))
 
     def _enrich_video_search_result(self, result, query_text):
@@ -9447,6 +9924,20 @@ class DownloadManagerApp:
                         result["title"] = f"{query_text} 全集"
             if not candidates and "tktube.com" in search_host:
                 candidates = _extract_tktube_media_candidates(page_text)
+            if not candidates and "hayav.com" in search_host:
+                candidates = _extract_hayav_embed_candidates(page_text, base_url=url)
+            if not candidates and "njav.com" in search_host and "/xvideos/" in parsed_search_url.path.lower():
+                candidates, njav_title, player_page = _extract_njav_media_candidates(url, page_text=page_text, session=c_req)
+                if njav_title:
+                    result["title"] = njav_title
+                if player_page:
+                    result["source_page"] = url
+                    result["resolver_page"] = player_page
+                if candidates:
+                    result["quality"] = max(_video_search_quality_score(candidate) for candidate in candidates) or 720
+                    # Tokenized upload18 manifests require a fresh resolver-page referer,
+                    # so search results keep the original NJAV page and re-resolve at download time.
+                    candidates = []
             if not candidates and "hohoj.tv" in search_host:
                 parsed_hohoj = parsed_search_url
                 site_root = f"{parsed_hohoj.scheme or 'https'}://{parsed_hohoj.netloc or 'hohoj.tv'}"
@@ -9518,7 +10009,9 @@ class DownloadManagerApp:
         c_req = get_curl_cffi_requests()
         search_text = str(query_text or "").strip()
         jav_code = _extract_jav_code(search_text)
-        primary_query = jav_code or search_text
+        search_variants = _video_search_query_variants(search_text)
+        primary_queries = [jav_code] if jav_code else (search_variants or [search_text])
+        primary_query = primary_queries[0]
 
         def append_unique_results(target, new_results):
             seen_urls = {_normalize_download_url(result.get("url", "")) for result in target}
@@ -9553,110 +10046,155 @@ class DownloadManagerApp:
             return _extract_duckduckgo_result_urls(_response_text_utf8(resp))
 
         def fetch_tktube_results():
-            tktube_url = "https://tktube.com/zh/search/" + urllib.parse.quote(search_text) + "/"
-            resp = c_req.get(
-                tktube_url,
-                impersonate="chrome120",
-                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                headers=_make_ytdlp_http_headers(referer="https://tktube.com/"),
-            )
-            return [
-                {"url": normalized_candidate, "title": "", "snippet": "tktube site search"}
-                for normalized_candidate in (
-                    _normalize_download_url(candidate)
-                    for candidate in _extract_tktube_video_page_urls(_response_text_utf8(resp), base_url=tktube_url)
+            collected = []
+            for variant in search_variants:
+                tktube_url = "https://tktube.com/zh/search/" + urllib.parse.quote(variant) + "/"
+                resp = c_req.get(
+                    tktube_url,
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=_make_ytdlp_http_headers(referer="https://tktube.com/"),
                 )
-                if normalized_candidate
-            ]
+                append_unique_results(
+                    collected,
+                    [
+                        {"url": normalized_candidate, "title": "", "snippet": "tktube site search"}
+                        for normalized_candidate in (
+                            _normalize_download_url(candidate)
+                            for candidate in _extract_tktube_video_page_urls(_response_text_utf8(resp), base_url=tktube_url)
+                        )
+                        if normalized_candidate
+                    ],
+                )
+            return collected
 
         def fetch_avjoy_results():
-            avjoy_headers = _make_ytdlp_http_headers(referer="https://avjoy.me/")
-            avjoy_headers["Content-Type"] = "application/x-www-form-urlencoded"
-            resp = c_req.post(
-                "https://avjoy.me/search/videos",
-                data={"search_query": search_text},
-                impersonate="chrome120",
-                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                headers=avjoy_headers,
-            )
-            return _extract_avjoy_video_results(
-                _response_text_utf8(resp),
-                base_url=str(getattr(resp, "url", "https://avjoy.me/search/videos")),
-            )
+            collected = []
+            for variant in search_variants:
+                avjoy_headers = _make_ytdlp_http_headers(referer="https://avjoy.me/")
+                avjoy_headers["Content-Type"] = "application/x-www-form-urlencoded"
+                resp = c_req.post(
+                    "https://avjoy.me/search/videos",
+                    data={"search_query": variant},
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=avjoy_headers,
+                )
+                append_unique_results(
+                    collected,
+                    _extract_avjoy_video_results(
+                        _response_text_utf8(resp),
+                        base_url=str(getattr(resp, "url", "https://avjoy.me/search/videos")),
+                    ),
+                )
+            return collected
 
         def fetch_hohoj_results():
-            hohoj_url = "https://hohoj.tv/search?" + urllib.parse.urlencode({"text": search_text})
-            resp = c_req.get(
-                hohoj_url,
-                impersonate="chrome120",
-                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                headers=_make_ytdlp_http_headers(referer="https://hohoj.tv/"),
-            )
-            return _extract_hohoj_video_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", hohoj_url)))
+            collected = []
+            for variant in search_variants:
+                hohoj_url = "https://hohoj.tv/search?" + urllib.parse.urlencode({"text": variant})
+                resp = c_req.get(
+                    hohoj_url,
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=_make_ytdlp_http_headers(referer="https://hohoj.tv/"),
+                )
+                append_unique_results(collected, _extract_hohoj_video_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", hohoj_url))))
+            return collected
+
+        def fetch_hayav_results():
+            collected = []
+            if jav_code:
+                collected.append(
+                    {
+                        "url": f"https://hayav.com/video/chinese-subtitles/{jav_code.lower()}c/",
+                        "title": f"{jav_code} HayAV 中文字幕",
+                        "snippet": "hayav jav code pattern",
+                        "quality": 720,
+                    }
+                )
+            for primary in primary_queries:
+                for query in (f'"{primary}" "hayav.com/video/chinese-subtitles"', f'"{primary}" site:hayav.com/video/chinese-subtitles'):
+                    try:
+                        append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                    except Exception:
+                        pass
+            return collected
 
         def fetch_movieffm_results():
-            movieffm_url = "https://www.movieffm.net/xssearch?" + urllib.parse.urlencode({"q": search_text})
-            resp = c_req.get(
-                movieffm_url,
-                impersonate="chrome120",
-                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                headers=_make_ytdlp_http_headers(referer="https://www.movieffm.net/"),
-            )
-            return _extract_movieffm_search_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", movieffm_url)))
+            collected = []
+            for variant in search_variants:
+                movieffm_url = "https://www.movieffm.net/xssearch?" + urllib.parse.urlencode({"q": variant})
+                resp = c_req.get(
+                    movieffm_url,
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=_make_ytdlp_http_headers(referer="https://www.movieffm.net/"),
+                )
+                append_unique_results(collected, _extract_movieffm_search_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", movieffm_url))))
+            return collected
 
         def fetch_xiaoyakankan_results(root_url):
-            xiaoya_url = root_url + "/vod/search/-------------.html?" + urllib.parse.urlencode({"wd": search_text})
-            resp = c_req.get(
-                xiaoya_url,
-                impersonate="chrome120",
-                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                headers=_make_ytdlp_http_headers(referer=root_url + "/"),
-            )
-            return _extract_xiaoyakankan_detail_results(_response_text_utf8(resp), base_url=xiaoya_url)
+            collected = []
+            for variant in search_variants:
+                xiaoya_url = root_url + "/vod/search/-------------.html?" + urllib.parse.urlencode({"wd": variant})
+                resp = c_req.get(
+                    xiaoya_url,
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=_make_ytdlp_http_headers(referer=root_url + "/"),
+                )
+                append_unique_results(collected, _extract_xiaoyakankan_detail_results(_response_text_utf8(resp), base_url=xiaoya_url))
+            return collected
 
         def fetch_iq_results():
-            iq_url = "https://www.iq.com/search?" + urllib.parse.urlencode({"query": search_text, "lang": "zh_tw"})
-            resp = c_req.get(
-                iq_url,
-                impersonate="chrome120",
-                timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                headers=_make_ytdlp_http_headers(referer="https://www.iq.com/"),
-            )
-            return _extract_iq_search_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", iq_url)))
+            collected = []
+            for variant in search_variants:
+                iq_url = "https://www.iq.com/search?" + urllib.parse.urlencode({"query": variant, "lang": "zh_tw"})
+                resp = c_req.get(
+                    iq_url,
+                    impersonate="chrome120",
+                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                    headers=_make_ytdlp_http_headers(referer="https://www.iq.com/"),
+                )
+                append_unique_results(collected, _extract_iq_search_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", iq_url))))
+            return collected
 
         def fetch_nnyy_results():
-            query = f"{primary_query} site:nnyy.in/dianying"
             collected = []
-            try:
-                append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
-            except Exception:
-                pass
-            try:
-                append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
-            except Exception:
-                pass
+            for primary in primary_queries:
+                query = f"{primary} site:nnyy.in/dianying"
+                try:
+                    append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                except Exception:
+                    pass
+                try:
+                    append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                except Exception:
+                    pass
             return collected
 
         def fetch_anime1_results():
             collected = []
-            try:
-                anime1_search_url = "https://anime1.me/?" + urllib.parse.urlencode({"s": search_text})
-                resp = c_req.get(
-                    anime1_search_url,
-                    impersonate="chrome120",
-                    timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                    headers=_make_ytdlp_http_headers(referer="https://anime1.me/"),
-                )
-                append_unique_results(
-                    collected,
-                    _extract_anime1_catalog_search_results(
-                        _response_text_utf8(resp),
-                        str(getattr(resp, "url", anime1_search_url)),
-                        search_text,
-                    ),
-                )
-            except Exception:
-                pass
+            for variant in search_variants:
+                try:
+                    anime1_search_url = "https://anime1.me/?" + urllib.parse.urlencode({"s": variant})
+                    resp = c_req.get(
+                        anime1_search_url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer="https://anime1.me/"),
+                    )
+                    append_unique_results(
+                        collected,
+                        _extract_anime1_catalog_search_results(
+                            _response_text_utf8(resp),
+                            str(getattr(resp, "url", anime1_search_url)),
+                            variant,
+                        ),
+                    )
+                except Exception:
+                    pass
             for catalog_url in ANIME1_CATALOG_SEARCH_URLS:
                 try:
                     resp = c_req.get(
@@ -9670,7 +10208,7 @@ class DownloadManagerApp:
                         _extract_anime1_catalog_search_results(
                             _response_text_utf8(resp),
                             str(getattr(resp, "url", catalog_url)),
-                            search_text,
+                            search_variants[-1] if search_variants else search_text,
                         ),
                     )
                 except Exception:
@@ -9678,22 +10216,8 @@ class DownloadManagerApp:
             if collected:
                 return collected
             for domain in ("anime1.me", "anime1.pw"):
-                query = f"{primary_query} site:{domain}/category"
-                try:
-                    append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
-                except Exception:
-                    pass
-                try:
-                    append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
-                except Exception:
-                    pass
-            return collected
-
-        def fetch_gimy_results():
-            collected = []
-            for domain in ("gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube"):
-                for path_marker in ("/detail", "/title", "/watch"):
-                    query = f"{primary_query} site:{domain}{path_marker}"
+                for primary in primary_queries:
+                    query = f"{primary} site:{domain}/category"
                     try:
                         append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
                     except Exception:
@@ -9702,6 +10226,22 @@ class DownloadManagerApp:
                         append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
                     except Exception:
                         pass
+            return collected
+
+        def fetch_gimy_results():
+            collected = []
+            for domain in ("gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube"):
+                for path_marker in ("/detail", "/title", "/watch"):
+                    for primary in primary_queries:
+                        query = f"{primary} site:{domain}{path_marker}"
+                        try:
+                            append_unique_results(collected, fetch_google_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                        except Exception:
+                            pass
+                        try:
+                            append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                        except Exception:
+                            pass
             return collected
 
         def collect_parallel(search_jobs, timeout_seconds):
@@ -9723,31 +10263,42 @@ class DownloadManagerApp:
             return collected
 
         site_query = " OR ".join(f"site:{site}" for site in VIDEO_SEARCH_SUPPORTED_SITE_MARKERS)
+        google_jobs = [
+            (f"google:{primary}", lambda q=primary: fetch_google_results(f"{q} ({site_query})"))
+            for primary in primary_queries
+        ]
         source_jobs = [
             ("known", lambda: _known_video_search_seed_results(search_text)),
             ("tktube", fetch_tktube_results),
             ("anime1", fetch_anime1_results),
             ("avjoy", fetch_avjoy_results),
             ("hohoj", fetch_hohoj_results),
+            ("hayav", fetch_hayav_results),
             ("movieffm", fetch_movieffm_results),
             ("nnyy", fetch_nnyy_results),
             ("iq", fetch_iq_results),
             ("gimy", fetch_gimy_results),
             ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
             ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
-            ("google", lambda: fetch_google_results(f"{primary_query} ({site_query})")),
-        ]
+        ] + google_jobs
         results = collect_parallel(
             source_jobs,
             timeout_seconds=max(VIDEO_SEARCH_SITE_TIMEOUT_SECONDS, VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS) + 2,
         )
         if jav_code:
             exact_queries = [
-                f'"{primary_query}" "avjoy.me/video"',
-                f'"{primary_query}" site:avjoy.me/video',
-                f'"{primary_query}" "avbebe.com/archives"',
-                f'"{primary_query}" "tktube.com"',
-                f'"{primary_query}" "missav"',
+                query
+                for primary in primary_queries
+                for query in (
+                    f'"{primary}" "avjoy.me/video"',
+                    f'"{primary}" site:avjoy.me/video',
+                    f'"{primary}" "avbebe.com/archives"',
+                    f'"{primary}" "tktube.com"',
+                    f'"{primary}" "njav.com/xvideos"',
+                    f'"{primary}" "movieffm.net/chinese-subtitles"',
+                    f'"{primary}" "hayav.com/video/chinese-subtitles"',
+                    f'"{primary}" "missav"',
+                )
             ]
             if len(results) < VIDEO_SEARCH_MAX_RESULTS or not any(_video_search_matches_query(result, search_text) for result in results):
                 exact_jobs = []
@@ -9760,7 +10311,10 @@ class DownloadManagerApp:
                 )
         if not results:
             results = collect_parallel(
-                [("duckduckgo", lambda: fetch_duckduckgo_results(f"{primary_query} ({site_query})"))],
+                [
+                    (f"duckduckgo:{primary}", lambda q=primary: fetch_duckduckgo_results(f"{q} ({site_query})"))
+                    for primary in primary_queries
+                ],
                 timeout_seconds=VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS + 2,
             )
         exact_source_results = [result for result in results if _video_search_matches_query(result, search_text)]
@@ -14323,9 +14877,14 @@ class DownloadManagerApp:
             dominant_host = max(segment_hosts, key=lambda host: sum(1 for segment in (segments or []) if urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower() == host))
         host_peer_count = self._active_hls_downloads_for_host(dominant_host)
         host_budget = self._hls_host_worker_budget(dominant_host)
+        boost_segment_threshold = int(PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS)
+        for marker, marker_threshold in PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS_BY_HOST.items():
+            if marker in dominant_host:
+                boost_segment_threshold = int(marker_threshold)
+                break
         if (
             host_peer_count <= 1
-            and len(segments or []) >= int(PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS)
+            and len(segments or []) >= boost_segment_threshold
             and any(marker in dominant_host for marker in PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS)
         ):
             workers = max(
@@ -15107,6 +15666,7 @@ class DownloadManagerApp:
             "hohoj",
             "jable",
             "missav",
+            "njav",
             "njavtv",
             "nnyy",
             "xiaoyakankan",
@@ -15787,15 +16347,16 @@ class DownloadManagerApp:
                     return detail_rebuild
             return None
 
+        force_native_before_parallel = _should_force_native_hls_before_parallel(url, probe_task)
         if (
             _should_prefer_native_hls(url, probe_task)
-            and not self._should_try_parallel_hls_segments(url, probe_task)
+            and (force_native_before_parallel or not self._should_try_parallel_hls_segments(url, probe_task))
             and source_site != "missav"
             and not _native_fallback_done
         ):
             write_error_log(
-                "preferred native hls route selected",
-                Exception("preferred native hls route selected"),
+                "forced native hls route selected" if force_native_before_parallel else "preferred native hls route selected",
+                Exception("forced native hls route selected" if force_native_before_parallel else "preferred native hls route selected"),
                 url=url,
                 item_id=item_id,
                 source_site=_task_source_site_name(task) or None,
@@ -15844,7 +16405,10 @@ class DownloadManagerApp:
         duration_box = {}
         media_bps_box = {}
         total_bytes_box = {}
-        manifest_headers = _make_hls_http_headers(referer=referer, origin=origin)
+        if source_site == "njav" or "upload18.org" in _normalize_download_url(url).lower():
+            manifest_headers = _make_njav_hls_http_headers(referer=referer, origin=origin)
+        else:
+            manifest_headers = _make_hls_http_headers(referer=referer, origin=origin)
 
         def probe_metadata():
             for candidate in candidate_urls:
@@ -15889,8 +16453,10 @@ class DownloadManagerApp:
             for candidate in candidate_urls
         )
         parallel_exhausted_ggjav_candidates = False
+        parallel_unsupported_segment_url = ""
+        parallel_unsupported_segment_error = None
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("18av", "gimy", "jable", "missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("18av", "gimy", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -15906,7 +16472,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("18av", "gimy", "jable", "missav", "movieffm", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("18av", "gimy", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -15928,9 +16494,21 @@ class DownloadManagerApp:
                     KeyboardInterrupt,
                     ResumeLowSpeedReanalysisException,
                     ParallelHlsRetryLaterException,
-                    ParallelHlsUnsupportedSegmentContentException,
                 ):
                     raise
+                except ParallelHlsUnsupportedSegmentContentException as exc:
+                    parallel_finished = False
+                    parallel_unsupported_segment_url = _normalize_download_url(parallel_url)
+                    parallel_unsupported_segment_error = exc
+                    write_error_log(
+                        "parallel hls unsupported segment handoff to native",
+                        exc,
+                        url=parallel_url,
+                        item_id=item_id,
+                        source_site=_task_source_site_name(task) or None,
+                        remaining_parallel_candidates=max(len(parallel_candidate_urls) - parallel_index - 1, 0),
+                    )
+                    break
                 except Exception as exc:
                     parallel_finished = False
                     if source_site in ggjav_hls_source_sites:
@@ -16063,6 +16641,51 @@ class DownloadManagerApp:
                         jav_code=jav_code,
                     )
             raise DownloadSourceUnavailableException("all known video sources are unavailable")
+
+        if (
+            parallel_unsupported_segment_url
+            and not _native_fallback_done
+            and (
+                _should_prefer_native_hls(parallel_unsupported_segment_url, probe_task)
+                or _should_force_native_hls_before_parallel(parallel_unsupported_segment_url, probe_task)
+            )
+        ):
+            write_error_log(
+                "parallel hls unsupported segment native handoff started",
+                parallel_unsupported_segment_error or Exception("parallel HLS unsupported segment content"),
+                url=parallel_unsupported_segment_url,
+                item_id=item_id,
+                source_site=source_site,
+                referer=referer,
+                origin=origin,
+            )
+            try:
+                return self._download_m3u8_with_ytdlp_native(
+                    item_id,
+                    parallel_unsupported_segment_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                    referer=referer,
+                    origin=origin,
+                )
+            except ResumeLowSpeedReanalysisException:
+                raise
+            except Exception as native_exc:
+                write_error_log(
+                    "parallel hls unsupported segment native handoff failed; fallback to ffmpeg",
+                    native_exc,
+                    url=parallel_unsupported_segment_url,
+                    item_id=item_id,
+                    source_site=source_site,
+                )
+                self._cleanup_failed_native_hls_output(
+                    task,
+                    item_id,
+                    parallel_unsupported_segment_url,
+                    save_dir,
+                    is_mp3=is_mp3,
+                )
+                _native_fallback_done = True
 
         ffmpeg_candidate_urls = list(candidate_urls)
         if source_site in ggjav_hls_source_sites and parallel_setup_errors:
@@ -18930,6 +19553,151 @@ class DownloadManagerApp:
                 Exception("列表頁不是可直接下載的影片頁，請使用搜尋或整季展開後再下載"),
             )
             return
+        if "av01.media" in parsed_url.netloc.lower() and "/video/" in parsed_url.path.lower():
+            self._set_task_parse_ui(item_id, message="正在解析 AV01 影片來源...")
+            c_req = get_curl_cffi_requests()
+            video_id = _extract_av01_video_id(url)
+            if not video_id:
+                raise Exception("Failed to locate AV01 video id")
+            api_url = f"https://www.av01.media/api/v1/videos/{video_id}"
+            api_resp = c_req.get(
+                api_url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=_make_ytdlp_http_headers(referer=url, origin="https://www.av01.media"),
+            )
+            video_data = api_resp.json()
+            page_title = _av01_title_from_api(video_data, fallback=short_name or "AV01")
+            manifest_url = _av01_manifest_url(video_id, video_data.get("storage_base", ""))
+            if not manifest_url:
+                raise Exception("Failed to build AV01 manifest URL")
+            if _av01_manifest_has_real_media(manifest_url, referer=url):
+                _dispatch_manifest_download(
+                    manifest_url,
+                    name=page_title,
+                    source_site="av01",
+                    source_page=url,
+                    fallback_urls=[],
+                    referer=url,
+                    origin="https://www.av01.media",
+                    default_route="generic",
+                )
+                return
+            jav_code = _extract_jav_code(page_title) or _extract_jav_code(url)
+            if jav_code:
+                search_results = [
+                    result for result in self._google_video_search_results(jav_code)
+                    if _normalize_download_url(result.get("url", ""))
+                    and "av01.media" not in urllib.parse.urlsplit(_normalize_download_url(result.get("url", ""))).netloc.lower()
+                ]
+                plan = self._build_video_search_download_plan(search_results, 0, jav_code, is_mp3=is_mp3)
+                target_url = _normalize_download_url((plan or {}).get("target_url", ""))
+                if target_url:
+                    source_page = (plan or {}).get("source_page") or target_url
+                    source_site = (plan or {}).get("source_site") or self._source_site_from_search_url(source_page or target_url)
+                    extra_task_data = (plan or {}).get("extra_task_data") or {}
+                    fallback_urls = _dedupe_download_urls(extra_task_data.get("fallback_urls", []), primary_url=target_url)
+                    self._retarget_download_task(
+                        task,
+                        item_id,
+                        old_url=_normalize_download_url(_task_field_value(task, "url", "")) or url,
+                        target_url=target_url,
+                        name=(plan or {}).get("custom_name") or page_title or jav_code,
+                        source_site=source_site,
+                        source_page=source_page,
+                        fallback_urls=fallback_urls,
+                    )
+                    write_error_log(
+                        "av01 placeholder stream fallback",
+                        Exception("AV01 manifest returned placeholder media segments; retrying same-code downloadable source"),
+                        url=url,
+                        item_id=item_id,
+                        source_site="av01",
+                        jav_code=jav_code,
+                        next_url=target_url,
+                        next_source_page=source_page,
+                    )
+                    self._set_task_parse_ui(item_id, message="AV01 串流暫時不可下載，改用同番號可下載來源...")
+                    return self._download_task_internal(
+                        target_url,
+                        item_id,
+                        save_dir,
+                        self._should_use_impersonation(target_url, source_site),
+                        is_mp3,
+                    )
+            write_error_log(
+                "av01 placeholder stream unavailable",
+                Exception("AV01 manifest returned placeholder media segments and no alternate source was found"),
+                url=url,
+                item_id=item_id,
+                source_site="av01",
+                manifest_url=manifest_url,
+            )
+            raise DownloadSourceUnavailableException("AV01 stream is currently unavailable")
+        if "hayav.com" in parsed_url.netloc.lower() and "/video/" in parsed_url.path.lower():
+            self._set_task_parse_ui(item_id, message="正在解析 HayAV 影片來源...")
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
+                headers=_make_ytdlp_http_headers(referer="https://hayav.com/"),
+            )
+            page_text = _response_text_utf8(resp)
+            page_title = _extract_html_title(page_text, short_name or "HayAV")
+            if not _video_search_matches_query({"title": page_title, "url": url}, short_name):
+                page_title = short_name or page_title
+            hayav_candidates = _extract_hayav_embed_candidates(page_text, base_url=url)
+            embed_url = ""
+            for candidate in hayav_candidates:
+                candidate_parts = urllib.parse.urlsplit(candidate)
+                candidate_host = candidate_parts.netloc.lower()
+                if ("masukestin.com" in candidate_host or "hgcloud.to" in candidate_host or "hglink.to" in candidate_host) and "/e/" in candidate_parts.path:
+                    embed_url = _avbebe_hgcloud_embed_url(candidate) or candidate
+                    break
+            if embed_url:
+                embed_parts = urllib.parse.urlsplit(embed_url)
+                embed_origin = f"{embed_parts.scheme or 'https'}://{embed_parts.netloc}"
+                embed_resp = c_req.get(
+                    embed_url,
+                    impersonate="chrome120",
+                    timeout=20,
+                    headers=_make_ytdlp_http_headers(referer=url, origin=embed_origin),
+                )
+                stream_candidates = _extract_avbebe_hgcloud_stream_candidates(_response_text_utf8(embed_resp), embed_url)
+                valid_stream_candidates = []
+                for candidate in stream_candidates:
+                    if _avbebe_manifest_looks_downloadable(candidate, referer=embed_url, origin=embed_origin):
+                        valid_stream_candidates.append(candidate)
+                if valid_stream_candidates:
+                    stream_url = valid_stream_candidates[0]
+                    _dispatch_manifest_download(
+                        stream_url,
+                        name=page_title,
+                        source_site="hayav",
+                        source_page=url,
+                        fallback_urls=_dedupe_download_urls(valid_stream_candidates[1:], primary_url=stream_url),
+                        referer=embed_url,
+                        origin=embed_origin,
+                        default_route="ffmpeg",
+                        force_ffmpeg=True,
+                    )
+                    return
+            if _dispatch_extracted_media_candidates(
+                hayav_candidates,
+                page_title,
+                "hayav",
+                source_page=url,
+                referer=url,
+                origin=site_root,
+                manifest_default_route="generic",
+                missing_message="HayAV media URL missing",
+            ):
+                return
+        if "xox-web.com" in parsed_url.netloc.lower() and "/vodplay/" in parsed_url.path.lower():
+            self._set_task_status_text(item_id, "XOX 無法取得完整影片，已取消支援")
+            raise Exception("XOX support disabled because the site does not expose reliable full media URLs")
         if "ggjav.com" in parsed_url.netloc.lower() and parsed_url.path.rstrip("/").lower() == "/main/embed":
             embed_candidates = _expand_known_embed_fallback_candidates([url])
             if embed_candidates:
@@ -19255,6 +20023,37 @@ class DownloadManagerApp:
                 referer="https://jable.tv/",
                 origin="https://jable.tv",
                 default_route="ffmpeg",
+            )
+            return
+
+        if "njav.com" in parsed_url.netloc.lower() and "/xvideos/" in parsed_url.path.lower():
+            self._set_task_parse_ui(item_id, message="正在解析 NJAV 影片來源...")
+            c_req = get_curl_cffi_requests()
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=_make_ytdlp_http_headers(referer="https://www.njav.com/", origin="https://www.njav.com"),
+            )
+            page_text = _response_text_utf8(resp)
+            candidate_urls, title, player_page = _extract_njav_media_candidates(url, page_text=page_text, session=c_req)
+            if not candidate_urls:
+                raise Exception("Failed to locate NJAV full media playlist")
+            player_origin = ""
+            if player_page:
+                parsed_player = urllib.parse.urlsplit(player_page)
+                if parsed_player.scheme and parsed_player.netloc:
+                    player_origin = f"{parsed_player.scheme}://{parsed_player.netloc}"
+            _dispatch_manifest_download(
+                candidate_urls[0],
+                name=title,
+                source_site="njav",
+                source_page=url,
+                fallback_urls=candidate_urls[1:],
+                referer=player_page or url,
+                origin=player_origin or "https://upload18.org",
+                default_route="ffmpeg",
+                force_ffmpeg=True,
             )
             return
 
