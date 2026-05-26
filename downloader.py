@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3236"
+APP_BUILD = "20260526-3237"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -5309,6 +5309,13 @@ SLOW_EXTERNAL_FALLBACK_HOST_MARKERS_BY_SITE = {
         "mm984",
         "mmsi",
         "mmvh",
+    ),
+    "hayav": (
+        "watchsb.",
+        "watchsb.com",
+        "streamsb.",
+        "sbembed.",
+        "sbfull.",
     ),
 }
 
@@ -19803,13 +19810,20 @@ class DownloadManagerApp:
                         next_source_page=source_page,
                     )
                     self._set_task_parse_ui(item_id, message="AV01 串流暫時不可下載，改用同番號可下載來源...")
-                    return self._download_task_internal(
-                        target_url,
-                        item_id,
-                        save_dir,
-                        self._should_use_impersonation(target_url, source_site),
-                        is_mp3,
-                    )
+                    try:
+                        return self._download_task_internal(
+                            target_url,
+                            item_id,
+                            save_dir,
+                            self._should_use_impersonation(target_url, source_site),
+                            is_mp3,
+                        )
+                    except (StopDownloadException, KeyboardInterrupt):
+                        raise
+                    except Exception as fallback_exc:
+                        if _retry_next_page_fallback("AV01 alternate source failed; retrying next search result", fallback_exc):
+                            return
+                        raise
             write_error_log(
                 "av01 placeholder stream unavailable",
                 Exception("AV01 manifest returned placeholder media segments and no alternate source was found"),
@@ -19976,17 +19990,70 @@ class DownloadManagerApp:
                         force_ffmpeg=True,
                     )
                     return
-            if _dispatch_extracted_media_candidates(
-                hayav_candidates,
-                page_title,
-                "hayav",
-                source_page=url,
-                referer=url,
-                origin=site_root,
-                manifest_default_route="generic",
-                missing_message="HayAV media URL missing",
-            ):
-                return
+            try:
+                if _dispatch_extracted_media_candidates(
+                    hayav_candidates,
+                    page_title,
+                    "hayav",
+                    source_page=url,
+                    referer=url,
+                    origin=site_root,
+                    manifest_default_route="generic",
+                    missing_message="HayAV media URL missing",
+                ):
+                    return
+            except Exception as hayav_direct_exc:
+                query_text = page_title if _looks_like_video_search_text(page_title) else (short_name or "")
+                if not _looks_like_video_search_text(query_text):
+                    raise
+                search_results = [
+                    result for result in self._google_video_search_results(query_text)
+                    if _normalize_download_url(result.get("url", ""))
+                    and "hayav.com" not in urllib.parse.urlsplit(_normalize_download_url(result.get("url", ""))).netloc.lower()
+                ]
+                plan = self._build_video_search_download_plan(search_results, 0, query_text, is_mp3=is_mp3)
+                target_url = _normalize_download_url((plan or {}).get("target_url", ""))
+                if not target_url:
+                    raise
+                source_page = (plan or {}).get("source_page") or target_url
+                source_site = (plan or {}).get("source_site") or self._source_site_from_search_url(source_page or target_url)
+                extra_task_data = (plan or {}).get("extra_task_data") or {}
+                fallback_urls = _dedupe_download_urls(extra_task_data.get("fallback_urls", []), primary_url=target_url)
+                self._retarget_download_task(
+                    task,
+                    item_id,
+                    old_url=_normalize_download_url(_task_field_value(task, "url", "")) or url,
+                    target_url=target_url,
+                    name=(plan or {}).get("custom_name") or page_title,
+                    source_site=source_site,
+                    source_page=source_page,
+                    fallback_urls=fallback_urls,
+                )
+                write_error_log(
+                    "hayav stream fallback",
+                    Exception("HayAV direct embed unavailable; retrying downloadable search source"),
+                    url=url,
+                    item_id=item_id,
+                    title=query_text,
+                    next_url=target_url,
+                    next_source_page=source_page,
+                    original_error=str(hayav_direct_exc)[:240],
+                )
+                self._set_task_parse_ui(item_id, message="HayAV 串流無法直接取得，改用可下載來源...")
+                try:
+                    return self._download_task_internal(
+                        target_url,
+                        item_id,
+                        save_dir,
+                        self._should_use_impersonation(target_url, source_site),
+                        is_mp3,
+                    )
+                except (StopDownloadException, KeyboardInterrupt):
+                    raise
+                except Exception as fallback_exc:
+                    if _retry_next_page_fallback("HayAV alternate source failed; retrying next search result", fallback_exc):
+                        return
+                    raise
         if "xox-web.com" in parsed_url.netloc.lower() and "/vodplay/" in parsed_url.path.lower():
             self._set_task_status_text(item_id, "XOX 無法取得完整影片，已取消支援")
             raise Exception("XOX support disabled because the site does not expose reliable full media URLs")
