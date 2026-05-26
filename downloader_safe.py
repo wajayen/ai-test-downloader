@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3238"
+APP_BUILD = "20260526-3239"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -20803,6 +20803,66 @@ class DownloadManagerApp:
                     if _looks_like_manifest_url(embed_url) or _looks_like_http_media_url(embed_url):
                         manifest_candidates.append(embed_url)
                 return _dedupe_download_urls(manifest_candidates), _dedupe_download_urls(external_candidates)
+
+            def _movieffm_retry_same_code_alternate(reason, exc=None, title_hint=""):
+                jav_code = (
+                    _extract_jav_code(title_hint)
+                    or _extract_jav_code(short_name)
+                    or _extract_jav_code(_task_field_value(task, "name", ""))
+                    or _extract_jav_code(_task_field_value(task, "source_page", ""))
+                    or _extract_jav_code(url)
+                )
+                if not jav_code:
+                    return False
+                current_url = _normalize_download_url(url)
+                search_results = []
+                for result in self._google_video_search_results(jav_code):
+                    result_url = _normalize_download_url(result.get("url", ""))
+                    if not result_url or result_url == current_url:
+                        continue
+                    result_host = urllib.parse.urlsplit(result_url).netloc.lower()
+                    if "movieffm.net" in result_host:
+                        continue
+                    search_results.append(result)
+                plan = self._build_video_search_download_plan(search_results, 0, jav_code, is_mp3=is_mp3)
+                target_url = _normalize_download_url((plan or {}).get("target_url", ""))
+                if not target_url:
+                    return False
+                source_page = (plan or {}).get("source_page") or target_url
+                source_site = (plan or {}).get("source_site") or self._source_site_from_search_url(source_page or target_url)
+                extra_task_data = (plan or {}).get("extra_task_data") or {}
+                fallback_urls = _dedupe_download_urls(extra_task_data.get("fallback_urls", []), primary_url=target_url)
+                self._retarget_download_task(
+                    task,
+                    item_id,
+                    old_url=_normalize_download_url(_task_field_value(task, "url", "")) or url,
+                    target_url=target_url,
+                    name=(plan or {}).get("custom_name") or title_hint or short_name or jav_code,
+                    source_site=source_site,
+                    source_page=source_page,
+                    fallback_urls=fallback_urls,
+                )
+                write_error_log(
+                    "movieffm same-code fallback",
+                    Exception(reason),
+                    url=url,
+                    item_id=item_id,
+                    source_site="movieffm",
+                    jav_code=jav_code,
+                    next_url=target_url,
+                    next_source_page=source_page,
+                    original_error=str(exc or "")[:240],
+                )
+                self._set_task_parse_ui(item_id, message="MovieFFM 此頁沒有可下載播放器，改用同番號可下載來源...")
+                self._download_task_internal(
+                    target_url,
+                    item_id,
+                    save_dir,
+                    self._should_use_impersonation(target_url, source_site),
+                    is_mp3,
+                )
+                return True
+
             if "/tvshows/" in parsed_url.path:
                 _, detail_pages = _collect_movieffm_tvshow_detail_pages(resp.text, url, short_name or "MovieFFM")
                 if not detail_pages:
@@ -20839,6 +20899,8 @@ class DownloadManagerApp:
                 if candidate not in external_source_urls:
                     external_source_urls.append(candidate)
             if not candidates and not player_data and not external_source_urls:
+                if _movieffm_retry_same_code_alternate("MovieFFM player data missing; retrying same-code source", Exception("MovieFFM player data not found")):
+                    return
                 raise Exception("MovieFFM player data not found")
             candidates = [
                 candidate for candidate in candidates
@@ -20851,10 +20913,14 @@ class DownloadManagerApp:
                     source_site="movieffm",
                 )
                 if not preferred_url or not has_reachable:
+                    if _movieffm_retry_same_code_alternate("MovieFFM external stream host unresolved; retrying same-code source", Exception("MovieFFM stream host did not resolve"), page_title):
+                        return
                     raise Exception("MovieFFM stream host did not resolve")
                 _set_task_identity(name=page_title, source_site="movieffm", source_page=url, fallback_urls=ordered_fallbacks)
                 return self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
             if not candidates:
+                if _movieffm_retry_same_code_alternate("MovieFFM stream unavailable; retrying same-code source", Exception("MovieFFM stream unavailable"), page_title):
+                    return
                 raise Exception("MovieFFM stream unavailable")
             preferred_url, ordered_fallbacks, has_reachable = _select_reachable_stream_candidates(
                 candidates[0],
@@ -20862,6 +20928,8 @@ class DownloadManagerApp:
                 source_site="movieffm",
             )
             if not preferred_url or not has_reachable:
+                if _movieffm_retry_same_code_alternate("MovieFFM stream host unresolved; retrying same-code source", Exception("MovieFFM stream host did not resolve"), page_title):
+                    return
                 raise Exception("MovieFFM stream host did not resolve")
             parsed_page = urllib.parse.urlsplit(url)
             page_origin = f"{parsed_page.scheme}://{parsed_page.netloc}" if parsed_page.scheme and parsed_page.netloc else "https://www.movieffm.net"
