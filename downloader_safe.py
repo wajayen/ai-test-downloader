@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3245"
+APP_BUILD = "20260527-3246"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -5372,6 +5372,11 @@ def _is_known_dead_external_fallback_url(url):
     if not host:
         return False
     return any(marker in host for marker in DEAD_EXTERNAL_FALLBACK_HOST_MARKERS)
+
+
+def _is_movieffm_url(url):
+    parsed = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or ""))
+    return "movieffm.net" in parsed.netloc.lower()
 
 
 KNOWN_AD_MEDIA_PATH_MARKERS = (
@@ -19603,6 +19608,12 @@ class DownloadManagerApp:
                 and not _is_known_dead_external_fallback_url(candidate)
                 and not _is_slow_external_fallback_url_for_site(candidate, fallback_source_site)
             ]
+            if fallback_source_site == "hayav":
+                fallback_candidates = [
+                    candidate
+                    for candidate in fallback_candidates
+                    if not _is_movieffm_url(candidate)
+                ]
             if fallback_candidates:
                 fallback_candidates = _order_site_hls_candidates(
                     fallback_candidates[0],
@@ -20093,19 +20104,22 @@ class DownloadManagerApp:
                     for result in self._google_video_search_results(query_text)
                     if _normalize_download_url(result.get("url", ""))
                     and "hayav.com" not in urllib.parse.urlsplit(_normalize_download_url(result.get("url", ""))).netloc.lower()
-                    and (
-                        "movieffm.net" not in urllib.parse.urlsplit(_normalize_download_url(result.get("url", ""))).netloc.lower()
-                        or _dedupe_download_urls(result.get("candidate_urls", []))
-                    )
+                    and not _is_movieffm_url(result.get("url", ""))
                 ]
                 plan = self._build_video_search_download_plan(search_results, 0, query_text, is_mp3=is_mp3)
                 target_url = _normalize_download_url((plan or {}).get("target_url", ""))
                 if not target_url:
                     raise
                 source_page = (plan or {}).get("source_page") or target_url
+                if _is_movieffm_url(target_url) or _is_movieffm_url(source_page):
+                    raise hayav_direct_exc
                 source_site = (plan or {}).get("source_site") or self._source_site_from_search_url(source_page or target_url)
                 extra_task_data = (plan or {}).get("extra_task_data") or {}
-                fallback_urls = _dedupe_download_urls(extra_task_data.get("fallback_urls", []), primary_url=target_url)
+                fallback_urls = [
+                    candidate
+                    for candidate in _dedupe_download_urls(extra_task_data.get("fallback_urls", []), primary_url=target_url)
+                    if not _is_movieffm_url(candidate)
+                ]
                 self._retarget_download_task(
                     task,
                     item_id,
