@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3239"
+APP_BUILD = "20260526-3240"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -951,6 +951,9 @@ TRACE_LOG_CONTEXTS = frozenset((
     "http range part retry",
     "unknown video artifact removed",
     "direct media fallback retry",
+    "hayav stream fallback",
+    "movieffm same-code fallback",
+    "av01 placeholder stream fallback",
     "avjoy media refresh retry",
     "yt-dlp native hls fallback started",
     "yt-dlp native hls fallback finished",
@@ -5332,6 +5335,11 @@ SLOW_EXTERNAL_FALLBACK_HOST_MARKERS_BY_SITE = {
 DEAD_EXTERNAL_FALLBACK_HOST_MARKERS = (
     "alliance4creativity.com",
     "rapidvideo.com",
+    "watchsb.",
+    "watchsb.com",
+    "streamsb.",
+    "sbembed.",
+    "sbfull.",
 )
 
 
@@ -20821,12 +20829,27 @@ class DownloadManagerApp:
                     if not result_url or result_url == current_url:
                         continue
                     result_host = urllib.parse.urlsplit(result_url).netloc.lower()
-                    if "movieffm.net" in result_host:
+                    if "movieffm.net" in result_host or "hayav.com" in result_host:
                         continue
+                    candidate_urls = [
+                        candidate
+                        for candidate in _dedupe_download_urls(result.get("candidate_urls", []))
+                        if not _is_known_dead_external_fallback_url(candidate)
+                        and not _is_slow_external_fallback_url_for_site(candidate, "hayav")
+                    ]
+                    if result.get("candidate_urls") and not candidate_urls:
+                        continue
+                    if candidate_urls:
+                        result = dict(result)
+                        result["candidate_urls"] = candidate_urls
                     search_results.append(result)
                 plan = self._build_video_search_download_plan(search_results, 0, jav_code, is_mp3=is_mp3)
                 target_url = _normalize_download_url((plan or {}).get("target_url", ""))
-                if not target_url:
+                if (
+                    not target_url
+                    or _is_known_dead_external_fallback_url(target_url)
+                    or _is_slow_external_fallback_url_for_site(target_url, "hayav")
+                ):
                     return False
                 source_page = (plan or {}).get("source_page") or target_url
                 source_site = (plan or {}).get("source_site") or self._source_site_from_search_url(source_page or target_url)
