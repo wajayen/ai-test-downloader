@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3237"
+APP_BUILD = "20260526-3238"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -3487,6 +3487,15 @@ def _clean_hohoj_title(raw_title, fallback_title="HoHoJ"):
     if not cleaned or _looks_like_garbled_text(cleaned):
         return _extract_jav_code(cleaned) or _extract_jav_code(fallback_title) or str(fallback_title or "").strip()
     return cleaned
+
+
+def _clean_hayav_title(raw_title, fallback_title="HayAV"):
+    cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
+    cleaned = re.sub(r"\s*[-|]\s*HayAV.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    fallback = str(fallback_title or "HayAV").strip() or "HayAV"
+    if not cleaned or _looks_like_garbled_text(cleaned):
+        return _extract_jav_code(cleaned) or _extract_jav_code(fallback) or fallback
+    return cleaned or fallback
 
 
 def _clean_javfilms_title(raw_title):
@@ -19951,9 +19960,9 @@ class DownloadManagerApp:
                 headers=_make_ytdlp_http_headers(referer="https://hayav.com/"),
             )
             page_text = _response_text_utf8(resp)
-            page_title = _extract_html_title(page_text, short_name or "HayAV")
+            page_title = _clean_hayav_title(_extract_html_title(page_text, short_name or "HayAV"), short_name or "HayAV")
             if not _video_search_matches_query({"title": page_title, "url": url}, short_name):
-                page_title = short_name or page_title
+                page_title = _clean_hayav_title(short_name or page_title, page_title)
             hayav_candidates = _extract_hayav_embed_candidates(page_text, base_url=url)
             embed_url = ""
             for candidate in hayav_candidates:
@@ -20003,7 +20012,12 @@ class DownloadManagerApp:
                 ):
                     return
             except Exception as hayav_direct_exc:
-                query_text = page_title if _looks_like_video_search_text(page_title) else (short_name or "")
+                query_text = (
+                    _extract_jav_code(page_title)
+                    or _extract_jav_code(short_name)
+                    or _extract_jav_code(url)
+                    or (page_title if _looks_like_video_search_text(page_title) else (short_name or ""))
+                )
                 if not _looks_like_video_search_text(query_text):
                     raise
                 search_results = [
