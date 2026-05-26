@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3240"
+APP_BUILD = "20260526-3241"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -970,6 +970,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "missav parser retry recovered",
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
+    "dead external source refresh",
     "page fallback retry",
     "hohoj slow external source refresh",
     "bilibili yt-dlp route selected",
@@ -18796,6 +18797,29 @@ class DownloadManagerApp:
                     self._set_task_parse_ui(item_id, message="目前來源較慢，重新解析 HoHoJ 原頁尋找快速 HLS...")
                     self._download_task_internal(source_page_url, item_id, save_dir, use_impersonate, is_mp3)
                 elif (
+                    _is_known_dead_external_fallback_url(url)
+                    and source_page_url
+                    and source_page_url != url
+                    and not _is_known_dead_external_fallback_url(source_page_url)
+                ):
+                    write_error_log(
+                        "dead external source refresh",
+                        Exception("saved external fallback URL is unavailable; refreshing source page"),
+                        item_id=item_id,
+                        source_url=url,
+                        source_page=source_page_url,
+                        source_site=source_site or None,
+                    )
+                    self._set_cached_resolved_link_state(
+                        task,
+                        resolved_url="",
+                        resolved_url_saved_at=0.0,
+                        page_refresh_candidates=[],
+                        clear_source_refresh_history=True,
+                    )
+                    self._set_task_parse_ui(item_id, message="已保存的外部來源不可用，重新解析原始頁面...")
+                    self._download_task_internal(source_page_url, item_id, save_dir, use_impersonate, is_mp3)
+                elif (
                     source_site in ("movieffm", "xiaoyakankan")
                     and source_page_url
                     and source_page_url != url
@@ -23283,6 +23307,30 @@ class DownloadManagerApp:
                     clear_source_refresh_history=True,
                 )
                 self._set_task_parse_ui(item_id, message="HoHoJ 外部來源不可用，重新解析原頁...")
+                self._download_task_internal(source_page_url, item_id, save_dir, use_impersonate, is_mp3)
+                return
+            if (
+                _is_known_dead_external_fallback_url(url)
+                and source_page_url
+                and _normalize_download_url(source_page_url) != _normalize_download_url(url)
+                and not _is_known_dead_external_fallback_url(source_page_url)
+            ):
+                write_error_log(
+                    "dead external source refresh",
+                    Exception("dead external fallback URL skipped; refreshing source page"),
+                    item_id=item_id,
+                    source_url=url,
+                    source_page=source_page_url,
+                    source_site=_task_source_site_name(task) or None,
+                )
+                self._set_cached_resolved_link_state(
+                    task,
+                    resolved_url="",
+                    resolved_url_saved_at=0.0,
+                    page_refresh_candidates=[],
+                    clear_source_refresh_history=True,
+                )
+                self._set_task_parse_ui(item_id, message="外部來源不可用，重新解析原始頁面...")
                 self._download_task_internal(source_page_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
             if _is_known_dead_external_fallback_url(url):
