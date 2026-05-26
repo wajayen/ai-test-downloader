@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3244"
+APP_BUILD = "20260527-3245"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -3989,7 +3989,11 @@ def _expand_known_embed_fallback_candidates(urls):
             expanded.extend([candidate for candidate in decoded_variants if not _looks_like_manifest_url(candidate)])
             continue
         expanded.append(normalized)
-    return _dedupe_download_urls(expanded)
+    return [
+        candidate for candidate in _dedupe_download_urls(expanded)
+        if not _is_known_dead_external_fallback_url(candidate)
+        and not _is_known_ad_media_url(candidate)
+    ]
 
 
 def _expand_ggjav_video_host_fallbacks(urls, max_hosts=8):
@@ -4046,7 +4050,11 @@ def _expand_ggjav_video_host_fallbacks(urls, max_hosts=8):
                         )
                     )
                 )
-    return _dedupe_download_urls(expanded)
+    return [
+        candidate for candidate in _dedupe_download_urls(expanded)
+        if not _is_known_dead_external_fallback_url(candidate)
+        and not _is_known_ad_media_url(candidate)
+    ]
 
 
 def _decode_ggjav_obfuscated_player_links(page_text):
@@ -5740,7 +5748,12 @@ def _extract_hayav_embed_candidates(page_text, base_url=""):
         parsed = urllib.parse.urlsplit(candidate)
         if "hglink.to" in parsed.netloc.lower() and "/e/" in parsed.path.lower():
             expanded.append(urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path, parsed.query, "")))
-    return _dedupe_download_urls(expanded)
+    filtered = []
+    for candidate in _dedupe_download_urls(expanded):
+        if _is_known_dead_external_fallback_url(candidate) or _is_known_ad_media_url(candidate):
+            continue
+        filtered.append(candidate)
+    return filtered
 
 
 def _extract_av01_video_id(url):
@@ -19650,6 +19663,7 @@ class DownloadManagerApp:
             normalized_candidates = [
                 candidate for candidate in _expand_known_embed_fallback_candidates(candidate_urls)
                 if not _is_known_ad_media_url(candidate)
+                and not _is_known_dead_external_fallback_url(candidate)
             ]
             candidate_jav_code = ""
             if str(source_site or "").strip().lower() in ("goodav17", "hohoj"):
@@ -19679,6 +19693,7 @@ class DownloadManagerApp:
                 and candidate not in direct_media_candidates
                 and re.match(r"^https?://", candidate, re.IGNORECASE)
                 and not _is_known_non_download_listing_url(candidate)
+                and not _is_known_dead_external_fallback_url(candidate)
                 and not _is_slow_external_fallback_url_for_site(candidate, source_site)
             ]
             stream_url, stream_fallback_urls = _pick_primary_with_fallbacks(manifest_candidates, source_site=source_site)
