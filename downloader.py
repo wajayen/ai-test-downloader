@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3243"
+APP_BUILD = "20260527-3244"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -5336,6 +5336,8 @@ SLOW_EXTERNAL_FALLBACK_HOST_MARKERS_BY_SITE = {
 DEAD_EXTERNAL_FALLBACK_HOST_MARKERS = (
     "alliance4creativity.com",
     "rapidvideo.com",
+    "dhcplay.",
+    "dhcplay.com",
     "watchsb.",
     "watchsb.com",
     "streamsb.",
@@ -20072,9 +20074,14 @@ class DownloadManagerApp:
                 if not _looks_like_video_search_text(query_text):
                     raise
                 search_results = [
-                    result for result in self._google_video_search_results(query_text)
+                    result
+                    for result in self._google_video_search_results(query_text)
                     if _normalize_download_url(result.get("url", ""))
                     and "hayav.com" not in urllib.parse.urlsplit(_normalize_download_url(result.get("url", ""))).netloc.lower()
+                    and (
+                        "movieffm.net" not in urllib.parse.urlsplit(_normalize_download_url(result.get("url", ""))).netloc.lower()
+                        or _dedupe_download_urls(result.get("candidate_urls", []))
+                    )
                 ]
                 plan = self._build_video_search_download_plan(search_results, 0, query_text, is_mp3=is_mp3)
                 target_url = _normalize_download_url((plan or {}).get("target_url", ""))
