@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3235"
+APP_BUILD = "20260526-3236"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -15000,6 +15000,23 @@ class DownloadManagerApp:
                 break
         return max(workers, 1)
 
+    def _dominant_parallel_hls_segment_host(self, media_url, segments):
+        host_counts = {}
+        first_segment_url = ""
+        for segment in segments or []:
+            segment_url = _normalize_download_url(segment.get("url", ""))
+            if not segment_url:
+                continue
+            if not first_segment_url:
+                first_segment_url = segment_url
+            host = urllib.parse.urlsplit(segment_url).netloc.lower()
+            if host:
+                host_counts[host] = host_counts.get(host, 0) + 1
+        if host_counts:
+            return max(host_counts, key=host_counts.get), first_segment_url
+        normalized_media_url = _normalize_download_url(media_url)
+        return (urllib.parse.urlsplit(normalized_media_url).netloc.lower() if normalized_media_url else ""), normalized_media_url
+
     def _parallel_hls_workers_for_segments(self, source_site, media_url, segments):
         workers = self._parallel_hls_workers_for_site(source_site, media_url)
         segment_hosts = {
@@ -15009,9 +15026,7 @@ class DownloadManagerApp:
         for marker, host_workers in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST.items():
             if any(marker in host for host in segment_hosts):
                 workers = min(workers, int(host_workers))
-        dominant_host = urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower()
-        if not dominant_host and segment_hosts:
-            dominant_host = max(segment_hosts, key=lambda host: sum(1 for segment in (segments or []) if urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower() == host))
+        dominant_host, _representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
         host_peer_count = self._active_hls_downloads_for_host(dominant_host)
         host_budget = self._hls_host_worker_budget(dominant_host)
         boost_segment_threshold = int(PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS)
@@ -15832,8 +15847,10 @@ class DownloadManagerApp:
             "nnyy",
             "xiaoyakankan",
         )
+        hls_host, representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
+        if representative_segment_url:
+            self._set_task_active_media_url(task, representative_segment_url)
         worker_count = min(self._parallel_hls_workers_for_segments(source_site, media_url, segments), total_segments)
-        hls_host = urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower()
         hls_host_active_downloads = self._active_hls_downloads_for_host(hls_host)
         hls_host_worker_budget = self._hls_host_worker_budget(hls_host)
         self._log_ffmpeg_event(
@@ -15845,6 +15862,7 @@ class DownloadManagerApp:
             segments=total_segments,
             workers=worker_count,
             hls_host=hls_host,
+            manifest_host=urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower(),
             hls_host_active_downloads=hls_host_active_downloads,
             hls_host_worker_budget=hls_host_worker_budget,
             total_duration=total_duration,
