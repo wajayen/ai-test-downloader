@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3234"
+APP_BUILD = "20260526-3235"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -597,8 +597,8 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "hohoj": 24,
     "jable": 24,
     "missav": 24,
-    "njav": 18,
-    "njavtv": 18,
+    "njav": 24,
+    "njavtv": 24,
     "nnyy": 24,
     "xiaoyakankan": 24,
 }
@@ -629,10 +629,12 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "ckzy3.com": 24,
     "bfllvip.com": 24,
     "googleusercontent.com": 1,
+    "upload18.org": 24,
 }
 PARALLEL_HLS_HOST_WORKER_BUDGET = 48
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "surrit.com": 60,
+    "upload18.org": 72,
 }
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
 PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS = 1800
@@ -5569,6 +5571,8 @@ def _clean_njav_title(title, fallback=""):
     value = re.sub(r"^\s*(?:觀看|Watch)\s+", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+(?:高清免費在線觀看JAV|Watch Online,?\s*nJAV\.com).*$", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+", " ", value).strip(" -|")
+    if _looks_like_garbled_text(value):
+        return _extract_jav_code(value) or str(fallback or "").strip() or "NJAV"
     return value or str(fallback or "").strip() or "NJAV"
 
 
