@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3233"
+APP_BUILD = "20260526-3234"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -6792,11 +6792,9 @@ def _should_prefer_native_hls(url, task=None):
 
 
 def _should_force_native_hls_before_parallel(url, task=None):
-    parsed = urllib.parse.urlparse(str(url or ""))
-    host = str(parsed.netloc or "").strip().lower()
-    source_site = _task_source_site_name(task)
-    if source_site in ("movieffm", "xiaoyakankan", "nnyy") and "huyall.com" in host:
-        return True
+    # Parallel HLS now handles AES-128 TS playlists used by Huyall/ijycnd,
+    # so forcing native first only slows these sources down and can create
+    # invalid zero-duration artifacts.
     return False
 
 
@@ -15191,6 +15189,31 @@ class DownloadManagerApp:
             key_cache[key_url] = key_data
         return key_cache
 
+    def _decrypt_parallel_hls_segment_data(self, data, segment, key_cache):
+        key_info = (segment or {}).get("key") or {}
+        method = str(key_info.get("method") or "").strip().upper()
+        if not method or method == "NONE":
+            return data
+        if method != "AES-128":
+            raise ParallelHlsUnsupportedSegmentContentException(
+                f"parallel HLS unsupported encryption method: {method}"
+            )
+        key_url = key_info.get("uri")
+        key_data = (key_cache or {}).get(key_url)
+        if not key_data:
+            raise Exception("parallel HLS AES key missing")
+        if CryptoAES is None:
+            raise Exception("parallel HLS AES dependency missing")
+        encrypted = bytes(data or b"")
+        if len(encrypted) < 16 or len(encrypted) % 16 != 0:
+            raise Exception("parallel HLS AES segment has invalid block size")
+        cipher = CryptoAES.new(
+            key_data,
+            CryptoAES.MODE_CBC,
+            self._parallel_hls_iv_for_segment(key_info, (segment or {}).get("sequence", (segment or {}).get("index", 0))),
+        )
+        return self._remove_parallel_hls_aes_padding(cipher.decrypt(encrypted))
+
     def _is_valid_parallel_hls_segment_data(self, data, content_type=""):
         if not data or len(data) < 16:
             return False
@@ -15252,19 +15275,24 @@ class DownloadManagerApp:
             if segment_url and segment_url not in seen_sample_urls:
                 seen_sample_urls.add(segment_url)
                 sampled_segments.append(segment)
+        key_cache = self._fetch_parallel_hls_keys(sampled_segments, headers)
         for segment in sampled_segments:
             segment_url = _normalize_download_url(segment.get("url", ""))
             if not segment_url:
                 continue
             segment_host = urllib.parse.urlsplit(segment_url).netloc.lower()
             probe_headers = dict(request_headers)
-            probe_headers.setdefault("Range", "bytes=0-511")
+            segment_has_key = bool((segment.get("key") or {}).get("uri"))
+            if not segment_has_key:
+                probe_headers.setdefault("Range", "bytes=0-511")
             try:
                 with urllib.request.urlopen(urllib.request.Request(segment_url, headers=probe_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
                     content_type = str(resp.headers.get("Content-Type") or "").lower()
-                    data = resp.read(512)
+                    data = resp.read() if segment_has_key else resp.read(512)
             except Exception:
                 continue
+            if segment_has_key:
+                data = self._decrypt_parallel_hls_segment_data(data, segment, key_cache)
             allow_mislabelled_media = (
                 self._parallel_hls_allows_mislabelled_media(segment_host)
                 and self._is_valid_parallel_hls_segment_media_bytes(data)
@@ -15487,6 +15515,9 @@ class DownloadManagerApp:
                     request_headers,
                     prefer_curl=bool(prefer_curl and not is_google_segment),
                 )
+                key_info = segment.get("key") or {}
+                if key_info.get("uri"):
+                    data = self._decrypt_parallel_hls_segment_data(data, segment, key_cache)
                 allow_mislabelled_media = (
                     self._parallel_hls_allows_mislabelled_media(segment_host)
                     and self._is_valid_parallel_hls_segment_media_bytes(data)
@@ -15497,17 +15528,6 @@ class DownloadManagerApp:
                             f"Google-backed HLS returned non-video segment content: {content_type or 'unknown'}"
                         )
                     raise Exception(f"invalid HLS segment content: {content_type or 'unknown'}")
-                key_info = segment.get("key") or {}
-                key_url = key_info.get("uri")
-                if key_url:
-                    if CryptoAES is None:
-                        raise Exception("parallel HLS AES dependency missing")
-                    cipher = CryptoAES.new(
-                        key_cache[key_url],
-                        CryptoAES.MODE_CBC,
-                        self._parallel_hls_iv_for_segment(key_info, segment.get("sequence", segment.get("index", 0))),
-                    )
-                    data = self._remove_parallel_hls_aes_padding(cipher.decrypt(data))
                 with open(temp_part_path, "wb") as out_f:
                     out_f.write(data)
                 os.replace(temp_part_path, part_path)
