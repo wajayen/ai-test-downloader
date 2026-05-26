@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260526-3200"
+APP_BUILD = "20260526-3210"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -621,6 +621,11 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "bfllvip.com": 24,
     "googleusercontent.com": 1,
 }
+PARALLEL_HLS_HOST_WORKER_BUDGET = 48
+PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
+    "surrit.com": 60,
+}
+PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 30
 PARALLEL_HLS_SEGMENT_RETRIES = 5
@@ -873,6 +878,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg resume segment preserved",
     "parallel hls download started",
     "parallel hls download finished",
+    "parallel hls concat remux fallback to transport",
+    "http media download finished",
     "parallel hls setup retry next candidate",
     "parallel hls setup fallback to ffmpeg",
     "parallel hls setup candidates exhausted",
@@ -10656,6 +10663,7 @@ class DownloadManagerApp:
             if (
                 any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths)
                 or self._has_parallel_hls_segment_artifacts(explicit_temp_path)
+                or self._http_multipart_existing_part_bytes(explicit_temp_path) > 0
             ) and self._explicit_resume_artifact_is_usable(explicit_temp_path, resume_keys):
                 return True
         if explicit_output_path:
@@ -10671,6 +10679,8 @@ class DownloadManagerApp:
             if ext:
                 candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
             if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths) and self._resume_artifact_matches_keys(path, resume_keys):
+                return True
+            if self._http_multipart_existing_part_bytes(path) > 0 and self._resume_artifact_matches_keys(path, resume_keys):
                 return True
         if not source_url or not effective_save_dir:
             return False
@@ -10691,6 +10701,8 @@ class DownloadManagerApp:
             f"{temp_root}.merged{temp_ext}",
         )
         if any(self._has_nonempty_file(candidate_path) for candidate_path in candidate_paths) and self._resume_artifact_matches_keys(temp_out_path, resume_keys):
+            return True
+        if self._http_multipart_existing_part_bytes(temp_out_path) > 0 and self._resume_artifact_matches_keys(temp_out_path, resume_keys):
             return True
         return False
 
@@ -12830,19 +12842,56 @@ class DownloadManagerApp:
                             pass
             return {"total_size": total_size, "range_supported": range_supported, "content_type": content_type}
 
+    def _http_multipart_part_path(self, out_path, index):
+        normalized_out_path = os.path.abspath(str(out_path or "download"))
+        digest = hashlib.sha1(normalized_out_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        return os.path.join(tempfile.gettempdir(), f"downloader_http_{digest}.part{index}")
+
+    def _http_multipart_existing_part_bytes(self, out_path):
+        if not out_path:
+            return 0
+        prefix = self._http_multipart_part_path(out_path, "")
+        total = 0
+        for part_path in glob.glob(prefix + "*"):
+            try:
+                size = os.path.getsize(part_path)
+            except OSError:
+                continue
+            if size > 0:
+                total += size
+        return total
+
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
+        expected_size = max(int(end_byte) - int(start_byte) + 1, 0)
         last_exc = None
         for attempt in range(HTTP_RANGE_PART_MAX_ATTEMPTS):
             if stop_event.is_set() or self._shutdown_started:
                 return
             try:
-                progress_box["bytes"] = 0
-                if os.path.exists(part_path):
+                existing_size = self._get_existing_file_size(part_path)
+                if expected_size > 0 and existing_size >= expected_size:
+                    progress_box["bytes"] = expected_size
+                    return
+                if existing_size < 0 or (expected_size > 0 and existing_size > expected_size):
                     try:
                         os.remove(part_path)
                     except OSError:
                         pass
-                return self._download_http_range_part_once(url, headers, start_byte, end_byte, part_path, progress_box, stop_event)
+                    existing_size = 0
+                progress_box["bytes"] = existing_size
+                request_start_byte = int(start_byte) + int(existing_size)
+                return self._download_http_range_part_once(
+                    url,
+                    headers,
+                    start_byte,
+                    end_byte,
+                    part_path,
+                    progress_box,
+                    stop_event,
+                    request_start_byte=request_start_byte,
+                    expected_total_size=expected_size,
+                    append=existing_size > 0,
+                )
             except Exception as exc:
                 last_exc = exc
                 if stop_event.is_set() or self._shutdown_started or attempt >= HTTP_RANGE_PART_MAX_ATTEMPTS - 1:
@@ -12861,8 +12910,9 @@ class DownloadManagerApp:
         if last_exc is not None:
             raise last_exc
 
-    def _download_http_range_part_once(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
-        req_headers = _make_range_http_headers(headers, f"bytes={start_byte}-{end_byte}")
+    def _download_http_range_part_once(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event, request_start_byte=None, expected_total_size=None, append=False):
+        request_start = int(start_byte if request_start_byte is None else request_start_byte)
+        req_headers = _make_range_http_headers(headers, f"bytes={request_start}-{end_byte}")
         parsed_download_url = urllib.parse.urlparse(str(url or ""))
         download_netloc = parsed_download_url.netloc.lower()
         disable_ssl_verify = (
@@ -12870,7 +12920,7 @@ class DownloadManagerApp:
             or "ggjav.com" in download_netloc
         )
         prefer_curl_transport = disable_ssl_verify or ("avjoy.me" in download_netloc and "media-cdn" in download_netloc)
-        expected_size = max(int(end_byte) - int(start_byte) + 1, 0)
+        expected_size = max(int(expected_total_size if expected_total_size is not None else int(end_byte) - int(start_byte) + 1), 0)
         if prefer_curl_transport:
             c_req = get_curl_cffi_requests()
             last_exc = None
@@ -12918,7 +12968,7 @@ class DownloadManagerApp:
                     time.sleep(min(0.4 * (attempt + 1), 1.5))
                 if response is None and last_exc is not None:
                     raise last_exc
-                with open(part_path, "wb") as f:
+                with open(part_path, "ab" if append else "wb") as f:
                     for chunk in response.iter_content(chunk_size=HTTP_RANGE_CHUNK_SIZE):
                         if stop_event.is_set() or self._shutdown_started:
                             break
@@ -12946,7 +12996,7 @@ class DownloadManagerApp:
             status = int(getattr(resp, "status", 0) or resp.getcode() or 0)
             if expected_size > 0 and status != 206:
                 raise Exception(f"HTTP range request returned {status or 'unknown'}")
-            with open(part_path, "wb") as f:
+            with open(part_path, "ab" if append else "wb") as f:
                 while not stop_event.is_set() and not self._shutdown_started:
                     chunk = resp.read(HTTP_RANGE_CHUNK_SIZE)
                     if not chunk:
@@ -13248,9 +13298,29 @@ class DownloadManagerApp:
             elapsed = time.time() - float(getattr(self, "_startup_started_at", 0.0) or 0.0)
         except Exception:
             elapsed = STARTUP_RESUME_WARMUP_SECONDS
-        if elapsed < STARTUP_RESUME_WARMUP_SECONDS:
+        if elapsed < STARTUP_RESUME_WARMUP_SECONDS and self._has_startup_resume_workload():
             limit = min(limit, int(STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS))
         return max(1, limit)
+
+    def _has_startup_resume_workload(self):
+        try:
+            save_dir = self.save_dir_var.get()
+        except Exception:
+            save_dir = None
+        for task in self.tasks.values():
+            state = str(_task_field_value(task, "state", "") or "")
+            if not (self._is_downloading_state(state) or self._is_queued_state(state)):
+                continue
+            try:
+                if self._has_resume_artifact_state(
+                    task,
+                    save_dir=save_dir,
+                    is_mp3=bool(_task_field_value(task, "is_mp3", False)),
+                ):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _source_download_limits(self, source_site, domain_limit):
         site = (source_site or "").strip().lower()
@@ -13611,6 +13681,7 @@ class DownloadManagerApp:
         headers = dict(headers or {})
         task = self.tasks.get(item_id, {})
         self._cache_task_resolved_link(task, url, fallback_urls=_dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=url))
+        self._set_task_resume_temp_file(task, item_id, out_path)
         pause_note = self._disk_full_pause_note()
         if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=pause_note):
             return
@@ -13867,6 +13938,14 @@ class DownloadManagerApp:
                     if host_marker in download_host:
                         part_count = min(part_count, int(host_part_count))
                         break
+                http_host_active_downloads = self._active_hls_downloads_for_host(download_host)
+                http_host_worker_budget = self._hls_host_worker_budget(download_host)
+                if http_host_active_downloads > 1:
+                    per_task_part_budget = max(
+                        int(PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK),
+                        int(http_host_worker_budget) // max(http_host_active_downloads, 1),
+                    )
+                    part_count = min(part_count, per_task_part_budget)
                 part_count = min(max(2, part_count), 24)
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
                 write_error_log(
@@ -13876,6 +13955,9 @@ class DownloadManagerApp:
                     item_id=item_id,
                     source_site=source_site,
                     part_count=part_count,
+                    download_host=download_host,
+                    host_active_downloads=http_host_active_downloads,
+                    host_worker_budget=http_host_worker_budget,
                     remaining_size=remaining_size,
                     part_size=part_size,
                     resume_bytes=resume_bytes,
@@ -13891,9 +13973,7 @@ class DownloadManagerApp:
                         if part_start > remaining_end:
                             break
                         part_end = remaining_end if index == part_count - 1 else min(remaining_end, part_start + part_size - 1)
-                        normalized_out_path = os.path.abspath(str(out_path or "download"))
-                        digest = hashlib.sha1(normalized_out_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
-                        part_path = os.path.join(tempfile.gettempdir(), f"downloader_http_{digest}.part{index}")
+                        part_path = self._http_multipart_part_path(out_path, index)
                         part_paths.append(part_path)
                         part_specs.append((part_path, part_start, part_end))
                         box = {"bytes": 0}
@@ -13994,6 +14074,20 @@ class DownloadManagerApp:
                 self._close_network_session(owned_session)
             if session is not None:
                 self._close_network_session(session)
+        final_size = self._get_existing_file_size(out_path)
+        elapsed_seconds = max(time.time() - start_time, 0.001)
+        write_error_log(
+            "http media download finished",
+            Exception("http media download finished"),
+            url=url,
+            item_id=item_id,
+            source_site=_task_source_site_name(task) or None,
+            output=out_path,
+            bytes=final_size,
+            elapsed_seconds=round(elapsed_seconds, 3),
+            average_speed_bps=int(final_size / elapsed_seconds) if final_size > 0 else 0,
+            mark_finished=bool(mark_finished),
+        )
         if mark_finished:
             self._mark_task_finished(item_id)
 
@@ -14172,7 +14266,57 @@ class DownloadManagerApp:
         for marker, host_workers in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST.items():
             if any(marker in host for host in segment_hosts):
                 workers = min(workers, int(host_workers))
+        dominant_host = urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower()
+        if not dominant_host and segment_hosts:
+            dominant_host = max(segment_hosts, key=lambda host: sum(1 for segment in (segments or []) if urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower() == host))
+        host_peer_count = self._active_hls_downloads_for_host(dominant_host)
+        host_budget = self._hls_host_worker_budget(dominant_host)
+        if host_peer_count > 1:
+            per_task_budget = max(
+                int(PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK),
+                int(host_budget) // max(host_peer_count, 1),
+            )
+            workers = min(workers, per_task_budget)
         return max(workers, 1)
+
+    def _fragment_workers_with_host_budget(self, desired_workers, media_url):
+        try:
+            workers = int(desired_workers or 1)
+        except Exception:
+            workers = 1
+        host = urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower()
+        host_peer_count = self._active_hls_downloads_for_host(host)
+        host_budget = self._hls_host_worker_budget(host)
+        if host_peer_count > 1:
+            per_task_budget = max(
+                int(PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK),
+                int(host_budget) // max(host_peer_count, 1),
+            )
+            workers = min(workers, per_task_budget)
+        return max(workers, 1), host, host_peer_count
+
+    def _hls_host_worker_budget(self, host):
+        normalized_host = str(host or "").strip().lower()
+        for marker, budget in PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST.items():
+            if marker in normalized_host:
+                return int(budget)
+        return int(PARALLEL_HLS_HOST_WORKER_BUDGET)
+
+    def _active_hls_downloads_for_host(self, host):
+        normalized_host = str(host or "").strip().lower()
+        if not normalized_host:
+            return 1
+        count = 0
+        for task in self.tasks.values():
+            if not self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
+                continue
+            candidates = [
+                _task_field_value(task, "resolved_url", ""),
+                *(_task_field_value(task, "fallback_urls", []) or []),
+            ]
+            if any(urllib.parse.urlsplit(_normalize_download_url(candidate) or "").netloc.lower() == normalized_host for candidate in candidates):
+                count += 1
+        return max(count, 1)
 
     def _should_try_parallel_hls_segments(self, url, task):
         source_site = _task_source_site_name(task) or _infer_source_site_from_task_urls(
@@ -14684,6 +14828,75 @@ class DownloadManagerApp:
                 continue
         raise Exception(f"parallel HLS remux failed: {' | '.join(errors)[:360]}")
 
+    def _write_ffmpeg_concat_list(self, segment_paths, list_path):
+        os.makedirs(os.path.dirname(list_path) or _APP_DIR, exist_ok=True)
+        with open(list_path, "w", encoding="utf-8", newline="\n") as list_f:
+            list_f.write("ffconcat version 1.0\n")
+            for segment_path in segment_paths:
+                normalized_path = os.path.abspath(str(segment_path or "")).replace("\\", "/")
+                escaped_path = normalized_path.replace("'", "'\\''")
+                list_f.write(f"file '{escaped_path}'\n")
+
+    def _remux_parallel_hls_segment_files(self, ffmpeg_path, segment_paths, concat_list_path, out_path):
+        segment_paths = [path for path in (segment_paths or []) if self._has_nonempty_file(path)]
+        if not segment_paths:
+            raise Exception("parallel HLS concat remux has no segment files")
+        self._write_ffmpeg_concat_list(segment_paths, concat_list_path)
+        startupinfo = None
+        creationflags = 0
+        if platform.system() == "Windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        base_cmd = [
+            ffmpeg_path,
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "+genpts",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concat_list_path,
+        ]
+        attempts = [
+            ("concat-copy-faststart", base_cmd + ["-c", "copy", "-movflags", "+faststart", out_path]),
+            ("concat-copy-plain", base_cmd + ["-c", "copy", out_path]),
+            ("concat-audio-transcode", base_cmd + ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path]),
+        ]
+        errors = []
+        for label, cmd in attempts:
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except OSError:
+                pass
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+                timeout=900,
+            )
+            message = (result.stderr or result.stdout or "").strip()
+            if result.returncode == 0:
+                if self._has_nonempty_file(out_path):
+                    return
+                message = message or "ffmpeg created empty output"
+            errors.append(f"{label}: {message or f'ffmpeg exited with code {result.returncode}'}")
+            if label == "concat-copy-faststart" and message and not _ffmpeg_should_retry_with_audio_transcode(message):
+                continue
+        raise Exception(f"parallel HLS concat remux failed: {' | '.join(errors)[:360]}")
+
     def _try_parallel_hls_segment_download(self, item_id, url, out_path, temp_out_path, progress_path, headers, ffmpeg_path, ffmpeg_version=""):
         task = self.tasks.get(item_id, {})
         if not self._should_try_parallel_hls_segments(url, task):
@@ -14775,6 +14988,7 @@ class DownloadManagerApp:
         key_cache = self._fetch_parallel_hls_keys(segments, headers)
         transport_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ts"
         merged_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.mp4"
+        concat_list_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ffconcat"
         stop_event = threading.Event()
         total_segments = len(segments)
         has_google_segments = any(
@@ -14814,6 +15028,9 @@ class DownloadManagerApp:
             "xiaoyakankan",
         )
         worker_count = min(self._parallel_hls_workers_for_segments(source_site, media_url, segments), total_segments)
+        hls_host = urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower()
+        hls_host_active_downloads = self._active_hls_downloads_for_host(hls_host)
+        hls_host_worker_budget = self._hls_host_worker_budget(hls_host)
         self._log_ffmpeg_event(
             "parallel hls download started",
             Exception("parallel hls started"),
@@ -14822,6 +15039,9 @@ class DownloadManagerApp:
             media_url,
             segments=total_segments,
             workers=worker_count,
+            hls_host=hls_host,
+            hls_host_active_downloads=hls_host_active_downloads,
+            hls_host_worker_budget=hls_host_worker_budget,
             total_duration=total_duration,
             **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
         )
@@ -14829,7 +15049,12 @@ class DownloadManagerApp:
         def _part_path(segment):
             return os.path.join(part_dir, f"{int(segment['index']):06d}.ts")
 
-        existing_segments = [segment for segment in segments if self._is_valid_parallel_hls_part_file(_part_path(segment))]
+        completed_segment_indexes = set()
+        existing_segments = []
+        for segment in segments:
+            if self._is_valid_parallel_hls_part_file(_part_path(segment)):
+                existing_segments.append(segment)
+                completed_segment_indexes.add(int(segment["index"]))
         if existing_segments:
             completed_bytes = sum(self._get_existing_file_size(_part_path(segment)) for segment in existing_segments)
             completed_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in existing_segments)
@@ -14848,7 +15073,7 @@ class DownloadManagerApp:
             bytes_done=completed_bytes,
         )
 
-        pending_segments = [segment for segment in segments if not self._is_valid_parallel_hls_part_file(_part_path(segment))]
+        pending_segments = [segment for segment in segments if int(segment["index"]) not in completed_segment_indexes]
 
         def _download_one(segment):
             nonlocal completed_bytes, completed_duration, completed_segments
@@ -14865,6 +15090,7 @@ class DownloadManagerApp:
                 prefer_curl=prefer_curl_segments,
             )
             with completed_lock:
+                completed_segment_indexes.add(int(segment["index"]))
                 completed_bytes += int(part_size or 0)
                 completed_duration += max(float(segment.get("duration", 0.0) or 0.0), 0.0)
                 completed_segments += 1
@@ -14889,18 +15115,34 @@ class DownloadManagerApp:
             return part_size
 
         try:
+            remux_strategy = "concat"
             with DaemonThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = [executor.submit(_download_one, segment) for segment in pending_segments]
                 for future in concurrent.futures.as_completed(futures):
                     future.result()
-            with open(transport_path, "wb") as merged_f:
-                for segment in segments:
-                    part_path = _part_path(segment)
-                    if not self._is_valid_parallel_hls_part_file(part_path):
-                        raise Exception("parallel HLS segment missing after download")
-                    with open(part_path, "rb") as part_f:
-                        shutil.copyfileobj(part_f, merged_f, length=HTTP_FILE_COPY_CHUNK_SIZE)
-            self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
+            ordered_part_paths = []
+            for segment in segments:
+                part_path = _part_path(segment)
+                if int(segment["index"]) not in completed_segment_indexes or not self._has_nonempty_file(part_path):
+                    raise Exception("parallel HLS segment missing after download")
+                ordered_part_paths.append(part_path)
+            try:
+                self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
+            except Exception as concat_exc:
+                write_error_log(
+                    "parallel hls concat remux fallback to transport",
+                    concat_exc,
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    segments=total_segments,
+                )
+                with open(transport_path, "wb") as merged_f:
+                    for part_path in ordered_part_paths:
+                        with open(part_path, "rb") as part_f:
+                            shutil.copyfileobj(part_f, merged_f, length=HTTP_FILE_COPY_CHUNK_SIZE)
+                self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
+                remux_strategy = "transport"
             final_info = self._probe_media_info(merged_path)
             final_duration = float(final_info.get("duration", 0.0) or 0.0)
             if not final_info.get("valid") or int(final_info.get("size", 0) or 0) <= 0:
@@ -14919,13 +15161,15 @@ class DownloadManagerApp:
                     except OSError:
                         pass
                 self._move_file_with_retry(merged_path, out_path, attempts=48, delay_seconds=0.5)
-            self._remove_artifact_paths(temp_out_path, transport_path, progress_path)
+            self._remove_artifact_paths(temp_out_path, transport_path, concat_list_path, progress_path)
             shutil.rmtree(part_dir, ignore_errors=True)
             self._set_task_output_file(task, item_id, out_path)
             self._set_task_named_column_text(item_id, "progress", "100%")
             if not self._mark_task_finished(item_id):
                 raise Exception("parallel HLS output failed final validation")
             logged_output_path = self._task_output_path_or_default(task, out_path)
+            logged_output_size = self._get_existing_file_size(logged_output_path)
+            elapsed_seconds = max(time.time() - started_at, 0.001)
             self._log_ffmpeg_event(
                 "parallel hls download finished",
                 Exception("parallel hls finished"),
@@ -14933,9 +15177,12 @@ class DownloadManagerApp:
                 item_id,
                 media_url,
                 output=logged_output_path,
-                bytes=self._get_existing_file_size(logged_output_path),
+                bytes=logged_output_size,
                 segments=total_segments,
                 workers=worker_count,
+                remux_strategy=remux_strategy,
+                elapsed_seconds=round(elapsed_seconds, 3),
+                average_speed_bps=int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0,
             )
             return True
         except StopDownloadException:
@@ -15012,6 +15259,12 @@ class DownloadManagerApp:
             "concurrent_fragment_downloads": _ytdlp_native_concurrency_for_site(source_site),
             "hls_use_mpegts": bool(YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE.get(source_site, True)),
         }
+        native_fragment_workers, native_hls_host, native_hls_host_active_downloads = self._fragment_workers_with_host_budget(
+            native_options["concurrent_fragment_downloads"],
+            url,
+        )
+        native_hls_host_worker_budget = self._hls_host_worker_budget(native_hls_host)
+        native_options["concurrent_fragment_downloads"] = native_fragment_workers
         native_route_profile = _build_ytdlp_route_profile(source_site)
         native_route_profile["concurrent_fragment_downloads"] = native_options["concurrent_fragment_downloads"]
         if self._set_output_path_and_complete_if_exists(task, item_id, out_path):
@@ -15046,6 +15299,9 @@ class DownloadManagerApp:
             origin=origin,
             socket_timeout=native_options["socket_timeout"],
             concurrent_fragment_downloads=ydl_opts["concurrent_fragment_downloads"],
+            hls_host=native_hls_host,
+            hls_host_active_downloads=native_hls_host_active_downloads,
+            hls_host_worker_budget=native_hls_host_worker_budget,
             throttled_rate_bps=ydl_opts.get("throttledratelimit"),
             retries=ydl_opts.get("retries"),
             fragment_retries=ydl_opts.get("fragment_retries"),
@@ -16725,6 +16981,9 @@ class DownloadManagerApp:
         best_state = self._select_best_resume_artifact_state(candidate_paths, persisted=persisted)
         best_seconds = best_state.get("seconds", 0.0)
         best_bytes = best_state.get("bytes", 0)
+        multipart_bytes = self._http_multipart_existing_part_bytes(temp_path)
+        if multipart_bytes > best_bytes:
+            best_bytes = multipart_bytes
         if best_seconds > 0.0 or best_bytes > 0:
             self._save_resume_progress(progress_path, best_seconds, source_url=source_url, bytes_done=best_bytes)
 
@@ -16775,6 +17034,7 @@ class DownloadManagerApp:
                 candidate_paths = [temp_path]
                 if ext:
                     candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
+                candidate_paths.extend(glob.glob(self._http_multipart_part_path(temp_path, "") + "*"))
                 for candidate_path in candidate_paths:
                     try:
                         if os.path.exists(candidate_path):
