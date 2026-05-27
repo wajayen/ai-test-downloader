@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3248"
+APP_BUILD = "20260527-3249"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -970,6 +970,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "cached resolved url startup timeout",
     "cached media link refresh",
     "cached resolved url unavailable",
+    "hayav unavailable external embed skipped",
     "missav parser retry recovered",
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
@@ -5723,6 +5724,13 @@ def _extract_njav_media_candidates(page_url, page_text="", session=None):
 
 
 HAYAV_SECRET_KEY = "MySuperSecretKey2026"
+HAYAV_UNAVAILABLE_EMBED_MARKERS = (
+    "file is no longer available",
+    "expired or has been deleted",
+    "file was deleted",
+    "file has been deleted",
+    "no longer available",
+)
 
 
 def _decode_hayav_secret(secret):
@@ -5762,6 +5770,31 @@ def _extract_hayav_embed_candidates(page_text, base_url=""):
             continue
         filtered.append(candidate)
     return filtered
+
+
+def _hayav_external_embed_is_unavailable(embed_url, referer="", timeout=6):
+    normalized = _normalize_download_url(embed_url)
+    if not normalized:
+        return True
+    parsed = urllib.parse.urlsplit(normalized)
+    host = parsed.netloc.lower()
+    if "swdyu.com" not in host:
+        return False
+    try:
+        c_req = get_curl_cffi_requests()
+        resp = c_req.get(
+            normalized,
+            impersonate="chrome120",
+            timeout=timeout,
+            headers=_make_ytdlp_http_headers(referer=referer or "https://hayav.com/"),
+        )
+        status_code = int(getattr(resp, "status_code", 0) or 0)
+        if status_code >= 400:
+            return True
+        body = _response_text_utf8(resp).lower()
+        return any(marker in body for marker in HAYAV_UNAVAILABLE_EMBED_MARKERS)
+    except Exception:
+        return False
 
 
 def _extract_av01_video_id(url):
@@ -20277,6 +20310,29 @@ class DownloadManagerApp:
             if not _video_search_matches_query({"title": page_title, "url": url}, short_name):
                 page_title = _clean_hayav_title(short_name or page_title, page_title)
             hayav_candidates = _extract_hayav_embed_candidates(page_text, base_url=url)
+            skipped_hayav_candidates = []
+            filtered_hayav_candidates = []
+            for candidate in hayav_candidates:
+                if _hayav_external_embed_is_unavailable(candidate, referer=url):
+                    skipped_hayav_candidates.append(candidate)
+                    continue
+                filtered_hayav_candidates.append(candidate)
+            if skipped_hayav_candidates:
+                skipped_hosts = sorted({
+                    urllib.parse.urlsplit(candidate).netloc.lower()
+                    for candidate in skipped_hayav_candidates
+                    if _normalize_download_url(candidate)
+                })
+                write_error_log(
+                    "hayav unavailable external embed skipped",
+                    Exception("HayAV external embed is unavailable"),
+                    url=url,
+                    item_id=item_id,
+                    skipped_count=len(skipped_hayav_candidates),
+                    skipped_hosts=",".join(skipped_hosts),
+                    remaining_count=len(filtered_hayav_candidates),
+                )
+            hayav_candidates = filtered_hayav_candidates
             embed_url = ""
             for candidate in hayav_candidates:
                 candidate_parts = urllib.parse.urlsplit(candidate)
