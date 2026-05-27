@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3258"
+APP_BUILD = "20260527-3259"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -3701,7 +3701,7 @@ def _extract_avbebe_category_video_urls(page_text, base_url):
 
 def _avbebe_iframe_priority(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
-    if "hgcloud.to" in host or "masukestin.com" in host:
+    if "hgcloud.to" in host or "masukestin.com" in host or "swdyu.com" in host:
         return 0
     if "turbovidhls.com" in host or "turboviplay.com" in host:
         return 30
@@ -3710,7 +3710,7 @@ def _avbebe_iframe_priority(url):
 
 def _avbebe_can_retry_iframe_directly(url):
     host = urllib.parse.urlsplit(_normalize_download_url(url)).netloc.lower()
-    if "hgcloud.to" in host or "masukestin.com" in host:
+    if "hgcloud.to" in host or "masukestin.com" in host or "swdyu.com" in host:
         return True
     if "turbovidhls.com" in host or "turboviplay.com" in host:
         return False
@@ -3729,6 +3729,8 @@ def _avbebe_hgcloud_embed_url(url):
     parsed = urllib.parse.urlsplit(normalized)
     host = parsed.netloc.lower()
     if "masukestin.com" in host:
+        return normalized
+    if "swdyu.com" in host:
         return normalized
     if "dhcplay.com" in host:
         return urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path or "/", parsed.query, ""))
@@ -20610,6 +20612,7 @@ class DownloadManagerApp:
                 candidate_host = candidate_parts.netloc.lower()
                 if (
                     "masukestin.com" in candidate_host
+                    or "swdyu.com" in candidate_host
                     or "hgcloud.to" in candidate_host
                     or "hglink.to" in candidate_host
                     or "dhcplay.com" in candidate_host
