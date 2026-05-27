@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3251"
+APP_BUILD = "20260527-3252"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -595,7 +595,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "avbebe": 24,
     "gimy": 24,
     "goodav17": 24,
-    "hayav": 24,
+    "hayav": 32,
     "hohoj": 24,
     "jable": 24,
     "missav": 24,
@@ -616,7 +616,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "vip.dytt-see.com": 24,
     "lz-cdn.com": 24,
     "yuglf.com": 24,
-    "premilkyway.com": 24,
+    "premilkyway.com": 32,
     "taopianplay1.com": 24,
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
@@ -635,6 +635,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
 }
 PARALLEL_HLS_HOST_WORKER_BUDGET = 48
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
+    "premilkyway.com": 72,
     "surrit.com": 60,
     "upload18.org": 72,
 }
@@ -771,16 +772,16 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "18jav": 20,
     "anime1": 4,
     "avjoy": 12,
-    "gimy": 24,
-    "goodav17": 24,
+    "gimy": 32,
+    "goodav17": 32,
     "hohoj": 20,
     "jable": 12,
     "mixdrop": 18,
-    "movieffm": 24,
-    "missav": 24,
-    "njav": 20,
-    "njavtv": 20,
-    "tktube": 20,
+    "movieffm": 32,
+    "missav": 32,
+    "njav": 24,
+    "njavtv": 24,
+    "tktube": 24,
     "youtube": 20,
 }
 HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
@@ -951,6 +952,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "download concurrency limit changed",
     "http multipart download started",
     "http range part retry",
+    "http media output incomplete",
     "unknown video artifact removed",
     "direct media fallback retry",
     "hayav stream fallback",
@@ -14663,7 +14665,7 @@ class DownloadManagerApp:
             return
         self._mark_task_finished(item_id)
 
-    def _download_http_media(self, item_id, url, out_path, headers=None, session=None, mark_finished=True):
+    def _download_http_media(self, item_id, url, out_path, headers=None, session=None, mark_finished=True, deferred_finish_reason=""):
         headers = dict(headers or {})
         task = self.tasks.get(item_id, {})
         self._set_task_active_media_url(task, url)
@@ -14933,7 +14935,7 @@ class DownloadManagerApp:
                         int(http_host_worker_budget) // max(http_host_active_downloads, 1),
                     )
                     part_count = min(part_count, per_task_part_budget)
-                part_count = min(max(2, part_count), 24)
+                part_count = min(max(2, part_count), 32)
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
                 write_error_log(
                     "http multipart download started",
@@ -15062,8 +15064,34 @@ class DownloadManagerApp:
             if session is not None:
                 self._close_network_session(session)
         final_size = self._get_existing_file_size(out_path)
+        task_state_after_download = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
+        if (
+            total_size > 0
+            and final_size > 0
+            and not self._file_size_matches_expected_total(out_path, total_size)
+            and task_state_after_download not in {"PAUSED", "PAUSE_REQUESTED", "DELETED", "DELETE_REQUESTED"}
+            and not self._shutdown_started
+        ):
+            incomplete_exc = Exception(f"HTTP media output incomplete: expected {total_size}, got {final_size}")
+            write_error_log(
+                "http media output incomplete",
+                incomplete_exc,
+                url=url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                output=out_path,
+                bytes=final_size,
+                expected_total_bytes=total_size,
+                mark_finished=bool(mark_finished),
+            )
+            raise incomplete_exc
         elapsed_seconds = max(time.time() - start_time, 0.001)
         final_download_host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+        final_task_filename = str(_task_field_value(task, "filename", "") or "").strip()
+        output_is_task_file = bool(
+            final_task_filename
+            and os.path.normcase(os.path.abspath(out_path)) == os.path.normcase(os.path.abspath(final_task_filename))
+        )
         write_error_log(
             "http media download finished",
             Exception("http media download finished"),
@@ -15078,6 +15106,9 @@ class DownloadManagerApp:
             elapsed_seconds=round(elapsed_seconds, 3),
             average_speed_bps=int(final_size / elapsed_seconds) if final_size > 0 else 0,
             mark_finished=bool(mark_finished),
+            deferred_finish_reason=(None if mark_finished else (str(deferred_finish_reason or "").strip() or "caller will validate and finalize output")),
+            output_is_task_file=output_is_task_file,
+            task_state=task_state_after_download or None,
         )
         if mark_finished:
             self._mark_task_finished(item_id)
@@ -15093,7 +15124,15 @@ class DownloadManagerApp:
             return None
         out_path, _ = self._resolve_direct_media_output_path(media_url, save_dir, display_name, default_ext=default_ext)
         media_headers = dict(headers or _make_ytdlp_http_headers(referer=referer, origin=origin))
-        self._download_http_media(item_id, media_url, out_path, headers=media_headers, session=session, mark_finished=False)
+        self._download_http_media(
+            item_id,
+            media_url,
+            out_path,
+            headers=media_headers,
+            session=session,
+            mark_finished=False,
+            deferred_finish_reason="direct media wrapper validates output before finishing",
+        )
         task = self.tasks.get(item_id, {})
         task_state = str(_task_field_value(task, "state", "") or "")
         if task_state in ("PAUSED", "PAUSE_REQUESTED", "DELETED", "DELETE_REQUESTED"):
@@ -19463,8 +19502,22 @@ class DownloadManagerApp:
                     video_ext=video_ext,
                     audio_ext=audio_ext,
                 )
-                self._download_http_media(item_id, video_fmt.get("url"), video_path, headers=_youtube_download_headers(video_fmt), mark_finished=False)
-                self._download_http_media(item_id, audio_fmt.get("url"), audio_path, headers=_youtube_download_headers(audio_fmt), mark_finished=False)
+                self._download_http_media(
+                    item_id,
+                    video_fmt.get("url"),
+                    video_path,
+                    headers=_youtube_download_headers(video_fmt),
+                    mark_finished=False,
+                    deferred_finish_reason="youtube video component waits for ffmpeg merge",
+                )
+                self._download_http_media(
+                    item_id,
+                    audio_fmt.get("url"),
+                    audio_path,
+                    headers=_youtube_download_headers(audio_fmt),
+                    mark_finished=False,
+                    deferred_finish_reason="youtube audio component waits for ffmpeg merge",
+                )
                 _validate_youtube_component(video_path, "video")
                 _validate_youtube_component(audio_path, "audio")
                 ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
@@ -19502,7 +19555,14 @@ class DownloadManagerApp:
                         self._set_task_output_file(task, item_id, final_output)
                         self._mark_existing_file_complete(item_id, self._ui_text("msg_file_exists", "檔案已存在"))
                         return info, final_output
-                self._download_http_media(item_id, info.get("url"), final_output, headers=_youtube_download_headers(info), mark_finished=False)
+                self._download_http_media(
+                    item_id,
+                    info.get("url"),
+                    final_output,
+                    headers=_youtube_download_headers(info),
+                    mark_finished=False,
+                    deferred_finish_reason="youtube route validates quality before finishing",
+                )
                 return info, final_output
 
             raise RuntimeError("YouTube did not expose a downloadable 720p+ media URL")
