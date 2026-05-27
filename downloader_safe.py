@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3254"
+APP_BUILD = "20260527-3255"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -316,6 +316,33 @@ def _extract_jav_code(value):
         return ""
     suffix = (match.group(3) or "").upper()
     return f"{match.group(1).upper()}-{match.group(2)}{suffix}"
+
+
+def _repair_mixed_garbled_jav_title(raw_title, page_url="", fallback_title=""):
+    cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
+    fallback = re.sub(r"\s+", " ", str(html.unescape(str(fallback_title or "")) or "")).strip()
+    normalized_url = _normalize_download_url(page_url)
+    code = _extract_jav_code(cleaned) or _extract_jav_code(fallback) or _extract_jav_code(normalized_url)
+    if not code:
+        return ""
+    is_chinese_subtitle = (
+        "chinese-subtitles" in normalized_url.lower()
+        or "中文字幕" in cleaned
+        or "中文字幕" in fallback
+    )
+    if is_chinese_subtitle and re.fullmatch(r"[A-Z]{2,10}-\d{2,6}C", code):
+        code = code[:-1]
+    code_pattern = re.escape(code).replace(r"\-", r"[-_. ]?")
+    tail = re.sub(rf"(?i)\b{code_pattern}\b", " ", cleaned, count=1)
+    tail = re.sub(r"\s+", " ", tail).strip(" -|/,._()[]")
+    if (
+        not cleaned
+        or _looks_like_garbled_text(cleaned)
+        or _output_title_is_suspicious_value(cleaned)
+        or (tail and (_looks_like_garbled_text(tail) or _output_title_is_suspicious_value(tail)))
+    ):
+        return f"{code} 中文字幕" if is_chinese_subtitle else code
+    return ""
 
 
 def _clean_missav_title(raw_title, page_url="", fallback_title="MissAV"):
@@ -939,6 +966,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "existing output rejected",
     "download task state normalized",
     "garbled download thread title repaired",
+    "mixed garbled download thread title repaired",
+    "mixed garbled task title repaired",
     "avbebe category page retargeted",
     "avbebe rejected playable iframe stream",
     "avbebe rejected non-video stream candidate",
@@ -3505,6 +3534,9 @@ def _clean_hayav_title(raw_title, fallback_title="HayAV", page_url=""):
     cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
     cleaned = re.sub(r"\s*[-|]\s*HayAV.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
     fallback = str(fallback_title or "HayAV").strip() or "HayAV"
+    repaired = _repair_mixed_garbled_jav_title(cleaned, page_url=page_url, fallback_title=fallback)
+    if repaired:
+        return repaired
     normalized_url = _normalize_download_url(page_url)
     is_chinese_subtitle = (
         "chinese-subtitles" in normalized_url.lower()
@@ -9556,6 +9588,22 @@ class DownloadManagerApp:
             self._show_warning("下載網址是空的，已取消建立下載任務。")
             return
         short_name = str(short_name or "").strip()
+        repaired_mixed_title = _repair_mixed_garbled_jav_title(
+            short_name,
+            page_url=url,
+            fallback_title=default_short_name_for_url(url, is_mp3=is_mp3),
+        )
+        if repaired_mixed_title and repaired_mixed_title != short_name:
+            write_error_log(
+                "mixed garbled download thread title repaired",
+                Exception("mixed garbled download thread title repaired"),
+                item_id=existing_item_id or "",
+                url=url,
+                source_site=source_site or None,
+                rejected_title=short_name,
+                repaired_title=repaired_mixed_title,
+            )
+            short_name = repaired_mixed_title
         if _looks_like_garbled_text(short_name):
             repaired_short_name = _extract_jav_code(short_name) or default_short_name_for_url(url, is_mp3=is_mp3)
             write_error_log(
@@ -11219,6 +11267,22 @@ class DownloadManagerApp:
         normalized_name = re.sub(r"\s+", " ", str(name or "")).strip()
         if not normalized_name:
             return ""
+        repaired_mixed_title = _repair_mixed_garbled_jav_title(
+            normalized_name,
+            page_url=source_page or self._get_task_source_page(task, fallback_url=""),
+            fallback_title=str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip(),
+        )
+        if repaired_mixed_title and repaired_mixed_title != normalized_name:
+            write_error_log(
+                "mixed garbled task title repaired",
+                Exception("mixed garbled task title repaired"),
+                item_id=item_id,
+                source_site=source_site or _task_source_site_name(task) or None,
+                rejected_title=normalized_name,
+                repaired_title=repaired_mixed_title,
+                source_page=source_page or self._get_task_source_page(task, fallback_url=""),
+            )
+            normalized_name = repaired_mixed_title
         if _looks_like_garbled_text(normalized_name):
             current_name = re.sub(
                 r"\s+",
