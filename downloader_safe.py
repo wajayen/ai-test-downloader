@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3255"
+APP_BUILD = "20260527-3256"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1565,11 +1565,25 @@ def _normalize_state_entry(entry):
                     name = slug or parsed_name_url.netloc
             else:
                 name = ""
+    repaired_state_name = _repair_mixed_garbled_jav_title(
+        name,
+        page_url=normalized.get("source_page", "") or url,
+        fallback_title=normalized.get("filename", "") or normalized.get("resolved_url", ""),
+    )
+    if repaired_state_name:
+        name = repaired_state_name
     normalized["url"] = url
     normalized["name"] = name
     if "short_name" in normalized:
         short_name = str(normalized.get("short_name", "") or "").strip()
-        if _looks_like_garbled_text(short_name) or (short_name.count("?") / max(len(short_name), 1)) > 0.4:
+        repaired_short_name = _repair_mixed_garbled_jav_title(
+            short_name,
+            page_url=normalized.get("source_page", "") or url,
+            fallback_title=name,
+        )
+        if repaired_short_name:
+            normalized["short_name"] = repaired_short_name
+        elif _looks_like_garbled_text(short_name) or (short_name.count("?") / max(len(short_name), 1)) > 0.4:
             normalized["short_name"] = name or _extract_jav_code(short_name) or default_short_name_for_url(url)
         else:
             normalized["short_name"] = short_name
@@ -1645,17 +1659,24 @@ def _normalize_state_entry(entry):
     normalized["filename"] = str(normalized.get("filename", "") or "").strip()
     if normalized["filename"]:
         filename_stem = os.path.splitext(os.path.basename(normalized["filename"]))[0]
+        repaired_filename_title = _repair_mixed_garbled_jav_title(
+            filename_stem,
+            page_url=normalized.get("source_page", "") or normalized.get("url", ""),
+            fallback_title=normalized.get("name", ""),
+        )
         if (
             _looks_like_garbled_text(normalized["filename"])
             or _looks_like_garbled_text(filename_stem)
             or _looks_like_numeric_only_title(filename_stem)
+            or repaired_filename_title
         ):
             filename_dir = os.path.dirname(normalized["filename"])
             filename_ext = os.path.splitext(normalized["filename"])[1]
             if not filename_ext or not re.fullmatch(r"\.[A-Za-z0-9]{2,5}", filename_ext):
                 filename_ext = ".mp4"
             safe_name = _safe_output_stem(
-                _extract_jav_code(normalized["name"])
+                repaired_filename_title
+                or _extract_jav_code(normalized["name"])
                 or _extract_jav_code(normalized.get("source_page", ""))
                 or _extract_jav_code(normalized.get("url", ""))
                 or normalized.get("name", "")
