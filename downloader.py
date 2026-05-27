@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3260"
+APP_BUILD = "20260527-3270"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -74,7 +74,7 @@ ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
 MAX_DOWNLOADS_PER_DOMAIN = 3
 MAX_ACTIVE_DOWNLOADS_GLOBAL = 12
-STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 1
+STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 3
 STARTUP_RESUME_WARMUP_SECONDS = 8.0
 MAX_DOWNLOADS_PER_SOURCE_PAGE = 3
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
@@ -317,6 +317,22 @@ def _extract_jav_code(value):
         return ""
     suffix = (match.group(3) or "").upper()
     return f"{match.group(1).upper()}-{match.group(2)}{suffix}"
+
+
+def _extract_hayav_jav_code(value):
+    text = html.unescape(str(value or "")).strip()
+    if not text:
+        return ""
+    candidates = [text]
+    normalized_url = _normalize_download_url(text)
+    if normalized_url:
+        parsed = urllib.parse.urlparse(normalized_url)
+        candidates.append(parsed.path.rstrip("/").split("/")[-1])
+    for candidate in candidates:
+        match = re.search(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})(?:u?c)?\b", candidate, re.IGNORECASE)
+        if match:
+            return f"{match.group(1).upper()}-{match.group(2)}"
+    return ""
 
 
 def _repair_mixed_garbled_jav_title(raw_title, page_url="", fallback_title=""):
@@ -908,6 +924,7 @@ TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
 IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "tktube", "bilibili", "ikanbot")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
+CLOSE_WARNING_TASK_STATES = frozenset(("DOWNLOADING", "PAUSE_REQUESTED", "QUEUED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
 STOP_REQUEST_TASK_STATES = frozenset(("PAUSE_REQUESTED", "DELETE_REQUESTED"))
 RESUMABLE_TASK_STATES = frozenset(("PAUSED", "ERROR"))
@@ -967,6 +984,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls skipped huge playlist",
     "parallel hls purged invalid resume segments",
     "parallel hls skipped missing leading resume segments",
+    "parallel hls resume segments loaded",
+    "startup resume temp path prepared",
     "completed output renamed",
     "existing output rejected",
     "download task state normalized",
@@ -1008,8 +1027,12 @@ TRACE_LOG_CONTEXTS = frozenset((
     "unsupported url alternate search declined",
     "cached resolved url startup timeout",
     "cached resolved url expired",
+    "cached resolved refresh preserved resume artifacts",
     "cached media link refresh",
     "cached resolved url unavailable",
+    "close active download warning shown",
+    "close active download warning result",
+    "close active download dialog fallback",
     "hayav unavailable external embed skipped",
     "missav parser retry recovered",
     "xiaoyakankan parse start",
@@ -1621,6 +1644,36 @@ def _normalize_state_entry(entry):
     ):
         source_site = inferred_source_site
     normalized["source_site"] = source_site
+    if not normalized.get("source_page") and source_site == "hayav":
+        parsed_url = urllib.parse.urlparse(normalized.get("url", "") or "")
+        if "hayav.com" in parsed_url.netloc.lower() and "/video/" in parsed_url.path.lower():
+            normalized["source_page"] = _normalize_download_url(normalized.get("url", ""))
+    if source_site == "hayav":
+        hayav_page_url = normalized.get("source_page", "") or normalized.get("url", "")
+        normalized_name = _clean_hayav_title(
+            normalized.get("name", ""),
+            normalized.get("name", "") or normalized.get("filename", "") or hayav_page_url,
+            page_url=hayav_page_url,
+        )
+        if normalized_name and (
+            _looks_like_garbled_text(normalized.get("name", ""))
+            or _output_title_is_suspicious_value(normalized.get("name", ""))
+            or _looks_like_code_only_title(normalized.get("name", ""))
+        ):
+            normalized["name"] = normalized_name
+            name = normalized_name
+        if "short_name" in normalized:
+            normalized_short_name = _clean_hayav_title(
+                normalized.get("short_name", ""),
+                normalized.get("name", "") or hayav_page_url,
+                page_url=hayav_page_url,
+            )
+            if normalized_short_name and (
+                _looks_like_garbled_text(normalized.get("short_name", ""))
+                or _output_title_is_suspicious_value(normalized.get("short_name", ""))
+                or _looks_like_code_only_title(normalized.get("short_name", ""))
+            ):
+                normalized["short_name"] = normalized_short_name
     if source_site in ("goodav17", "hohoj"):
         jav_code = (
             _extract_jav_code(normalized.get("name", ""))
@@ -1869,6 +1922,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "ikanbot"
         if "movieffm.net" in host:
             return "movieffm"
+        if "hayav.com" in host:
+            return "hayav"
         if "gimy" in host:
             return "gimy"
         if "xiaoyakankan." in host:
@@ -3578,12 +3633,17 @@ def _clean_hayav_title(raw_title, fallback_title="HayAV", page_url=""):
         or "中文字幕" in fallback
     )
     code = _extract_jav_code(cleaned) or _extract_jav_code(fallback) or _extract_jav_code(normalized_url)
-    if code and is_chinese_subtitle and re.fullmatch(r"[A-Z]{2,10}-\d{2,6}C", code):
-        code = code[:-1]
+    if is_chinese_subtitle:
+        code = _extract_hayav_jav_code(normalized_url) or _extract_hayav_jav_code(cleaned) or _extract_hayav_jav_code(fallback) or code
+        if code and re.fullmatch(r"[A-Z]{2,10}-\d{2,6}[UC]", code):
+            code = code[:-1]
     if code:
         code_pattern = re.escape(code).replace(r"\-", r"[-_. ]?")
         tail = re.sub(rf"(?i)\b{code_pattern}\b", " ", cleaned, count=1)
         tail = re.sub(r"\s+", " ", tail).strip(" -|/,._()[]")
+        cleaned_slug = urllib.parse.urlparse(_normalize_download_url(cleaned) or "").path.rstrip("/").split("/")[-1] if _normalize_download_url(cleaned) else cleaned
+        if is_chinese_subtitle and _extract_hayav_jav_code(cleaned_slug) == code and re.fullmatch(r"[A-Za-z]{2,10}[-_. ]?\d{2,6}(?:u?c)?", cleaned_slug or "", re.IGNORECASE):
+            return f"{code} 中文字幕"
         if (
             not cleaned
             or _looks_like_garbled_text(cleaned)
@@ -4904,6 +4964,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "youtu.be",
     "dailymotion.com",
     "gimy.cc",
+    "gimy.tw",
     "gimy01.co",
     "gimy01.tv",
     "gimy.tube",
@@ -4934,6 +4995,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "youtu.be",
     "dailymotion.com",
     "gimy.cc",
+    "gimy.tw",
     "gimy01.co",
     "gimy01.tv",
     "gimy.tube",
@@ -4969,6 +5031,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "youtu.be": 12,
     "dailymotion.com": 13,
     "gimy.cc": 14,
+    "gimy.tw": 14,
     "gimy01.co": 15,
     "gimy01.tv": 16,
     "gimy.tube": 17,
@@ -6231,8 +6294,10 @@ def _video_search_result_is_downloadable(result):
         "xiaoyakankan.tv",
         "xiaoyakankan.com",
         "gimy.cc",
+        "gimy.tw",
         "gimy01.co",
         "gimy01.tv",
+        "gimy.tube",
     ):
         return True
     return site in VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS
@@ -6339,6 +6404,33 @@ def _extract_movieffm_search_results(page_text, base_url="https://www.movieffm.n
         title = html.unescape(re.sub(r"<[^>]+>", " ", str(title_match.group(1) if title_match else ""))).strip()
         seen.add(url)
         results.append({"url": url, "title": title, "snippet": "movieffm site search"})
+    return results
+
+
+def _extract_gimy_search_results(page_text, base_url="https://gimy.tw/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'href=["\']([^"\']*/voddetail/\d+\.html)["\']', text, re.IGNORECASE):
+        raw_url = html.unescape(match.group(1))
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen:
+            continue
+        window = text[max(0, match.start() - 700):match.end() + 1800]
+        if "details-info-min" not in window and "news-box-txt" not in window:
+            continue
+        title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*title=["\']([^"\']+)', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*>(.*?)</a>', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<img[^>]+(?:alt|title)=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        title = html.unescape(re.sub(r"<[^>]+>", " ", str(title_match.group(1) if title_match else ""))).strip()
+        note_match = re.search(r'<span[^>]+class=["\'][^"\']*\bnote\b[^"\']*["\'][^>]*>(.*?)</span>', window, re.IGNORECASE | re.DOTALL)
+        note = html.unescape(re.sub(r"<[^>]+>", " ", str(note_match.group(1) if note_match else ""))).strip()
+        if note and note not in title:
+            title = f"{title} {note}".strip() if title else note
+        seen.add(url)
+        results.append({"url": url, "title": title, "snippet": "gimy site search", "quality": _video_search_quality_score(title or note)})
     return results
 
 
@@ -8222,22 +8314,45 @@ class DownloadManagerApp:
             url = _normalize_download_url(_task_field_value(task, "url", "")) or ""
             if not url:
                 continue
+            is_mp3 = bool(_task_field_value(task, "is_mp3", False))
+            display_name = (
+                str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
+                or (
+                    default_short_name_for_url(
+                        (_normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url)),
+                        is_mp3=is_mp3,
+                    )
+                    if (_normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url))
+                    else str(t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目").strip()
+                )
+            )
+            source_site = _task_source_site_name(task)
+            temp_filename = str(_task_field_value(task, "temp_filename", "") or "").strip()
+            if not temp_filename and not is_mp3:
+                try:
+                    temp_filename, _resume_key, _resume_keys = self._resolve_resume_artifact_base(
+                        task,
+                        url,
+                        ext="mp4",
+                        save_dir=self.save_dir_var.get(),
+                        fallback_name=display_name or "Video",
+                    )
+                    if temp_filename:
+                        write_error_log(
+                            "startup resume temp path prepared",
+                            Exception("startup resume temp path prepared"),
+                            url=url,
+                            source_site=source_site or None,
+                            temp_filename=temp_filename,
+                        )
+                except Exception:
+                    temp_filename = ""
             pending_tasks.append(
                 (
                     url,
-                    (
-                        str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
-                        or (
-                            default_short_name_for_url(
-                                (_normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url)),
-                                is_mp3=bool(_task_field_value(task, "is_mp3", False)),
-                            )
-                            if (_normalize_download_url(_task_field_value(task, "url", "")) or _normalize_download_url(url))
-                            else str(t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目").strip()
-                        )
-                    ),
-                    bool(_task_field_value(task, "is_mp3", False)),
-                    _task_source_site_name(task),
+                    display_name,
+                    is_mp3,
+                    source_site,
                     {
                         "fallback_urls": _dedupe_download_urls(_task_field_value(task, "fallback_urls", [])),
                         "source_page": self._get_task_source_page(task),
@@ -8245,7 +8360,7 @@ class DownloadManagerApp:
                         "resolved_url_saved_at": float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                         "page_refresh_candidates": _task_gimy_page_refresh_candidates(task),
                         "filename": str(_task_field_value(task, "filename", "") or "").strip(),
-                        "temp_filename": str(_task_field_value(task, "temp_filename", "") or "").strip(),
+                        "temp_filename": temp_filename,
                     },
                 )
             )
@@ -9342,7 +9457,7 @@ class DownloadManagerApp:
             if _is_promo_title(title):
                 continue
             ep_url = urllib.parse.urljoin(base, link)
-            number_match = re.search(r"/(?:play|eps)/\d+-(\d+)(?:-(\d+))?\.html", link)
+            number_match = re.search(r"/(?:(?:vod)?play|eps)/\d+-(\d+)(?:-(\d+))?\.html", link)
             if number_match:
                 line_no = int(number_match.group(1))
                 episode_no = int(number_match.group(2)) if number_match.group(2) else line_no
@@ -9978,6 +10093,59 @@ class DownloadManagerApp:
     def _ask_warning_yesno(self, message, parent=None):
         return messagebox.askyesno(t("msg_warning") if t("msg_warning") != "msg_warning" else "警告", message, parent=parent)
 
+    def _ask_close_downloads_confirmation(self, message, active_count=0, parent=None):
+        parent = parent or self.root
+        title = t("msg_warning") if t("msg_warning") != "msg_warning" else "警告"
+        try:
+            previous_topmost = bool(parent.attributes("-topmost"))
+        except Exception:
+            previous_topmost = False
+        try:
+            try:
+                parent.deiconify()
+            except Exception:
+                pass
+            try:
+                parent.attributes("-topmost", True)
+            except Exception:
+                pass
+            try:
+                parent.lift()
+                parent.focus_force()
+                parent.bell()
+                parent.update_idletasks()
+            except Exception:
+                pass
+            write_error_log(
+                "close active download warning shown",
+                Exception("close active download warning shown"),
+                active_count=active_count,
+            )
+            confirmed = messagebox.askyesno(title, message, parent=parent)
+            write_error_log(
+                "close active download warning result",
+                Exception("close active download warning result"),
+                active_count=active_count,
+                confirmed=bool(confirmed),
+            )
+            return bool(confirmed)
+        except Exception as exc:
+            write_error_log(
+                "close active download dialog fallback",
+                exc,
+                active_count=active_count,
+            )
+            try:
+                confirmed = messagebox.askyesno(title, message)
+                return bool(confirmed)
+            except Exception:
+                return False
+        finally:
+            try:
+                parent.attributes("-topmost", previous_topmost)
+            except Exception:
+                pass
+
     def _show_error(self, message, parent=None):
         messagebox.showerror(t("msg_error") if t("msg_error") != "msg_error" else "錯誤", message, parent=parent)
 
@@ -10249,8 +10417,10 @@ class DownloadManagerApp:
             "youtu.be": "youtube",
             "dailymotion.com": "dailymotion",
             "gimy.cc": "gimy",
+            "gimy.tw": "gimy",
             "gimy01.co": "gimy",
             "gimy01.tv": "gimy",
+            "gimy.tube": "gimy",
             "javfilms.com": "javfilms",
             "18jav.tv": "18jav",
             "hohoj.tv": "hohoj",
@@ -10709,8 +10879,29 @@ class DownloadManagerApp:
 
         def fetch_gimy_results():
             collected = []
-            for domain in ("gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube"):
-                for path_marker in ("/detail", "/title", "/watch"):
+            for variant in search_variants:
+                for root_url in ("https://gimy.tw", "https://gimy.tube"):
+                    try:
+                        search_url = root_url + "/vodsearch/-------------.html?" + urllib.parse.urlencode({"wd": variant})
+                        resp = c_req.get(
+                            search_url,
+                            impersonate="chrome120",
+                            timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                            headers=_make_ytdlp_http_headers(referer=root_url + "/"),
+                        )
+                        append_unique_results(
+                            collected,
+                            _extract_gimy_search_results(
+                                _response_text_utf8(resp),
+                                base_url=str(getattr(resp, "url", search_url)),
+                            ),
+                        )
+                    except Exception:
+                        pass
+            if collected:
+                return collected
+            for domain in ("gimy.tw", "gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube"):
+                for path_marker in ("/voddetail", "/detail", "/title", "/watch"):
                     for primary in primary_queries:
                         query = f"{primary} site:{domain}{path_marker}"
                         try:
@@ -10801,7 +10992,7 @@ class DownloadManagerApp:
             results = exact_source_results
         elif jav_code:
             return []
-        pre_ranked = sorted(results[:VIDEO_SEARCH_MAX_RESULTS], key=lambda result: _video_search_result_rank(result, search_text))
+        pre_ranked = sorted(results, key=lambda result: _video_search_result_rank(result, search_text))[:VIDEO_SEARCH_MAX_RESULTS]
         enrich_targets = pre_ranked[:VIDEO_SEARCH_ENRICH_LIMIT]
         enriched = []
         if enrich_targets:
@@ -11578,12 +11769,19 @@ class DownloadManagerApp:
         for item_id, task in self.tasks.items():
             state = str(_task_field_value(task, "state", "") or "")
             proc = _task_field_value(task, "_proc", None)
-            if state in ("DOWNLOADING", "PAUSE_REQUESTED") or self._process_handle_is_running(proc):
+            if state in CLOSE_WARNING_TASK_STATES or self._process_handle_is_running(proc):
                 active_item_ids.add(item_id)
         for item_id, _task, proc in list(self._iter_active_process_handles()):
             if self._process_handle_is_running(proc):
                 active_item_ids.add(item_id)
-        return len(active_item_ids)
+        try:
+            with self._active_network_sessions_lock:
+                active_session_count = len(self._active_network_sessions)
+        except Exception:
+            active_session_count = 0
+        if active_session_count > 0 and not active_item_ids:
+            return active_session_count
+        return max(len(active_item_ids), active_session_count)
 
     def _build_persistable_task_snapshot(self):
         entries = []
@@ -16333,6 +16531,18 @@ class DownloadManagerApp:
             completed_bytes = sum(self._get_existing_file_size(_part_path(segment)) for segment in existing_segments)
             completed_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in existing_segments)
             completed_segments = len(existing_segments)
+            write_error_log(
+                "parallel hls resume segments loaded",
+                Exception("parallel HLS resume segments loaded"),
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                loaded_segments=completed_segments,
+                total_segments=total_segments,
+                loaded_bytes=completed_bytes,
+                loaded_duration_seconds=round(completed_duration, 3),
+                part_dir=part_dir,
+            )
             if total_duration > 0:
                 percent = min((completed_duration / total_duration) * 100.0, 99.0)
                 self.update_tree_many(item_id, {
@@ -18706,9 +18916,20 @@ class DownloadManagerApp:
         )
         return True
 
-    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False, failed_resolved_url="", reason_message=None):
-        if failed_resolved_url:
+    def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False, failed_resolved_url="", reason_message=None, clear_resume_artifacts=False):
+        if failed_resolved_url and clear_resume_artifacts:
             self._clear_resume_artifacts_for_url(task, failed_resolved_url, save_dir, is_mp3=is_mp3)
+        elif failed_resolved_url:
+            write_error_log(
+                "cached resolved refresh preserved resume artifacts",
+                Exception("cached resolved refresh preserved resume artifacts"),
+                item_id=item_id,
+                source_url=source_url,
+                resolved_url=failed_resolved_url,
+                source_site=_task_source_site_name(task) or None,
+                expired=bool(expired),
+                is_mp3=bool(is_mp3),
+            )
         self._set_cached_resolved_link_state(
             task,
             resolved_url="",
@@ -24063,7 +24284,7 @@ class DownloadManagerApp:
             return
         current_downloading = self._count_active_downloads_for_close_warning()
         if current_downloading > 0:
-            if self._ask_warning_yesno(t("msg_close_warn", count=current_downloading), parent=self.root):
+            if self._ask_close_downloads_confirmation(t("msg_close_warn", count=current_downloading), active_count=current_downloading, parent=self.root):
                 try:
                     self._prepare_shutdown_resume_state()
                     self._wait_for_shutdown_downloads()
