@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3270"
+APP_BUILD = "20260527-3280"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -636,12 +636,12 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 32,
-    "18av": 24,
+    "18av": 32,
     "avbebe": 24,
     "gimy": 24,
     "goodav17": 24,
     "hayav": 32,
-    "hohoj": 24,
+    "hohoj": 40,
     "jable": 24,
     "missav": 24,
     "njav": 24,
@@ -666,9 +666,9 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "taopianplay1.com": 24,
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
-    "ggjav.com": 24,
+    "ggjav.com": 40,
     "surrit.com": 24,
-    "streamfastpro": 24,
+    "streamfastpro": 32,
     "mushroomtrack.com": 24,
     "hls.sb-cd.com": 24,
     "cdn77.org": 24,
@@ -683,10 +683,14 @@ PARALLEL_HLS_HOST_WORKER_BUDGET = 48
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "cdn-centaurus.com": 72,
     "premilkyway.com": 72,
+    "ggjav.com": 120,
+    "mxcontent.net": 96,
     "surrit.com": 60,
+    "streamfastpro": 96,
     "upload18.org": 72,
 }
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
+PARALLEL_HLS_IN_FLIGHT_MULTIPLIER = 4
 PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS = 1800
 PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS_BY_HOST = {
     "surrit.com": 1500,
@@ -739,7 +743,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "av01": 24,
     "gimy": 32,
     "goodav17": 24,
-    "hohoj": 20,
+    "hohoj": 32,
     "ikanbot": 24,
     "jable": 10,
     "missav": 24,
@@ -768,7 +772,7 @@ YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "bilibili": 12,
     "facebook": 8,
     "gimy": 24,
-    "hohoj": 18,
+    "hohoj": 24,
     "instagram": 8,
     "missav": 24,
     "movieffm": 24,
@@ -833,7 +837,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "youtube": 20,
 }
 HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
-    "mxcontent.net": 8,
+    "mxcontent.net": 16,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
 HTTP_STREAM_CHUNK_SIZE = 8 * 1024 * 1024
@@ -3512,7 +3516,11 @@ def _clean_18av_title(raw_title):
     cleaned = re.sub(r"\s*[-|,]\s*18AV.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*18AV在線H成人影片.*$", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*,\s*(?:H動畫|H動漫|裏番).*$", "", cleaned, flags=re.IGNORECASE)
-    return cleaned.strip(" -|/,") or str(raw_title or "").strip()
+    cleaned = cleaned.strip(" -|/,")
+    code = _extract_jav_code(raw_title)
+    if _looks_like_garbled_text(cleaned) or (code and re.search(r"[ÃÂÆæÈèÇçÅå]", cleaned)):
+        return code
+    return cleaned or str(raw_title or "").strip()
 
 
 def _is_18av_preview_media_url(url):
@@ -4977,6 +4985,10 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "av01.media",
     "ikanbot.com",
     "avhd101.com",
+    "18av.mm-cg.com",
+    "99itv.net",
+    "hanime1.me",
+    "hanimeone.me",
 )
 
 VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
@@ -5013,6 +5025,10 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "av01.media",
     "ikanbot.com",
     "avhd101.com",
+    "18av.mm-cg.com",
+    "99itv.net",
+    "hanime1.me",
+    "hanimeone.me",
 )
 
 VIDEO_SEARCH_SITE_PRIORITY = {
@@ -5042,11 +5058,15 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "ikanbot.com": 26,
     "goodav17.com": 30,
     "avhd101.com": 35,
+    "99itv.net": 36,
+    "hanime1.me": 37,
+    "hanimeone.me": 37,
     "njavtv.com": 40,
     "njav.com": 45,
     "missav": 50,
     "javfilms.com": 60,
     "18jav.tv": 70,
+    "18av.mm-cg.com": 75,
     "hohoj.tv": 80,
 }
 
@@ -5057,6 +5077,7 @@ VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS = 8
 VIDEO_SEARCH_SOURCE_WORKERS = 12
 VIDEO_SEARCH_ENRICH_WORKERS = 8
 VIDEO_SEARCH_ENRICH_LIMIT = min(8, VIDEO_SEARCH_MAX_RESULTS)
+VIDEO_SEARCH_FAST_STAGE_TARGET_RESULTS = 3
 
 VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS = (
     "youtube.com",
@@ -6266,6 +6287,10 @@ def _video_search_result_is_downloadable(result):
         return False
     if _is_known_dead_external_fallback_url(url) or _is_known_ad_media_url(url):
         return False
+    parsed_url = urllib.parse.urlsplit(url)
+    lowered_path = parsed_url.path.lower()
+    if re.search(r"/(?:search|vodsearch)(?:/|$)", lowered_path, re.IGNORECASE):
+        return False
     source_site = _video_search_site_for_url(url)
     if _is_slow_external_fallback_url_for_site(url, source_site):
         return False
@@ -6276,17 +6301,27 @@ def _video_search_result_is_downloadable(result):
         return True
     site = source_site
     if site == "iq.com":
-        path = urllib.parse.urlsplit(url).path.lower()
+        path = lowered_path
         if "/play/best-episode" in path or not re.search(r"/play/.+-[a-z0-9]{8,}", path, re.IGNORECASE):
             return False
     if site in (
         "anime1.me",
         "anime1.pw",
+        "av01.media",
+        "avbebe.com",
         "avjoy.me",
+        "avhd101.com",
+        "bilibili.com",
+        "dailymotion.com",
+        "goodav17.com",
         "hohoj.tv",
         "hayav.com",
+        "ikanbot.com",
+        "javfilms.com",
+        "missav",
         "movieffm.net",
         "njav.com",
+        "njavtv.com",
         "nnyy.in",
         "tktube.com",
         "yfsp.tv",
@@ -6298,6 +6333,11 @@ def _video_search_result_is_downloadable(result):
         "gimy01.co",
         "gimy01.tv",
         "gimy.tube",
+        "18jav.tv",
+        "18av.mm-cg.com",
+        "99itv.net",
+        "hanime1.me",
+        "hanimeone.me",
     ):
         return True
     return site in VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS
@@ -6488,6 +6528,93 @@ def _extract_iq_search_results(page_text, base_url="https://www.iq.com/"):
         seen.add(url)
         results.append({"url": url, "title": title, "snippet": "iq.com site search"})
     return results
+
+
+def _extract_generic_site_search_results(page_text, base_url, path_markers=(), snippet="site search"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    marker_tuple = tuple(str(marker or "").lower() for marker in path_markers if str(marker or "").strip())
+    if not marker_tuple:
+        return results
+    for match in re.finditer(r'href=["\']([^"\']+)["\']', text, re.IGNORECASE):
+        raw_url = html.unescape(match.group(1))
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen:
+            continue
+        parsed = urllib.parse.urlsplit(url)
+        if re.search(r"/(?:search|vodsearch)(?:/|$)", parsed.path.lower(), re.IGNORECASE):
+            continue
+        path_and_query = (parsed.path + ("?" + parsed.query if parsed.query else "")).lower()
+        if not any(marker in path_and_query for marker in marker_tuple):
+            continue
+        window = text[max(0, match.start() - 800):match.end() + 1800]
+        title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*(?:title|alt)=["\']([^"\']+)', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<a[^>]+(?:title|alt)=["\']([^"\']+)["\'][^>]+href=["\']' + re.escape(match.group(1)) + r'["\']', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<img[^>]+(?:alt|title)=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*>(.*?)</a>', window, re.IGNORECASE | re.DOTALL)
+        title = html.unescape(re.sub(r"<[^>]+>", " ", str(title_match.group(1) if title_match else ""))).strip()
+        title = re.sub(r"\s+", " ", title).strip()
+        seen.add(url)
+        results.append({"url": url, "title": title, "snippet": snippet, "quality": _video_search_quality_score(title or url)})
+    return results
+
+
+def _extract_missav_search_results(page_text, base_url="https://missav.ws/"):
+    return _extract_generic_site_search_results(
+        page_text,
+        base_url,
+        path_markers=("/dm", "/en/", "/cn/", "/ja/", "/ko/", "/ms/", "/th/", "/de/", "/fr/", "/vi/", "/id/", "/fil/", "/pt/"),
+        snippet="missav site search",
+    )
+
+
+def _extract_njav_search_results(page_text, base_url="https://www.njav.com/tw/"):
+    return _extract_generic_site_search_results(
+        page_text,
+        base_url,
+        path_markers=("/xvideos/",),
+        snippet="njav site search",
+    )
+
+
+def _extract_avbebe_search_results(page_text, base_url="https://avbebe.com/"):
+    return _extract_generic_site_search_results(
+        page_text,
+        base_url,
+        path_markers=("/archives/",),
+        snippet="avbebe site search",
+    )
+
+
+def _extract_goodav_search_results(page_text, base_url="https://goodav17.com/"):
+    return _extract_generic_site_search_results(
+        page_text,
+        base_url,
+        path_markers=("/html/", "/vr_html/"),
+        snippet="goodav17 site search",
+    )
+
+
+def _extract_18jav_search_results(page_text, base_url="https://18jav.tv/"):
+    return _extract_generic_site_search_results(
+        page_text,
+        base_url,
+        path_markers=("/videos/",),
+        snippet="18jav site search",
+    )
+
+
+def _extract_javfilms_search_results(page_text, base_url="https://javfilms.com/zh/"):
+    return _extract_generic_site_search_results(
+        page_text,
+        base_url,
+        path_markers=("/video/", "/zh/video/"),
+        snippet="javfilms site search",
+    )
 
 
 def _extract_xiaoyakankan_play_urls(page_text, base_url):
@@ -9161,7 +9288,10 @@ class DownloadManagerApp:
                     headers=_make_site_root_headers(site_root),
                 )
                 fallback_title = default_short_name_for_url(new_url, is_mp3=is_mp3) or "18AV"
-                page_title = _clean_18av_title(_extract_html_title(resp.text, fallback_title))
+                page_text = _response_text_utf8(resp)
+                page_title = _clean_18av_title(_extract_html_title(page_text, fallback_title))
+                if _output_title_is_suspicious_value(page_title):
+                    page_title = _extract_jav_code(new_url) or fallback_title
                 self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="18av")
             except Exception as exc:
                 write_error_log("18av parse failure", exc, url=new_url)
@@ -10007,7 +10137,7 @@ class DownloadManagerApp:
             sidecars = [filename + ".resume", filename + ".merged", filename + ".progress.json"]
             root, ext = os.path.splitext(filename)
             if ext:
-                sidecars.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
+                sidecars.extend([f"{root}.resume{ext}", f"{root}.merged{ext}", f"{filename}.progress.json.bak"])
             for sidecar in sidecars:
                 try:
                     if os.path.isfile(sidecar):
@@ -10429,6 +10559,10 @@ class DownloadManagerApp:
             "av01.media": "av01",
             "ikanbot.com": "ikanbot",
             "avhd101.com": "avhd101",
+            "18av.mm-cg.com": "18av",
+            "99itv.net": "99itv",
+            "hanime1.me": "hanime1",
+            "hanimeone.me": "hanime1",
         }.get(site, "missav" if site == "missav" else site.replace(".com", "").replace(".tv", ""))
 
     def _enrich_video_search_result(self, result, query_text):
@@ -10762,6 +10896,7 @@ class DownloadManagerApp:
                         "quality": 720,
                     }
                 )
+                return collected
             for primary in primary_queries:
                 for query in (f'"{primary}" "hayav.com/video/chinese-subtitles"', f'"{primary}" site:hayav.com/video/chinese-subtitles'):
                     try:
@@ -10825,6 +10960,8 @@ class DownloadManagerApp:
 
         def fetch_anime1_results():
             collected = []
+            if jav_code:
+                return collected
             for variant in search_variants:
                 try:
                     anime1_search_url = "https://anime1.me/?" + urllib.parse.urlencode({"s": variant})
@@ -10864,6 +11001,8 @@ class DownloadManagerApp:
                     pass
             if collected:
                 return collected
+            if jav_code:
+                return collected
             for domain in ("anime1.me", "anime1.pw"):
                 for primary in primary_queries:
                     query = f"{primary} site:{domain}/category"
@@ -10900,6 +11039,8 @@ class DownloadManagerApp:
                         pass
             if collected:
                 return collected
+            if jav_code:
+                return collected
             for domain in ("gimy.tw", "gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube"):
                 for path_marker in ("/voddetail", "/detail", "/title", "/watch"):
                     for primary in primary_queries:
@@ -10914,11 +11055,181 @@ class DownloadManagerApp:
                             pass
             return collected
 
+        def fetch_site_search_results(search_specs):
+            collected = []
+            for spec in search_specs:
+                root_url = spec.get("root_url", "")
+                referer = spec.get("referer") or root_url + "/"
+                extractor = spec.get("extractor") or (lambda text, base_url: [])
+                for variant in search_variants:
+                    try:
+                        search_url = spec["url"](variant)
+                        resp = c_req.get(
+                            search_url,
+                            impersonate="chrome120",
+                            timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                            headers=_make_ytdlp_http_headers(referer=referer),
+                        )
+                        append_unique_results(
+                            collected,
+                            extractor(_response_text_utf8(resp), str(getattr(resp, "url", search_url))),
+                        )
+                    except Exception:
+                        continue
+            return collected
+
+        def fetch_avbebe_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://avbebe.com",
+                        "url": lambda variant: "https://avbebe.com/?" + urllib.parse.urlencode({"s": variant}),
+                        "extractor": _extract_avbebe_search_results,
+                    }
+                ]
+            )
+
+        def fetch_missav_results():
+            collected = []
+            for variant in search_variants:
+                try:
+                    search_url = "https://missav.ws/search/" + urllib.parse.quote(variant.strip("/"))
+                    resp = c_req.get(
+                        search_url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer="https://missav.ws/"),
+                    )
+                    append_unique_results(collected, _extract_missav_search_results(_response_text_utf8(resp), str(getattr(resp, "url", search_url))))
+                except Exception:
+                    pass
+            if jav_code:
+                slug = jav_code.lower()
+                collected.extend(
+                    [
+                        {"url": f"https://missav.ws/{slug}", "title": f"{jav_code} MissAV", "snippet": "missav jav code pattern", "quality": 720},
+                        {"url": f"https://missav.ws/{slug}-chinese-subtitle", "title": f"{jav_code} MissAV 中文字幕", "snippet": "missav jav code pattern", "quality": 720},
+                    ]
+                )
+            return collected
+
+        def fetch_njav_results():
+            collected = []
+            for variant in search_variants:
+                for search_url in (
+                    "https://www.njav.com/tw/search?" + urllib.parse.urlencode({"q": variant}),
+                    "https://www.njav.com/en/search?" + urllib.parse.urlencode({"q": variant}),
+                ):
+                    try:
+                        resp = c_req.get(
+                            search_url,
+                            impersonate="chrome120",
+                            timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                            headers=_make_ytdlp_http_headers(referer="https://www.njav.com/tw/"),
+                        )
+                        append_unique_results(collected, _extract_njav_search_results(_response_text_utf8(resp), str(getattr(resp, "url", search_url))))
+                    except Exception:
+                        pass
+            if jav_code:
+                slug = jav_code.lower()
+                collected.extend(
+                    [
+                        {"url": f"https://www.njav.com/tw/xvideos/{slug}", "title": f"{jav_code} NJAV", "snippet": "njav jav code pattern", "quality": 720},
+                        {"url": f"https://www.njav.com/tw/xvideos/{slug}-uncensored-leak", "title": f"{jav_code} NJAV uncensored leak", "snippet": "njav jav code pattern", "quality": 720},
+                    ]
+                )
+            return collected
+
+        def fetch_goodav_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://goodav17.com",
+                        "url": lambda variant: "https://goodav17.com/?" + urllib.parse.urlencode({"s": variant}),
+                        "extractor": _extract_goodav_search_results,
+                    }
+                ]
+            )
+
+        def fetch_18jav_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://18jav.tv",
+                        "url": lambda variant: "https://18jav.tv/search?" + urllib.parse.urlencode({"keyword": variant}),
+                        "extractor": _extract_18jav_search_results,
+                    }
+                ]
+            )
+
+        def fetch_javfilms_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://javfilms.com",
+                        "referer": "https://javfilms.com/zh/",
+                        "url": lambda variant: "https://javfilms.com/zh/search/" + urllib.parse.quote(variant.strip("/")),
+                        "extractor": _extract_javfilms_search_results,
+                    }
+                ]
+            )
+
+        def fetch_ikanbot_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://www1.ikanbot.com",
+                        "url": lambda variant: "https://www1.ikanbot.com/vodsearch/-------------.html?" + urllib.parse.urlencode({"wd": variant}),
+                        "extractor": lambda text, base_url: _extract_generic_site_search_results(text, base_url, path_markers=("/voddetail/", "/play/"), snippet="ikanbot site search"),
+                    }
+                ]
+            )
+
+        def fetch_yfsp_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://www.yfsp.tv",
+                        "url": lambda variant: "https://www.yfsp.tv/search/-------------.html?" + urllib.parse.urlencode({"wd": variant}),
+                        "extractor": lambda text, base_url: _extract_generic_site_search_results(text, base_url, path_markers=("/play/", "/voddetail/", "/detail/"), snippet="yfsp site search"),
+                    }
+                ]
+            )
+
+        def fetch_supported_site_engine_results():
+            collected = []
+            engine_targets = (
+                ("av01.media", ("/tw/video/", "/video/")),
+                ("avhd101.com", ("/search", "/vodplay", "/video")),
+                ("njavtv.com", ("/",)),
+                ("18av.mm-cg.com", ("/zh/",)),
+                ("99itv.net", ("/detail", "/voddetail", "/vodplay")),
+                ("hanime1.me", ("/watch",)),
+                ("hanimeone.me", ("/watch",)),
+                ("bilibili.com", ("/video/",)),
+                ("dailymotion.com", ("/video/",)),
+            )
+            for domain, path_markers in engine_targets:
+                for primary in primary_queries:
+                    for path_marker in path_markers:
+                        query = f"{primary} site:{domain}{path_marker}"
+                        try:
+                            append_unique_results(collected, fetch_duckduckgo_results(query, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS))
+                        except Exception:
+                            pass
+                        if len(collected) >= VIDEO_SEARCH_MAX_RESULTS:
+                            break
+                    if len(collected) >= VIDEO_SEARCH_MAX_RESULTS:
+                        break
+            return collected
+
         def collect_parallel(search_jobs, timeout_seconds):
             collected = []
             if not search_jobs:
                 return collected
-            with DaemonThreadPoolExecutor(max_workers=min(len(search_jobs), VIDEO_SEARCH_SOURCE_WORKERS)) as executor:
+            executor = DaemonThreadPoolExecutor(max_workers=min(len(search_jobs), VIDEO_SEARCH_SOURCE_WORKERS))
+            future_map = {}
+            try:
                 future_map = {executor.submit(job): label for label, job in search_jobs}
                 try:
                     for future in concurrent.futures.as_completed(future_map, timeout=timeout_seconds):
@@ -10930,6 +11241,8 @@ class DownloadManagerApp:
                     pass
                 for future in future_map:
                     future.cancel()
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
             return collected
 
         site_query = " OR ".join(f"site:{site}" for site in VIDEO_SEARCH_SUPPORTED_SITE_MARKERS)
@@ -10937,24 +11250,100 @@ class DownloadManagerApp:
             (f"google:{primary}", lambda q=primary: fetch_google_results(f"{q} ({site_query})"))
             for primary in primary_queries
         ]
-        source_jobs = [
+        common_fast_jobs = [
             ("known", lambda: _known_video_search_seed_results(search_text)),
-            ("tktube", fetch_tktube_results),
-            ("anime1", fetch_anime1_results),
-            ("avjoy", fetch_avjoy_results),
-            ("hohoj", fetch_hohoj_results),
-            ("hayav", fetch_hayav_results),
-            ("movieffm", fetch_movieffm_results),
-            ("nnyy", fetch_nnyy_results),
-            ("iq", fetch_iq_results),
-            ("gimy", fetch_gimy_results),
-            ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
-            ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
-        ] + google_jobs
+        ]
+        cjk_query = _video_search_text_has_cjk(search_text)
+        if jav_code:
+            fast_source_jobs = common_fast_jobs + [
+                ("movieffm", fetch_movieffm_results),
+                ("hayav", fetch_hayav_results),
+                ("missav", fetch_missav_results),
+                ("njav", fetch_njav_results),
+                ("avjoy", fetch_avjoy_results),
+                ("tktube", fetch_tktube_results),
+                ("hohoj", fetch_hohoj_results),
+            ]
+            slow_source_jobs = [
+                ("avbebe", fetch_avbebe_results),
+                ("goodav17", fetch_goodav_results),
+                ("18jav", fetch_18jav_results),
+                ("javfilms", fetch_javfilms_results),
+                ("gimy", fetch_gimy_results),
+                ("ikanbot", fetch_ikanbot_results),
+                ("yfsp", fetch_yfsp_results),
+                ("nnyy", fetch_nnyy_results),
+                ("iq", fetch_iq_results),
+            ] + google_jobs
+        elif cjk_query:
+            fast_source_jobs = common_fast_jobs + [
+                ("movieffm", fetch_movieffm_results),
+                ("gimy", fetch_gimy_results),
+                ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
+                ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
+            ]
+            slow_source_jobs = [
+                ("anime1", fetch_anime1_results),
+                ("iq", fetch_iq_results),
+                ("nnyy", fetch_nnyy_results),
+                ("yfsp", fetch_yfsp_results),
+                ("ikanbot", fetch_ikanbot_results),
+                ("tktube", fetch_tktube_results),
+                ("avjoy", fetch_avjoy_results),
+                ("hohoj", fetch_hohoj_results),
+                ("hayav", fetch_hayav_results),
+                ("missav", fetch_missav_results),
+                ("njav", fetch_njav_results),
+                ("avbebe", fetch_avbebe_results),
+                ("goodav17", fetch_goodav_results),
+                ("18jav", fetch_18jav_results),
+                ("javfilms", fetch_javfilms_results),
+            ] + google_jobs
+        else:
+            fast_source_jobs = common_fast_jobs + [
+                ("movieffm", fetch_movieffm_results),
+                ("gimy", fetch_gimy_results),
+                ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
+                ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
+                ("iq", fetch_iq_results),
+            ]
+            slow_source_jobs = [
+                ("anime1", fetch_anime1_results),
+                ("yfsp", fetch_yfsp_results),
+                ("ikanbot", fetch_ikanbot_results),
+                ("tktube", fetch_tktube_results),
+                ("avjoy", fetch_avjoy_results),
+                ("hohoj", fetch_hohoj_results),
+                ("hayav", fetch_hayav_results),
+                ("missav", fetch_missav_results),
+                ("njav", fetch_njav_results),
+                ("avbebe", fetch_avbebe_results),
+                ("goodav17", fetch_goodav_results),
+                ("18jav", fetch_18jav_results),
+                ("javfilms", fetch_javfilms_results),
+                ("nnyy", fetch_nnyy_results),
+            ] + google_jobs
         results = collect_parallel(
-            source_jobs,
+            fast_source_jobs,
             timeout_seconds=max(VIDEO_SEARCH_SITE_TIMEOUT_SECONDS, VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS) + 2,
         )
+        exact_fast_results = [result for result in results if _video_search_matches_query(result, search_text)]
+        if len(exact_fast_results) < VIDEO_SEARCH_FAST_STAGE_TARGET_RESULTS:
+            append_unique_results(
+                results,
+                collect_parallel(
+                    slow_source_jobs,
+                    timeout_seconds=max(VIDEO_SEARCH_SITE_TIMEOUT_SECONDS, VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS) + 2,
+                ),
+            )
+        if not results:
+            append_unique_results(
+                results,
+                collect_parallel(
+                    [("engine-supported", fetch_supported_site_engine_results)],
+                    timeout_seconds=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS + 2,
+                ),
+            )
         if jav_code:
             exact_queries = [
                 query
@@ -10970,7 +11359,7 @@ class DownloadManagerApp:
                     f'"{primary}" "missav"',
                 )
             ]
-            if len(results) < VIDEO_SEARCH_MAX_RESULTS or not any(_video_search_matches_query(result, search_text) for result in results):
+            if not any(_video_search_matches_query(result, search_text) for result in results):
                 exact_jobs = []
                 for exact_query in exact_queries:
                     exact_jobs.append((f"ddg:{exact_query}", lambda q=exact_query: fetch_duckduckgo_results(q)))
@@ -10993,10 +11382,31 @@ class DownloadManagerApp:
         elif jav_code:
             return []
         pre_ranked = sorted(results, key=lambda result: _video_search_result_rank(result, search_text))[:VIDEO_SEARCH_MAX_RESULTS]
-        enrich_targets = pre_ranked[:VIDEO_SEARCH_ENRICH_LIMIT]
+        def should_enrich_search_result(result):
+            if not result:
+                return False
+            if result.get("candidate_urls") or result.get("playlist_entries"):
+                return False
+            site = _video_search_site_for_url(result.get("url", ""))
+            title = str(result.get("title") or "").strip()
+            snippet = str(result.get("snippet") or "").strip().lower()
+            if not title:
+                return True
+            if site in VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS:
+                return True
+            if "google" in snippet or "duckduckgo" in snippet:
+                return True
+            return False
+
+        enrich_window = pre_ranked[:VIDEO_SEARCH_ENRICH_LIMIT]
+        enrich_targets = [result for result in enrich_window if should_enrich_search_result(result)]
+        enrich_target_ids = {id(result) for result in enrich_targets}
         enriched = []
+        enriched.extend(result for result in enrich_window if id(result) not in enrich_target_ids)
         if enrich_targets:
-            with DaemonThreadPoolExecutor(max_workers=min(len(enrich_targets), VIDEO_SEARCH_ENRICH_WORKERS)) as executor:
+            executor = DaemonThreadPoolExecutor(max_workers=min(len(enrich_targets), VIDEO_SEARCH_ENRICH_WORKERS))
+            future_map = {}
+            try:
                 future_map = {
                     executor.submit(self._enrich_video_search_result, result, search_text): result
                     for result in enrich_targets
@@ -11013,6 +11423,8 @@ class DownloadManagerApp:
                     if not future.done():
                         future.cancel()
                         enriched.append(original)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
         enriched.extend(pre_ranked[VIDEO_SEARCH_ENRICH_LIMIT:VIDEO_SEARCH_MAX_RESULTS])
         enriched = [result for result in enriched if _video_search_site_for_url(result.get("url", ""))]
         enriched = [result for result in enriched if _video_search_result_is_downloadable(result)]
@@ -11765,13 +12177,23 @@ class DownloadManagerApp:
             return True
 
     def _count_active_downloads_for_close_warning(self):
+        try:
+            visible_item_ids = set(self.tree.get_children())
+        except Exception:
+            visible_item_ids = set(self.tasks.keys())
+        if not visible_item_ids:
+            return 0
         active_item_ids = set()
         for item_id, task in self.tasks.items():
+            if item_id not in visible_item_ids:
+                continue
             state = str(_task_field_value(task, "state", "") or "")
             proc = _task_field_value(task, "_proc", None)
             if state in CLOSE_WARNING_TASK_STATES or self._process_handle_is_running(proc):
                 active_item_ids.add(item_id)
         for item_id, _task, proc in list(self._iter_active_process_handles()):
+            if item_id not in visible_item_ids:
+                continue
             if self._process_handle_is_running(proc):
                 active_item_ids.add(item_id)
         try:
@@ -11779,8 +12201,8 @@ class DownloadManagerApp:
                 active_session_count = len(self._active_network_sessions)
         except Exception:
             active_session_count = 0
-        if active_session_count > 0 and not active_item_ids:
-            return active_session_count
+        if not active_item_ids:
+            return 0
         return max(len(active_item_ids), active_session_count)
 
     def _build_persistable_task_snapshot(self):
@@ -12260,6 +12682,7 @@ class DownloadManagerApp:
         _set_task_aux_fields(task, filename=clean_output_path)
         self._set_task_named_column_text(item_id, "name", os.path.basename(str(clean_output_path or "").strip()) or "")
         self._update_task_state_entry(task, filename=clean_output_path)
+        self._remove_output_progress_sidecars(clean_output_path)
 
     def _unique_output_path_for_retarget(self, desired_path):
         desired_path = str(desired_path or "").strip()
@@ -13509,13 +13932,27 @@ class DownloadManagerApp:
         for artifact_path in paths:
             if not artifact_path:
                 continue
-            try:
-                if os.path.isdir(artifact_path) and not os.path.islink(artifact_path):
-                    shutil.rmtree(artifact_path, ignore_errors=True)
-                elif os.path.exists(artifact_path):
-                    os.remove(artifact_path)
-            except OSError:
-                continue
+            cleanup_paths = [artifact_path]
+            if str(artifact_path).lower().endswith(".json"):
+                cleanup_paths.append(f"{artifact_path}.bak")
+            elif str(artifact_path).lower().endswith(".json.bak"):
+                cleanup_paths.append(str(artifact_path)[:-4])
+            for cleanup_path in cleanup_paths:
+                if not cleanup_path:
+                    continue
+                try:
+                    if os.path.isdir(cleanup_path) and not os.path.islink(cleanup_path):
+                        shutil.rmtree(cleanup_path, ignore_errors=True)
+                    elif os.path.exists(cleanup_path):
+                        os.remove(cleanup_path)
+                except OSError:
+                    continue
+
+    def _remove_output_progress_sidecars(self, output_path):
+        clean_output_path = str(output_path or "").strip()
+        if not clean_output_path:
+            return
+        self._remove_artifact_paths(f"{clean_output_path}.progress.json")
 
     def _near_complete_resume_threshold_seconds(self, total_duration):
         try:
@@ -15273,30 +15710,12 @@ class DownloadManagerApp:
                 remaining_end = total_size - 1
                 remaining_size = max(total_size - downloaded, 0)
                 source_site = _task_source_site_name(task)
-                part_count = int(
-                    HTTP_MULTIPART_PART_COUNT_BY_SITE.get(
-                        source_site,
-                        HTTP_MULTIPART_PART_COUNT_DEFAULT,
-                    )
-                )
-                if remaining_size and remaining_size < 16 * 1024 * 1024:
-                    part_count = min(part_count, 4)
-                elif remaining_size and remaining_size < 64 * 1024 * 1024:
-                    part_count = min(part_count, 12)
                 download_host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
-                for host_marker, host_part_count in HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER.items():
-                    if host_marker in download_host:
-                        part_count = min(part_count, int(host_part_count))
-                        break
-                http_host_active_downloads = self._active_hls_downloads_for_host(download_host)
-                http_host_worker_budget = self._hls_host_worker_budget(download_host)
-                if http_host_active_downloads > 1:
-                    per_task_part_budget = max(
-                        int(PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK),
-                        int(http_host_worker_budget) // max(http_host_active_downloads, 1),
-                    )
-                    part_count = min(part_count, per_task_part_budget)
-                part_count = min(max(2, part_count), 32)
+                part_count, http_host_active_downloads, http_host_worker_budget, http_host_marker = self._http_multipart_part_count_for_transfer(
+                    source_site,
+                    download_host,
+                    remaining_size,
+                )
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
                 write_error_log(
                     "http multipart download started",
@@ -15306,6 +15725,7 @@ class DownloadManagerApp:
                     source_site=source_site,
                     part_count=part_count,
                     download_host=download_host,
+                    host_marker=http_host_marker or None,
                     host_active_downloads=http_host_active_downloads,
                     host_worker_budget=http_host_worker_budget,
                     remaining_size=remaining_size,
@@ -15739,6 +16159,37 @@ class DownloadManagerApp:
             if any(urllib.parse.urlsplit(_normalize_download_url(candidate) or "").netloc.lower() == normalized_host for candidate in candidates):
                 count += 1
         return max(count, 1)
+
+    def _http_multipart_part_count_for_transfer(self, source_site, download_host, remaining_size):
+        site = str(source_site or "").strip().lower()
+        host = str(download_host or "").strip().lower()
+        try:
+            part_count = int(HTTP_MULTIPART_PART_COUNT_BY_SITE.get(site, HTTP_MULTIPART_PART_COUNT_DEFAULT))
+        except Exception:
+            part_count = int(HTTP_MULTIPART_PART_COUNT_DEFAULT)
+        try:
+            remaining = max(int(remaining_size or 0), 0)
+        except Exception:
+            remaining = 0
+        if remaining and remaining < 16 * 1024 * 1024:
+            part_count = min(part_count, 4)
+        elif remaining and remaining < 64 * 1024 * 1024:
+            part_count = min(part_count, 12)
+        host_marker = ""
+        for marker, host_part_count in HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER.items():
+            if marker in host:
+                host_marker = marker
+                part_count = min(part_count, int(host_part_count))
+                break
+        host_active_downloads = self._active_hls_downloads_for_host(host)
+        host_worker_budget = self._hls_host_worker_budget(host)
+        if host_active_downloads > 1:
+            per_task_part_budget = max(
+                int(PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK),
+                int(host_worker_budget) // max(host_active_downloads, 1),
+            )
+            part_count = min(part_count, per_task_part_budget)
+        return min(max(2, int(part_count)), 32), host_active_downloads, host_worker_budget, host_marker
 
     def _should_try_parallel_hls_segments(self, url, task):
         source_site = _task_source_site_name(task) or _infer_source_site_from_task_urls(
@@ -16210,13 +16661,16 @@ class DownloadManagerApp:
                         os.remove(temp_part_path)
                 except OSError:
                     pass
+                if attempt >= retry_count - 1:
+                    break
                 if is_google_segment:
                     delay = PARALLEL_HLS_GOOGLE_RETRY_DELAYS[min(attempt, len(PARALLEL_HLS_GOOGLE_RETRY_DELAYS) - 1)]
-                    time.sleep(delay)
                 elif self._parallel_hls_segment_error_is_rate_limited(exc):
-                    time.sleep(min(2.0 * (attempt + 1), 12.0))
+                    delay = min(2.0 * (attempt + 1), 12.0)
                 else:
-                    time.sleep(min(0.5 * (attempt + 1), 3.0))
+                    delay = min(0.5 * (attempt + 1), 3.0)
+                if stop_event.wait(delay) or self._shutdown_started:
+                    raise StopDownloadException("stop requested")
         raise last_exc or Exception("parallel HLS segment download failed")
 
     def _remux_parallel_hls_transport_stream(self, ffmpeg_path, source_ts_path, out_path):
@@ -16612,9 +17066,41 @@ class DownloadManagerApp:
         try:
             remux_strategy = "concat"
             with DaemonThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = [executor.submit(_download_one, segment) for segment in pending_segments]
-                for future in concurrent.futures.as_completed(futures):
-                    future.result()
+                pending_iter = iter(pending_segments)
+                in_flight = set()
+                in_flight_limit = max(
+                    int(worker_count),
+                    int(worker_count) * int(PARALLEL_HLS_IN_FLIGHT_MULTIPLIER),
+                )
+
+                def _submit_next_segment():
+                    try:
+                        next_segment = next(pending_iter)
+                    except StopIteration:
+                        return False
+                    in_flight.add(executor.submit(_download_one, next_segment))
+                    return True
+
+                try:
+                    for _ in range(min(in_flight_limit, len(pending_segments))):
+                        if not _submit_next_segment():
+                            break
+                    while in_flight:
+                        done, in_flight = concurrent.futures.wait(
+                            in_flight,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        for future in done:
+                            future.result()
+                        if stop_event.is_set() or self._shutdown_started:
+                            raise StopDownloadException("stop requested")
+                        while len(in_flight) < in_flight_limit and _submit_next_segment():
+                            pass
+                except Exception:
+                    stop_event.set()
+                    for future in in_flight:
+                        future.cancel()
+                    raise
             ordered_part_paths = []
             for segment in segments:
                 part_path = _part_path(segment)
@@ -18533,7 +19019,25 @@ class DownloadManagerApp:
     def _flush_task_resume_artifacts(self, task):
         primary_value = str(_task_field_value(task, "temp_filename") or "").strip()
         secondary_value = str(_task_field_value(task, "filename") or "").strip()
-        temp_path = primary_value or secondary_value or ""
+        temp_path = primary_value
+        if not temp_path:
+            try:
+                source_url = (
+                    self._get_task_resolved_url(task, fallback_url=_normalize_download_url(_task_field_value(task, "url", "")) or "")
+                    or _normalize_download_url(_task_field_value(task, "url", ""))
+                    or _normalize_download_url(_task_field_value(task, "source_page", ""))
+                    or ""
+                )
+                ext = os.path.splitext(secondary_value)[1].lstrip(".") or "mp4"
+                temp_path, _resume_key, _resume_keys = self._resolve_resume_artifact_base(
+                    task,
+                    source_url,
+                    ext=ext,
+                    save_dir=self.save_dir_var.get() if hasattr(self, "save_dir_var") else os.path.dirname(secondary_value),
+                    fallback_name=str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Video"),
+                )
+            except Exception:
+                temp_path = ""
         if not temp_path:
             return
         progress_path = temp_path + ".progress.json"
@@ -21173,9 +21677,24 @@ class DownloadManagerApp:
         if is_direct_media:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
             filename = os.path.basename(parsed_url.path) or "downloaded_file"
-            use_task_title_filename = _task_source_site_name(task) == "avjoy" or not os.path.splitext(filename)[1]
+            source_site_for_name = _task_source_site_name(task)
+            current_task_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
+            filename_stem = os.path.splitext(filename)[0]
+            opaque_cdn_filename = (
+                bool(re.fullmatch(r"[A-Za-z0-9_-]{8,40}", filename_stem or ""))
+                and not _extract_jav_code(filename_stem)
+            )
+            use_task_title_filename = (
+                source_site_for_name == "avjoy"
+                or not os.path.splitext(filename)[1]
+                or (
+                    current_task_title
+                    and not self._output_title_is_suspicious(current_task_title)
+                    and (source_site_for_name or opaque_cdn_filename)
+                )
+            )
             if use_task_title_filename and inferred_direct_media_ext:
-                if _task_source_site_name(task) == "avjoy":
+                if source_site_for_name == "avjoy":
                     name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "downloaded_file" or "").strip()
                     name = _clean_avjoy_title(name, fallback_title=default_short_name_for_url(_task_field_value(task, "source_page") or _task_field_value(task, "url") or url))
                     safe_name = _safe_output_stem(name, fallback="downloaded_file")
@@ -21192,8 +21711,7 @@ class DownloadManagerApp:
                 filename = os.path.basename(output_path)
             else:
                 output_path = os.path.join(save_dir, filename)
-            _set_task_aux_fields(task, filename=output_path)
-            self._set_task_named_column_text(item_id, "name", filename)
+            self._set_task_output_file(task, item_id, output_path)
             direct_headers = {"User-Agent": DEFAULT_USER_AGENT}
             direct_referer = self._get_task_source_page(task)
             derived_mixdrop_watch_url = ""
@@ -23498,8 +24016,11 @@ class DownloadManagerApp:
                 timeout=20,
                 headers=_make_site_root_headers(site_root),
             )
-            page_title = _clean_18av_title(_extract_html_title(resp.text, short_name or "18AV"))
-            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            page_text = _response_text_utf8(resp)
+            page_title = _clean_18av_title(_extract_html_title(page_text, short_name or "18AV"))
+            if _output_title_is_suspicious_value(page_title):
+                page_title = _extract_jav_code(url) or short_name or "18AV"
+            candidate_urls = _extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
             manifest_candidates, direct_media_candidates = _split_stream_and_direct_candidates(
                 candidate_urls,
                 direct_filter=lambda candidate: not _is_18av_preview_media_url(candidate),
@@ -23518,7 +24039,7 @@ class DownloadManagerApp:
                     origin=site_root,
                 )
                 return
-            stream_url, media_url, player_probe_url, protected_player = _resolve_18av_protected_player_media(url, resp.text)
+            stream_url, media_url, player_probe_url, protected_player = _resolve_18av_protected_player_media(url, page_text)
             if stream_url:
                 _dispatch_manifest_download(
                     stream_url,
