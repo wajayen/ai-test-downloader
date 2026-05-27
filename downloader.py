@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3250"
+APP_BUILD = "20260527-3251"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -595,6 +595,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "avbebe": 24,
     "gimy": 24,
     "goodav17": 24,
+    "hayav": 24,
     "hohoj": 24,
     "jable": 24,
     "missav": 24,
@@ -3643,6 +3644,8 @@ def _avbebe_hgcloud_embed_url(url):
     host = parsed.netloc.lower()
     if "masukestin.com" in host:
         return normalized
+    if "dhcplay.com" in host:
+        return urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path or "/", parsed.query, ""))
     if "hglink.to" in host:
         return urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path or "/", parsed.query, ""))
     if "hgcloud.to" not in host:
@@ -5758,12 +5761,18 @@ def _extract_hayav_embed_candidates(page_text, base_url=""):
             normalized = _normalize_download_url(urllib.parse.urljoin(base_url or "https://hayav.com/", html.unescape(raw_url).replace("\\/", "/").strip()))
             if normalized:
                 candidates.append(normalized)
+        for raw_url in re.findall(r"""(?:src|href)=([^\s"'<>]+)""", decoded, re.IGNORECASE):
+            normalized = _normalize_download_url(urllib.parse.urljoin(base_url or "https://hayav.com/", html.unescape(raw_url).replace("\\/", "/").strip()))
+            if normalized:
+                candidates.append(normalized)
     candidates.extend(_extract_candidate_media_urls(text, allowed_exts=(".m3u8", ".mp4", ".mpd")))
     expanded = []
     for candidate in _dedupe_download_urls(candidates):
         expanded.append(candidate)
         parsed = urllib.parse.urlsplit(candidate)
         if "hglink.to" in parsed.netloc.lower() and "/e/" in parsed.path.lower():
+            expanded.append(urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path, parsed.query, "")))
+        if "dhcplay.com" in parsed.netloc.lower() and "/e/" in parsed.path.lower():
             expanded.append(urllib.parse.urlunsplit((parsed.scheme or "https", "masukestin.com", parsed.path, parsed.query, "")))
     filtered = []
     for candidate in _dedupe_download_urls(expanded):
@@ -16078,6 +16087,7 @@ class DownloadManagerApp:
             "movieffm",
             "avbebe",
             "goodav17",
+            "hayav",
             "hohoj",
             "jable",
             "missav",
@@ -20375,7 +20385,12 @@ class DownloadManagerApp:
             for candidate in hayav_candidates:
                 candidate_parts = urllib.parse.urlsplit(candidate)
                 candidate_host = candidate_parts.netloc.lower()
-                if ("masukestin.com" in candidate_host or "hgcloud.to" in candidate_host or "hglink.to" in candidate_host) and "/e/" in candidate_parts.path:
+                if (
+                    "masukestin.com" in candidate_host
+                    or "hgcloud.to" in candidate_host
+                    or "hglink.to" in candidate_host
+                    or "dhcplay.com" in candidate_host
+                ) and "/e/" in candidate_parts.path:
                     embed_url = _avbebe_hgcloud_embed_url(candidate) or candidate
                     break
             if embed_url:
