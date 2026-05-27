@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3252"
+APP_BUILD = "20260527-3253"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -4657,6 +4657,33 @@ def _extract_tktube_video_page_urls(page_text, base_url="https://tktube.com/"):
         if url and url not in urls:
             urls.append(url)
     return urls
+
+
+def _clean_tktube_title(raw_title, page_url="", fallback_title="TKTube"):
+    cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
+    cleaned = re.sub(r"\s*[-|]\s*TKTube.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    fallback = str(fallback_title or "TKTube").strip() or "TKTube"
+    if cleaned and not _looks_like_garbled_text(cleaned) and not _output_title_is_suspicious_value(cleaned):
+        return cleaned
+    normalized_url = _normalize_download_url(page_url)
+    if normalized_url:
+        parsed = urllib.parse.urlsplit(normalized_url)
+        segments = [urllib.parse.unquote(segment) for segment in (parsed.path or "").split("/") if segment]
+        for segment in reversed(segments):
+            segment = re.sub(r"[-_]+", " ", str(segment or "")).strip()
+            code = _extract_jav_code(segment)
+            if code:
+                tail = segment[segment.upper().find(code.replace("-", " ")) + len(code.replace("-", " ")) :] if code.replace("-", " ") in segment.upper() else ""
+                tail = re.sub(r"\b\d+\b|\b[hl]\b", " ", tail, flags=re.IGNORECASE)
+                tail = re.sub(r"\s+", " ", tail).strip(" -|/,._")
+                candidate = f"{code} {tail}".strip()
+                if candidate and not _looks_like_garbled_text(candidate):
+                    return candidate
+        for segment in reversed(segments):
+            segment = re.sub(r"[-_]+", " ", segment).strip(" -|/,._")
+            if segment and not segment.isdigit() and not _looks_like_garbled_text(segment):
+                return segment
+    return fallback if not _looks_like_garbled_text(fallback) else "TKTube"
 
 
 def _extract_anime1_category_episode_links(page_text, base_url):
@@ -23283,7 +23310,11 @@ class DownloadManagerApp:
                     media_candidates = _extract_tktube_media_candidates(unpacked)
             if not media_candidates:
                 raise Exception("TKTube media URL missing")
-            page_title = _extract_html_title(page_text, short_name or "TKTube")
+            page_title = _clean_tktube_title(
+                _extract_html_title(page_text, short_name or "TKTube"),
+                page_url=url,
+                fallback_title=short_name or "TKTube",
+            )
             _dispatch_extracted_media_candidates(
                 media_candidates,
                 page_title,
