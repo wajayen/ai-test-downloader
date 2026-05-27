@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3249"
+APP_BUILD = "20260527-3250"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -967,6 +967,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "resume invalid partial reset",
     "resume low speed reanalysis requested",
     "unsupported url alternate search prompt",
+    "unsupported url alternate search declined",
     "cached resolved url startup timeout",
     "cached media link refresh",
     "cached resolved url unavailable",
@@ -9894,7 +9895,7 @@ class DownloadManagerApp:
         normalized_url = _normalize_download_url(url)
         if not normalized_url or not re.search(r"https?://", normalized_url, re.IGNORECASE):
             return False
-        if bool(_task_field_value(task, "resume_requested", False)):
+        if bool(_task_field_value(task, "resume_requested", False)) and (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""):
             return False
         if bool(_task_field_value(task, "_alternate_site_search_prompted", False)):
             return False
@@ -9930,6 +9931,18 @@ class DownloadManagerApp:
         decision = {"accepted": False}
         done_event = threading.Event()
 
+        def remove_declined_task():
+            remove_url = _normalize_download_url(_task_field_value(task, "url", "") or url) or ""
+            try:
+                if remove_url:
+                    remove_from_state(remove_url)
+                self._discard_task(item_id)
+                self._delete_tree_item(item_id)
+                self.persist_unfinished_state(force=True)
+                self._schedule_process_queue()
+            except Exception as remove_exc:
+                write_error_log("alternate search declined task removal failed", remove_exc, item_id=item_id, url=url, query=query_text)
+
         def ask_user():
             try:
                 message = (
@@ -9951,6 +9964,18 @@ class DownloadManagerApp:
                     )
                     self._set_task_parse_ui(item_id, message="原網址找不到下載檔案，正在搜尋其他支援網站...")
                     self._start_video_search_download(query_text, is_mp3=is_mp3)
+                else:
+                    _set_task_aux_fields(task, _alternate_site_search_declined=True, state="DELETED")
+                    write_error_log(
+                        "unsupported url alternate search declined",
+                        Exception("user declined alternate supported-site search"),
+                        item_id=item_id,
+                        url=url,
+                        query=query_text,
+                        source_site=_task_source_site_name(task) or None,
+                        original_error=str(exc or "")[:240],
+                    )
+                    remove_declined_task()
             finally:
                 done_event.set()
 
@@ -9961,6 +9986,9 @@ class DownloadManagerApp:
             return False
         done_event.wait(timeout=300)
         return bool(decision["accepted"])
+
+    def _alternate_site_search_was_declined(self, task):
+        return bool(_task_field_value(task, "_alternate_site_search_declined", False))
 
     def _clear_url_entry(self):
         url_entry = getattr(self, "url_entry", None)
@@ -16982,6 +17010,8 @@ class DownloadManagerApp:
                     if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, search_exc, is_mp3=is_mp3):
                         self._mark_task_error_state(item_id, search_exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
                         return
+                    if self._alternate_site_search_was_declined(task):
+                        return
                     search_results = [
                         result for result in self._google_video_search_results(jav_code)
                         if _normalize_download_url(result.get("url", ""))
@@ -19142,10 +19172,14 @@ class DownloadManagerApp:
                 if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, exc, is_mp3=is_mp3):
                     self._mark_task_error_state(item_id, exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
                     return
+                if self._alternate_site_search_was_declined(task):
+                    return
                 self._mark_task_error_state(item_id, exc)
                 return
             if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, exc, is_mp3=is_mp3):
                 self._mark_task_error_state(item_id, exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
+                return
+            if self._alternate_site_search_was_declined(task):
                 return
             traceback.print_exc()
             write_error_log(
@@ -20128,6 +20162,8 @@ class DownloadManagerApp:
                 if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, av01_exc, is_mp3=is_mp3):
                     self._mark_task_error_state(item_id, av01_exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
                     return
+                if self._alternate_site_search_was_declined(task):
+                    return
                 search_results = [
                     result for result in self._google_video_search_results(jav_code)
                     if _normalize_download_url(result.get("url", ""))
@@ -20247,6 +20283,8 @@ class DownloadManagerApp:
             ikanbot_exc = DownloadSourceUnavailableException("Ikanbot API returned no media")
             if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, ikanbot_exc, is_mp3=is_mp3):
                 self._mark_task_error_state(item_id, ikanbot_exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
+                return
+            if self._alternate_site_search_was_declined(task):
                 return
             search_results = [
                 result for result in self._google_video_search_results(query_text)
@@ -20391,6 +20429,8 @@ class DownloadManagerApp:
                     raise
                 if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, hayav_direct_exc, is_mp3=is_mp3):
                     self._mark_task_error_state(item_id, hayav_direct_exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
+                    return
+                if self._alternate_site_search_was_declined(task):
                     return
                 search_results = [
                     result
@@ -21197,6 +21237,8 @@ class DownloadManagerApp:
                 movieffm_exc = exc or DownloadSourceUnavailableException(reason)
                 if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, movieffm_exc, is_mp3=is_mp3):
                     self._mark_task_error_state(item_id, movieffm_exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
+                    return True
+                if self._alternate_site_search_was_declined(task):
                     return True
                 current_url = _normalize_download_url(url)
                 search_results = []
@@ -22695,6 +22737,8 @@ class DownloadManagerApp:
                     if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, hohoj_exc, is_mp3=is_mp3):
                         self._mark_task_error_state(item_id, hohoj_exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
                         return
+                    if self._alternate_site_search_was_declined(task):
+                        return
                     search_results = [
                         result for result in self._google_video_search_results(jav_code)
                         if _normalize_download_url(result.get("url", ""))
@@ -23725,6 +23769,8 @@ class DownloadManagerApp:
                 return
             if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, e, is_mp3=is_mp3):
                 self._mark_task_error_state(item_id, e, "原網址找不到下載檔案，已開始搜尋其他支援網站")
+                return
+            if self._alternate_site_search_was_declined(task):
                 return
             write_error_log(
                 "yt_dlp download failure",
