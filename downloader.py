@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3257"
+APP_BUILD = "20260527-3258"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1556,6 +1556,12 @@ def _normalize_state_entry(entry):
             or _extract_jav_code(url)
         )
         if code_fallback:
+            normalized_source_url = _normalize_download_url(normalized.get("source_page", "") or url)
+            if (
+                "chinese-subtitles" in str(normalized_source_url or "").lower()
+                and re.fullmatch(r"[A-Z]{2,10}-\d{2,6}C", code_fallback)
+            ):
+                code_fallback = code_fallback[:-1]
             name = code_fallback
         else:
             normalized_name_url = _normalize_download_url(url)
@@ -6399,7 +6405,16 @@ def _extract_xiaoyakankan_play_urls(page_text, base_url):
 
 
 def save_state_entries(entries):
-    _atomic_json_dump(STATE_FILE, entries)
+    normalized_entries = []
+    seen = set()
+    for entry in entries or []:
+        normalized = _normalize_state_entry(entry)
+        normalized_url = _normalize_download_url(normalized.get("url", ""))
+        if not normalized_url or normalized_url in seen:
+            continue
+        seen.add(normalized_url)
+        normalized_entries.append(normalized)
+    _atomic_json_dump(STATE_FILE, normalized_entries)
 
 
 def _atomic_json_dump(path, payload):
