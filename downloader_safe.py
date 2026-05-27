@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3259"
+APP_BUILD = "20260527-3260"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -88,6 +88,7 @@ LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 3
 RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
 RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 64 * 1024
 CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS = 5.0
+HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS = 8 * 60
 MAX_QUEUE_TASKS = 300
 DISK_SPACE_RESERVE_BYTES = 256 * 1024 * 1024
 STATE_PERSIST_INTERVAL_SECONDS = 2.5
@@ -1006,6 +1007,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "unsupported url alternate search prompt",
     "unsupported url alternate search declined",
     "cached resolved url startup timeout",
+    "cached resolved url expired",
     "cached media link refresh",
     "cached resolved url unavailable",
     "hayav unavailable external embed skipped",
@@ -19102,6 +19104,34 @@ class DownloadManagerApp:
                         )
                 except Exception:
                     pass
+        source_site = _task_source_site_name(task)
+        if source_site == "hayav":
+            try:
+                cached_age = time.time() - float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0)
+            except Exception:
+                cached_age = HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS + 1
+            if cached_age > HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS:
+                write_error_log(
+                    "cached resolved url expired",
+                    Exception("HayAV cached media URL exceeded short-lived TTL"),
+                    item_id=item_id,
+                    source_url=source_url,
+                    resolved_url=cached_resolved_url,
+                    source_site=source_site,
+                    cached_age_seconds=round(max(cached_age, 0.0), 3),
+                    ttl_seconds=HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS,
+                )
+                self._retry_source_after_cached_link_failure(
+                    task,
+                    item_id,
+                    source_url,
+                    save_dir,
+                    use_impersonate,
+                    is_mp3,
+                    expired=True,
+                    failed_resolved_url=cached_resolved_url,
+                )
+                return True
         if _is_expired_signed_media_url(cached_resolved_url):
             write_error_log(
                 "cached resolved url expired",
@@ -19109,7 +19139,7 @@ class DownloadManagerApp:
                 item_id=item_id,
                 source_url=source_url,
                 resolved_url=cached_resolved_url,
-                source_site=_task_source_site_name(task) or None,
+                source_site=source_site or None,
             )
             self._retry_source_after_cached_link_failure(
                 task,
