@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3256"
+APP_BUILD = "20260527-3257"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -560,6 +560,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xlzyd.com",
     "52cute.com",
     "turboviplay.com",
+    "cdn-centaurus.com",
     "premilkyway.com",
     "ggjav.com",
     "ijycnd.com",
@@ -643,6 +644,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "vip.dytt-see.com": 24,
     "lz-cdn.com": 24,
     "yuglf.com": 24,
+    "cdn-centaurus.com": 32,
     "premilkyway.com": 32,
     "taopianplay1.com": 24,
     "turbosplayer.com": 8,
@@ -662,6 +664,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
 }
 PARALLEL_HLS_HOST_WORKER_BUDGET = 48
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
+    "cdn-centaurus.com": 72,
     "premilkyway.com": 72,
     "surrit.com": 60,
     "upload18.org": 72,
@@ -685,6 +688,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "vip.dytt-see.com",
     "lz-cdn.com",
     "yuglf.com",
+    "cdn-centaurus.com",
     "premilkyway.com",
     "taopianplay1.com",
     "streamfastpro",
@@ -977,6 +981,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "windows compatible mp4 transcoded",
     "ffmpeg direct audio started",
     "ffmpeg direct audio finished",
+    "ffmpeg audio transcode retry",
     "m3u8 total bytes invalidated",
     "download concurrency limit changed",
     "http multipart download started",
@@ -12010,7 +12015,12 @@ class DownloadManagerApp:
         output_dir = os.path.dirname(clean_output_path) or (self.save_dir_var.get() if hasattr(self, "save_dir_var") else "")
         output_ext = os.path.splitext(clean_output_path)[1] or ".mp4"
         output_stem = os.path.splitext(os.path.basename(clean_output_path))[0]
-        if _looks_like_garbled_text(clean_output_path) or _output_title_is_suspicious_value(output_stem):
+        repaired_output_title = _repair_mixed_garbled_jav_title(
+            output_stem,
+            page_url=self._get_task_source_page(task, fallback_url=_normalize_download_url(_task_field_value(task, "url", "")) or ""),
+            fallback_title=str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip(),
+        )
+        if _looks_like_garbled_text(clean_output_path) or _output_title_is_suspicious_value(output_stem) or repaired_output_title:
             stable_code = _extract_jav_code(output_stem) or _extract_jav_code(clean_output_path)
             fallback_title = self._task_output_title_fallback(
                 task,
@@ -12019,6 +12029,8 @@ class DownloadManagerApp:
             )
             if stable_code:
                 fallback_title = stable_code
+            if repaired_output_title:
+                fallback_title = repaired_output_title
             safe_stem = _safe_output_stem(fallback_title, fallback="Video")
             if safe_stem:
                 desired_output_path = os.path.join(output_dir or _APP_DIR, f"{safe_stem}{output_ext}")
