@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260528-3300"
+APP_BUILD = "20260528-3310"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -89,6 +89,7 @@ RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
 RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 64 * 1024
 CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS = 5.0
 HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS = 8 * 60
+AVJOY_RESOLVED_URL_CACHE_TTL_SECONDS = 8 * 60
 MAX_QUEUE_TASKS = 300
 DISK_SPACE_RESERVE_BYTES = 256 * 1024 * 1024
 STATE_PERSIST_INTERVAL_SECONDS = 2.5
@@ -348,6 +349,24 @@ def _is_hayav_video_page_url(url):
     if not path or path in ("/", "/search"):
         return False
     return bool(_extract_hayav_jav_code(path))
+
+
+def _is_avjoy_video_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    return "avjoy.me" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
+
+
+def _is_avjoy_direct_media_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    host = parsed.netloc.lower()
+    path = (parsed.path or "").lower()
+    return "avjoy.me" in host and ("/video/" in path or "/av1/" in path) and path.endswith((".mp4", ".m3u8"))
 
 
 def _repair_mixed_garbled_jav_title(raw_title, page_url="", fallback_title=""):
@@ -986,6 +1005,9 @@ MEDIA_DOWNLOAD_RETRY_MARKERS = (
     "timed out",
     "timeout",
     "urlopen error",
+    "multipart part incomplete",
+    "output failed final validation",
+    "direct media output failed final validation",
 )
 _ERROR_LOG_RECENT = {}
 ERROR_LOG_MAX_ENTRIES = 10
@@ -1677,6 +1699,20 @@ def _normalize_state_entry(entry):
     if not normalized.get("source_page") and source_site == "hayav":
         if _is_hayav_video_page_url(normalized.get("url", "")):
             normalized["source_page"] = _normalize_download_url(normalized.get("url", ""))
+    if source_site == "avjoy":
+        avjoy_source_page = normalized.get("source_page", "")
+        if not avjoy_source_page and _is_avjoy_video_page_url(normalized.get("url", "")):
+            avjoy_source_page = _normalize_download_url(normalized.get("url", ""))
+            normalized["source_page"] = avjoy_source_page
+        if avjoy_source_page and _is_avjoy_direct_media_url(normalized.get("url", "")):
+            if not normalized.get("resolved_url"):
+                normalized["resolved_url"] = normalized.get("url", "")
+            normalized["url"] = avjoy_source_page
+        if avjoy_source_page:
+            normalized["fallback_urls"] = [
+                candidate for candidate in normalized.get("fallback_urls", [])
+                if not _normalize_download_url(candidate) == _normalize_download_url(avjoy_source_page)
+            ]
     if source_site == "hayav":
         hayav_page_url = normalized.get("source_page", "") or normalized.get("url", "")
         normalized_name = _clean_hayav_title(
@@ -1749,6 +1785,18 @@ def _normalize_state_entry(entry):
         normalized["resolved_url_saved_at"] = float(normalized.get("resolved_url_saved_at", 0) or 0)
     except (TypeError, ValueError):
         normalized["resolved_url_saved_at"] = 0.0
+    state = str(normalized.get("state", "QUEUED") or "QUEUED").strip().upper()
+    resume_requested = bool(normalized.get("resume_requested", False))
+    if state == "PAUSE_REQUESTED":
+        state = "QUEUED" if resume_requested else "PAUSED"
+    elif state in ("DOWNLOADING", "DELETE_REQUESTED", "DELETED", "FINISHED"):
+        state = "QUEUED"
+    elif state not in ("QUEUED", "PAUSED", "ERROR"):
+        state = "QUEUED"
+    normalized["state"] = state
+    normalized["_manual_pause_requested"] = bool(normalized.get("_manual_pause_requested", False))
+    normalized["_last_error_status"] = str(normalized.get("_last_error_status", "") or "").strip()
+    normalized["_last_error_message"] = str(normalized.get("_last_error_message", "") or "").strip()
     page_refresh_candidates = normalized.get("page_refresh_candidates", [])
     normalized["page_refresh_candidates"] = [u for u in page_refresh_candidates if isinstance(u, str) and u.strip()] if isinstance(page_refresh_candidates, list) else []
     normalized["filename"] = str(normalized.get("filename", "") or "").strip()
@@ -8535,6 +8583,14 @@ class DownloadManagerApp:
                 self.action_buttons["clear"].configure(text=t("menu_clear"))
         self._refresh_ui_summary()
 
+    def _is_retryable_persisted_download_error(self, task_data):
+        if not task_data:
+            return False
+        status_text = str(task_data.get("_last_error_status", "") or "")
+        message_text = str(task_data.get("_last_error_message", "") or "")
+        error_text = f"{status_text} {message_text}".lower()
+        return any(marker in error_text for marker in MEDIA_DOWNLOAD_RETRY_MARKERS)
+
     def resume_unfinished_tasks(self):
         saved_tasks = load_state()
         pending_tasks = []
@@ -8589,6 +8645,11 @@ class DownloadManagerApp:
                         "page_refresh_candidates": _task_gimy_page_refresh_candidates(task),
                         "filename": str(_task_field_value(task, "filename", "") or "").strip(),
                         "temp_filename": temp_filename,
+                        "state": str(_task_field_value(task, "state", "QUEUED") or "QUEUED").strip().upper(),
+                        "resume_requested": bool(_task_field_value(task, "resume_requested", False)),
+                        "_manual_pause_requested": bool(_task_field_value(task, "_manual_pause_requested", False)),
+                        "_last_error_status": str(_task_field_value(task, "_last_error_status", "") or "").strip(),
+                        "_last_error_message": str(_task_field_value(task, "_last_error_message", "") or "").strip(),
                     },
                 )
             )
@@ -8603,13 +8664,32 @@ class DownloadManagerApp:
                 return
             end_index = min(start_index + STARTUP_RESUME_BATCH_SIZE, len(pending_tasks))
             for url, name, is_mp3, source_site, extra_task_data in pending_tasks[start_index:end_index]:
+                saved_state = str((extra_task_data or {}).get("state", "QUEUED") or "QUEUED").strip().upper()
+                manual_pause_requested = bool((extra_task_data or {}).get("_manual_pause_requested", False))
+                retryable_error_resume = (
+                    saved_state == "ERROR"
+                    and bool((extra_task_data or {}).get("resume_requested", False))
+                    and self._is_retryable_persisted_download_error(extra_task_data)
+                )
+                startup_resume_requested = (saved_state != "ERROR" or retryable_error_resume) and not (saved_state == "PAUSED" and manual_pause_requested)
+                if startup_resume_requested:
+                    extra_task_data = dict(extra_task_data or {})
+                    extra_task_data["state"] = "QUEUED"
+                    extra_task_data["resume_requested"] = True
+                    if retryable_error_resume:
+                        extra_task_data["_last_error_status"] = ""
+                        extra_task_data["_last_error_message"] = ""
+                        if str(source_site or "").strip().lower() == "avjoy":
+                            extra_task_data["resolved_url"] = ""
+                            extra_task_data["resolved_url_saved_at"] = 0.0
+                            extra_task_data["fallback_urls"] = []
                 self._start_download_thread(
                     url,
                     name,
                     is_mp3=is_mp3,
                     source_site=source_site,
                     extra_task_data=extra_task_data,
-                    resume_requested=True,
+                    resume_requested=startup_resume_requested,
                 )
             if end_index < len(pending_tasks):
                 self.root.after(STARTUP_RESUME_BATCH_DELAY_MS, lambda: enqueue_batch(end_index))
@@ -10087,8 +10167,21 @@ class DownloadManagerApp:
         task_data["fallback_urls"] = normalized_extra.get("fallback_urls", [])
         task_data["source_page"] = normalized_extra.get("source_page", "")
         task_data["resume_requested"] = bool(existing_item_id is not None or resume_requested)
+        restored_state = str(_task_field_value(task_data, "state", "QUEUED") or "QUEUED").strip().upper()
+        if restored_state not in ("QUEUED", "PAUSED", "ERROR"):
+            restored_state = "QUEUED"
+        task_data["state"] = restored_state
         _set_task_aux_fields(task_data, _stop_reason=None)
         self.tasks[item_id] = task_data
+        if restored_state == "PAUSED":
+            self._set_task_status_mode_ui(item_id, self._paused_status_text(), clear_metrics=True)
+        elif restored_state == "ERROR":
+            self._set_task_status_mode_ui(
+                item_id,
+                str(_task_field_value(task_data, "_last_error_status", "") or t("msg_error") or "Error"),
+                str(_task_field_value(task_data, "_last_error_message", "") or ""),
+                clear_metrics=True,
+            )
         if self._startup_resume_pending:
             return
         try:
@@ -10632,7 +10725,7 @@ class DownloadManagerApp:
         self.tree.focus(item_id)
         self.tree.see(item_id)
 
-    def _build_extra_task_data(self, source_page=None, fallback_urls=None, resolved_url=None, resolved_url_saved_at=None, page_refresh_candidates=None):
+    def _build_extra_task_data(self, source_page=None, fallback_urls=None, resolved_url=None, resolved_url_saved_at=None, page_refresh_candidates=None, filename=None, temp_filename=None):
         data = {}
         if source_page:
             data["source_page"] = source_page
@@ -10647,6 +10740,10 @@ class DownloadManagerApp:
                 data["resolved_url_saved_at"] = 0.0
         if page_refresh_candidates:
             data["page_refresh_candidates"] = _dedupe_download_urls(page_refresh_candidates)
+        if filename:
+            data["filename"] = str(filename or "").strip()
+        if temp_filename:
+            data["temp_filename"] = str(temp_filename or "").strip()
         return data
 
     def _source_site_from_search_url(self, url):
@@ -11986,6 +12083,14 @@ class DownloadManagerApp:
             updates["temp_filename"] = str(fields.get("temp_filename") or "").strip()
         if "resume_requested" in fields:
             updates["resume_requested"] = bool(fields.get("resume_requested", False))
+        if "state" in fields and fields["state"]:
+            updates["state"] = str(fields.get("state") or "").strip().upper()
+        if "_manual_pause_requested" in fields:
+            updates["_manual_pause_requested"] = bool(fields.get("_manual_pause_requested", False))
+        if "_last_error_status" in fields:
+            updates["_last_error_status"] = str(fields.get("_last_error_status") or "").strip()
+        if "_last_error_message" in fields:
+            updates["_last_error_message"] = str(fields.get("_last_error_message") or "").strip()
         if updates:
             update_state_entry(url, **updates)
 
@@ -12381,12 +12486,20 @@ class DownloadManagerApp:
                     "page_refresh_candidates": list(_task_gimy_page_refresh_candidates(task)),
                     "filename": str(_task_field_value(task, "filename", "") or "").strip(),
                     "temp_filename": str(_task_field_value(task, "temp_filename", "") or "").strip(),
+                    "state": str(_task_field_value(task, "state", "QUEUED") or "QUEUED").strip().upper(),
+                    "_manual_pause_requested": bool(_task_field_value(task, "_manual_pause_requested", False)),
+                    "_last_error_status": str(_task_field_value(task, "_last_error_status", "") or "").strip(),
+                    "_last_error_message": str(_task_field_value(task, "_last_error_message", "") or "").strip(),
                 }
             )
             entries_append(entry)
             signature_append((
                 entry.get("url", ""),
                 entry.get("name", ""),
+                entry.get("state", ""),
+                bool(entry.get("_manual_pause_requested", False)),
+                entry.get("_last_error_status", ""),
+                entry.get("_last_error_message", ""),
                 bool(entry.get("is_mp3", False)),
                 bool(entry.get("resume_requested", False)),
                 entry.get("source_site") or "",
@@ -12458,7 +12571,9 @@ class DownloadManagerApp:
         if output_size <= 0:
             exc = Exception("download output file is empty")
             write_error_log("finish rejected empty output", exc, item_id=item_id, output=output_path, reason=reason, source_site=_task_source_site_name(task) or None)
+            self._remove_rejected_finish_output(item_id, output_path, "empty output")
             self._mark_task_error_state(item_id, exc)
+            self._set_task_named_column_text(item_id, "progress", "--")
             return False
         output_ext = os.path.splitext(str(output_path or ""))[1].lower()
         if output_ext in (".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".m4v", ".ts"):
@@ -12474,11 +12589,45 @@ class DownloadManagerApp:
                     reason=media_info.get("reason") or reason,
                     source_site=_task_source_site_name(task) or None,
                 )
+                self._remove_rejected_finish_output(item_id, output_path, media_info.get("reason") or "invalid media")
                 self._mark_task_error_state(item_id, exc)
+                self._set_task_named_column_text(item_id, "progress", "--")
                 return False
         self._set_task_output_file(task, item_id, output_path)
         self._set_task_named_column_text(item_id, "size", format_transfer_size(output_size))
         return True
+
+    def _remove_rejected_finish_output(self, item_id, output_path, reason):
+        clean_output_path = str(output_path or "").strip()
+        if not clean_output_path:
+            return
+        task = self.tasks.get(item_id, {})
+        try:
+            if os.path.isfile(clean_output_path):
+                os.remove(clean_output_path)
+        except OSError as exc:
+            write_error_log(
+                "finish rejected output cleanup failed",
+                exc,
+                item_id=item_id,
+                output=clean_output_path,
+                reason=reason,
+                source_site=_task_source_site_name(task) or None,
+            )
+            return
+        self._remove_resume_artifact_family(
+            clean_output_path,
+            preserve_paths=[],
+            remove_base_file=False,
+        )
+        write_error_log(
+            "finish rejected output removed",
+            Exception(str(reason or "finish rejected output removed")),
+            item_id=item_id,
+            output=clean_output_path,
+            reason=reason,
+            source_site=_task_source_site_name(task) or None,
+        )
 
     def _recover_finished_output_path(self, task, missing_output_path=""):
         save_dir = os.path.dirname(str(missing_output_path or "").strip())
@@ -13104,6 +13253,18 @@ class DownloadManagerApp:
                 except Exception:
                     pass
             else:
+                if state in ("DOWNLOADING", "PAUSE_REQUESTED"):
+                    write_error_log(
+                        "download task delete waiting for worker stop",
+                        Exception("download task delete waiting for worker stop"),
+                        item_id=item_id,
+                        url=_normalize_download_url(_task_field_value(task, "url", "")) or "",
+                        source_site=_task_source_site_name(task) or None,
+                        previous_state=state,
+                    )
+                    self._delete_tree_item(item_id)
+                    self._schedule_process_queue()
+                    return
                 self._discard_deleted_task(item_id)
                 return
             self._delete_tree_item(item_id)
@@ -14172,6 +14333,46 @@ class DownloadManagerApp:
                 except OSError:
                     continue
 
+    def _remove_http_multipart_parts_for_base(self, base_path):
+        if not base_path:
+            return
+        try:
+            prefix = self._http_multipart_part_path(base_path, "")
+        except Exception:
+            return
+        for part_path in glob.glob(prefix + "*"):
+            self._remove_artifact_paths(part_path)
+
+    def _remove_resume_artifact_family(self, base_path, preserve_paths=None, remove_base_file=True):
+        clean_base = str(base_path or "").strip()
+        if not clean_base:
+            return
+        preserve = {
+            os.path.normcase(os.path.abspath(str(path)))
+            for path in (preserve_paths or [])
+            if str(path or "").strip()
+        }
+
+        def should_preserve(path):
+            try:
+                return os.path.normcase(os.path.abspath(str(path))) in preserve
+            except Exception:
+                return False
+
+        root, ext = os.path.splitext(clean_base)
+        artifact_paths = [
+            clean_base + ".progress.json",
+            self._parallel_hls_segment_dir_for_base(clean_base),
+        ]
+        if remove_base_file and not should_preserve(clean_base):
+            artifact_paths.append(clean_base)
+        if ext:
+            for sidecar_path in (f"{root}.resume{ext}", f"{root}.merged{ext}"):
+                if not should_preserve(sidecar_path):
+                    artifact_paths.append(sidecar_path)
+        self._remove_artifact_paths(*artifact_paths)
+        self._remove_http_multipart_parts_for_base(clean_base)
+
     def _remove_output_progress_sidecars(self, output_path):
         clean_output_path = str(output_path or "").strip()
         if not clean_output_path:
@@ -14402,15 +14603,16 @@ class DownloadManagerApp:
             )
         except Exception:
             return
-        temp_root, temp_ext = os.path.splitext(temp_out_path)
-        artifact_paths = (
+        final_output = str(_task_field_value(task, "filename", "") or "").strip()
+        try:
+            same_as_final = bool(final_output) and os.path.normcase(os.path.abspath(temp_out_path)) == os.path.normcase(os.path.abspath(final_output))
+        except Exception:
+            same_as_final = False
+        self._remove_resume_artifact_family(
             temp_out_path,
-            f"{temp_root}.resume{temp_ext}",
-            f"{temp_root}.merged{temp_ext}",
-            self._parallel_hls_segment_dir_for_base(temp_out_path),
-            temp_out_path + ".progress.json",
+            preserve_paths=[final_output],
+            remove_base_file=not same_as_final,
         )
-        self._remove_artifact_paths(*artifact_paths)
 
     def _load_resume_progress_info(self, progress_path):
         if not progress_path or not os.path.exists(progress_path):
@@ -14892,15 +15094,25 @@ class DownloadManagerApp:
                 return
             try:
                 existing_size = self._get_existing_file_size(part_path)
-                if expected_size > 0 and existing_size >= expected_size:
-                    progress_box["bytes"] = expected_size
-                    return
                 if existing_size < 0 or (expected_size > 0 and existing_size > expected_size):
                     try:
                         os.remove(part_path)
                     except OSError:
                         pass
+                    write_error_log(
+                        "http range oversized part discarded",
+                        Exception("HTTP range part exceeded expected size and was discarded"),
+                        url=url,
+                        part_start=start_byte,
+                        part_end=end_byte,
+                        part_path=part_path,
+                        expected_size=expected_size,
+                        existing_size=existing_size,
+                    )
                     existing_size = 0
+                if expected_size > 0 and existing_size == expected_size:
+                    progress_box["bytes"] = expected_size
+                    return
                 progress_box["bytes"] = existing_size
                 request_start_byte = int(start_byte) + int(existing_size)
                 return self._download_http_range_part_once(
@@ -15003,6 +15215,12 @@ class DownloadManagerApp:
                             break
                         if not chunk:
                             continue
+                        if expected_size > 0:
+                            remaining_bytes = max(expected_size - int(progress_box.get("bytes", 0) or 0), 0)
+                            if remaining_bytes <= 0:
+                                break
+                            if len(chunk) > remaining_bytes:
+                                chunk = chunk[:remaining_bytes]
                         f.write(chunk)
                         progress_box["bytes"] = progress_box["bytes"] + len(chunk)
                 actual_size = self._get_existing_file_size(part_path)
@@ -15030,6 +15248,12 @@ class DownloadManagerApp:
                     chunk = resp.read(HTTP_RANGE_CHUNK_SIZE)
                     if not chunk:
                         break
+                    if expected_size > 0:
+                        remaining_bytes = max(expected_size - int(progress_box.get("bytes", 0) or 0), 0)
+                        if remaining_bytes <= 0:
+                            break
+                        if len(chunk) > remaining_bytes:
+                            chunk = chunk[:remaining_bytes]
                     f.write(chunk)
                     progress_box["bytes"] = progress_box["bytes"] + len(chunk)
         actual_size = self._get_existing_file_size(part_path)
@@ -15271,12 +15495,21 @@ class DownloadManagerApp:
         status_text = format_download_error_status(exc)
         detail_text = detail_message or summarize_error_message(exc, "err_net", 120)
         self._set_task_status_mode_ui(item_id, status_text, detail_text)
-        _set_task_aux_fields(
-            task,
-            state="ERROR",
-            _last_error_status=status_text,
-            _last_error_message=detail_text,
-        )
+        state_updates = {
+            "state": "ERROR",
+            "_last_error_status": status_text,
+            "_last_error_message": detail_text,
+        }
+        if _task_source_site_name(task) == "avjoy" and self._is_retryable_media_download_error(f"{exc} {detail_text}"):
+            state_updates.update(
+                {
+                    "resolved_url": "",
+                    "resolved_url_saved_at": 0.0,
+                    "fallback_urls": [],
+                }
+            )
+        _set_task_aux_fields(task, **state_updates)
+        self._update_task_state_entry(task, **state_updates)
         self._schedule_summary_refresh()
         return True
 
@@ -17376,42 +17609,55 @@ class DownloadManagerApp:
 
         try:
             remux_strategy = "concat"
-            with DaemonThreadPoolExecutor(max_workers=worker_count) as executor:
-                pending_iter = iter(pending_segments)
-                in_flight = set()
-                in_flight_limit = max(
-                    int(worker_count),
-                    int(worker_count) * int(PARALLEL_HLS_IN_FLIGHT_MULTIPLIER),
-                )
+            if pending_segments:
+                with DaemonThreadPoolExecutor(max_workers=worker_count) as executor:
+                    pending_iter = iter(pending_segments)
+                    in_flight = set()
+                    in_flight_limit = max(
+                        int(worker_count),
+                        int(worker_count) * int(PARALLEL_HLS_IN_FLIGHT_MULTIPLIER),
+                    )
 
-                def _submit_next_segment():
+                    def _submit_next_segment():
+                        try:
+                            next_segment = next(pending_iter)
+                        except StopIteration:
+                            return False
+                        in_flight.add(executor.submit(_download_one, next_segment))
+                        return True
+
                     try:
-                        next_segment = next(pending_iter)
-                    except StopIteration:
-                        return False
-                    in_flight.add(executor.submit(_download_one, next_segment))
-                    return True
-
-                try:
-                    for _ in range(min(in_flight_limit, len(pending_segments))):
-                        if not _submit_next_segment():
-                            break
-                    while in_flight:
-                        done, in_flight = concurrent.futures.wait(
-                            in_flight,
-                            return_when=concurrent.futures.FIRST_COMPLETED,
-                        )
-                        for future in done:
-                            future.result()
-                        if stop_event.is_set() or self._shutdown_started:
-                            raise StopDownloadException("stop requested")
-                        while len(in_flight) < in_flight_limit and _submit_next_segment():
-                            pass
-                except Exception:
-                    stop_event.set()
-                    for future in in_flight:
-                        future.cancel()
-                    raise
+                        for _ in range(min(in_flight_limit, len(pending_segments))):
+                            if not _submit_next_segment():
+                                break
+                        while in_flight:
+                            done, in_flight = concurrent.futures.wait(
+                                in_flight,
+                                return_when=concurrent.futures.FIRST_COMPLETED,
+                            )
+                            for future in done:
+                                future.result()
+                            if stop_event.is_set() or self._shutdown_started:
+                                raise StopDownloadException("stop requested")
+                            while len(in_flight) < in_flight_limit and _submit_next_segment():
+                                pass
+                    except Exception:
+                        stop_event.set()
+                        for future in in_flight:
+                            future.cancel()
+                        raise
+            else:
+                self._log_ffmpeg_event(
+                    "parallel hls resume complete before download",
+                    Exception("parallel HLS resume has all segments; remux only"),
+                    task,
+                    item_id,
+                    media_url,
+                    segments=total_segments,
+                    completed_segments_at_start=completed_segments,
+                    part_dir=part_dir,
+                    **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
+                )
             ordered_part_paths = []
             for segment in segments:
                 part_path = _part_path(segment)
@@ -19238,7 +19484,7 @@ class DownloadManagerApp:
                 continue
             state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if state == "DOWNLOADING" or self._is_pause_requested_state(state):
-                _set_task_aux_fields(self.tasks[item_id], state="PAUSE_REQUESTED", _stop_reason=STOP_REASON_PAUSE)
+                _set_task_aux_fields(self.tasks[item_id], state="PAUSE_REQUESTED", _stop_reason=STOP_REASON_PAUSE, _manual_pause_requested=True)
                 self._set_task_status_mode_ui(item_id, self._paused_status_text())
                 proc = _task_field_value(self.tasks[item_id], "_proc", None)
                 if proc is not None:
@@ -19247,7 +19493,7 @@ class DownloadManagerApp:
                     except Exception:
                         pass
             elif state == "QUEUED":
-                _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
+                _set_task_aux_fields(self.tasks[item_id], state="PAUSED", _manual_pause_requested=True)
                 self._set_task_status_mode_ui(item_id, self._paused_status_text())
                 self._schedule_process_queue()
         self.persist_unfinished_state(force=True)
@@ -19268,7 +19514,7 @@ class DownloadManagerApp:
                 _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
             if str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "") not in RESUMABLE_TASK_STATES:
                 continue
-            _set_task_aux_fields(self.tasks[item_id], _stop_reason=None)
+            _set_task_aux_fields(self.tasks[item_id], _stop_reason=None, _manual_pause_requested=False)
             if not self._check_resume_disk_space(item_id):
                 continue
             task = self.tasks[item_id]
@@ -19296,6 +19542,8 @@ class DownloadManagerApp:
                     resolved_url=(_normalize_download_url(_task_field_value(task, "resolved_url", "")) or ""),
                     resolved_url_saved_at=float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0),
                     page_refresh_candidates=_task_gimy_page_refresh_candidates(task),
+                    filename=str(_task_field_value(task, "filename", "") or "").strip(),
+                    temp_filename=str(_task_field_value(task, "temp_filename", "") or "").strip(),
                 ),
             )
 
@@ -19507,10 +19755,10 @@ class DownloadManagerApp:
             state = str(_task_field_value(task, "state", "") or "")
             proc = _task_field_value(task, "_proc", None)
             if state in ("DOWNLOADING", "PAUSE_REQUESTED") or self._process_handle_is_running(proc):
-                _set_task_aux_fields(task, state="PAUSE_REQUESTED", _stop_reason=STOP_REASON_PAUSE, resume_requested=True)
+                _set_task_aux_fields(task, state="PAUSE_REQUESTED", _stop_reason=STOP_REASON_PAUSE, resume_requested=True, _manual_pause_requested=False)
                 self._set_task_status_mode_ui(item_id, self._paused_status_text())
             elif state == "QUEUED":
-                _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, resume_requested=True)
+                _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, resume_requested=True, _manual_pause_requested=False)
                 self._set_task_status_mode_ui(item_id, self._paused_status_text())
 
     def _force_kill_child_processes(self):
@@ -19668,6 +19916,7 @@ class DownloadManagerApp:
         primary_value = str(_task_field_value(task, "filename") or "").strip()
         secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
         filename = primary_value or secondary_value or ""
+        preserve_paths = [primary_value] if primary_value else []
         if filename:
             base_name = os.path.splitext(os.path.basename(filename))[0]
             escaped_base = glob.escape(base_name)
@@ -19681,6 +19930,67 @@ class DownloadManagerApp:
                         os.remove(path)
                     except Exception:
                         continue
+        if primary_value:
+            self._remove_output_progress_sidecars(primary_value)
+            self._remove_http_multipart_parts_for_base(primary_value)
+
+        artifact_bases = []
+
+        def add_artifact_base(candidate):
+            clean_candidate = str(candidate or "").strip()
+            if not clean_candidate:
+                return
+            try:
+                candidate_key = os.path.normcase(os.path.abspath(clean_candidate))
+                if primary_value and candidate_key == os.path.normcase(os.path.abspath(primary_value)):
+                    return
+            except Exception:
+                candidate_key = clean_candidate.lower()
+            if candidate_key in artifact_bases:
+                return
+            artifact_bases.append(candidate_key)
+            self._remove_resume_artifact_family(clean_candidate, preserve_paths=preserve_paths)
+
+        if secondary_value:
+            add_artifact_base(secondary_value)
+
+        save_dir = ""
+        for path_value in (primary_value, secondary_value):
+            try:
+                if path_value:
+                    save_dir = os.path.dirname(os.path.abspath(path_value))
+                    if save_dir:
+                        break
+            except Exception:
+                continue
+        if not save_dir:
+            try:
+                save_dir = self.save_dir_var.get()
+            except Exception:
+                save_dir = ""
+        is_mp3 = bool(_task_field_value(task, "is_mp3", False))
+        ext = "mp3" if is_mp3 else "mp4"
+        fallback_name = "Audio" if is_mp3 else "Video"
+        source_candidates = [
+            _task_field_value(task, "resolved_url", ""),
+            _task_field_value(task, "url", ""),
+            self._get_task_source_page(task, fallback_url=_task_field_value(task, "url", "")),
+        ]
+        for source_url in source_candidates:
+            normalized_source = _normalize_download_url(source_url)
+            if not normalized_source:
+                continue
+            try:
+                temp_base, _resume_key, _resume_keys = self._resolve_resume_artifact_base(
+                    task,
+                    normalized_source,
+                    ext=ext,
+                    save_dir=save_dir,
+                    fallback_name=fallback_name,
+                )
+            except Exception:
+                continue
+            add_artifact_base(temp_base)
 
     def _prepare_resume_low_speed_watch(self, task, source_url, save_dir, is_mp3=False):
         watching_resume = self._is_resume_download_active(
@@ -20152,21 +20462,22 @@ class DownloadManagerApp:
                 except Exception:
                     pass
         source_site = _task_source_site_name(task)
-        if source_site == "hayav":
+        if source_site in ("hayav", "avjoy"):
             try:
                 cached_age = time.time() - float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0)
             except Exception:
-                cached_age = HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS + 1
-            if cached_age > HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS:
+                cached_age = max(HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS, AVJOY_RESOLVED_URL_CACHE_TTL_SECONDS) + 1
+            ttl_seconds = AVJOY_RESOLVED_URL_CACHE_TTL_SECONDS if source_site == "avjoy" else HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS
+            if cached_age > ttl_seconds and (source_site != "avjoy" or _is_avjoy_direct_media_url(cached_resolved_url)):
                 write_error_log(
                     "cached resolved url expired",
-                    Exception("HayAV cached media URL exceeded short-lived TTL"),
+                    Exception(f"{source_site} cached media URL exceeded short-lived TTL"),
                     item_id=item_id,
                     source_url=source_url,
                     resolved_url=cached_resolved_url,
                     source_site=source_site,
                     cached_age_seconds=round(max(cached_age, 0.0), 3),
-                    ttl_seconds=HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS,
+                    ttl_seconds=ttl_seconds,
                 )
                 self._retry_source_after_cached_link_failure(
                     task,
@@ -21251,22 +21562,33 @@ class DownloadManagerApp:
             remaining_fallbacks = fallback_candidates[1:]
             next_site = self._source_site_from_search_url(next_url) or _task_source_site_name(task)
             state_url = _normalize_download_url(_task_field_value(task, "url", "")) or current_url
+            source_page_for_fallback = self._get_task_source_page(task, fallback_url=current_url)
+            preserve_avjoy_source_page = (
+                fallback_source_site == "avjoy"
+                and _is_avjoy_video_page_url(source_page_for_fallback)
+                and _is_avjoy_direct_media_url(next_url)
+            )
+            persisted_url = source_page_for_fallback if preserve_avjoy_source_page else next_url
+            persisted_resolved_url = next_url if preserve_avjoy_source_page else ""
+            persisted_site = "avjoy" if preserve_avjoy_source_page else next_site
             _set_task_aux_fields(
                 task,
-                url=next_url,
-                source_site=next_site,
+                url=persisted_url,
+                source_site=persisted_site,
                 fallback_urls=remaining_fallbacks,
-                resolved_url="",
-                resolved_url_saved_at=0.0,
+                source_page=source_page_for_fallback if preserve_avjoy_source_page else _task_field_value(task, "source_page", ""),
+                resolved_url=persisted_resolved_url,
+                resolved_url_saved_at=time.time() if persisted_resolved_url else 0.0,
             )
             if state_url:
                 update_state_entry(
                     state_url,
-                    url=next_url,
-                    source_site=next_site,
+                    url=persisted_url,
+                    source_site=persisted_site,
                     fallback_urls=remaining_fallbacks,
-                    resolved_url="",
-                    resolved_url_saved_at=0.0,
+                    source_page=source_page_for_fallback if preserve_avjoy_source_page else _task_field_value(task, "source_page", ""),
+                    resolved_url=persisted_resolved_url,
+                    resolved_url_saved_at=time.time() if persisted_resolved_url else 0.0,
                 )
             write_error_log(
                 "page fallback retry",
@@ -21274,7 +21596,7 @@ class DownloadManagerApp:
                 item_id=item_id,
                 failed_url=current_url,
                 next_url=next_url,
-                source_site=next_site,
+                source_site=persisted_site,
                 remaining_count=len(remaining_fallbacks),
                 original_error=str(exc or "")[:240],
             )
