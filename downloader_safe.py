@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260527-3280"
+APP_BUILD = "20260528-3290"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -571,7 +571,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "gimy", "goodav17", "hayav", "hohoj", "jable", "missav", "njav", "njavtv", "nnyy", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "jable", "missav", "njav", "njavtv", "nnyy", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -641,9 +641,10 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "gimy": 24,
     "goodav17": 24,
     "hayav": 32,
-    "hohoj": 40,
+    "hohoj": 60,
+    "ikanbot": 24,
     "jable": 24,
-    "missav": 24,
+    "missav": 30,
     "njav": 24,
     "njavtv": 24,
     "nnyy": 24,
@@ -666,8 +667,8 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "taopianplay1.com": 24,
     "turbosplayer.com": 8,
     "turboviplay.com": 8,
-    "ggjav.com": 40,
-    "surrit.com": 24,
+    "ggjav.com": 60,
+    "surrit.com": 30,
     "streamfastpro": 32,
     "mushroomtrack.com": 24,
     "hls.sb-cd.com": 24,
@@ -684,6 +685,7 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "cdn-centaurus.com": 72,
     "premilkyway.com": 72,
     "ggjav.com": 120,
+    "media-cdn": 24,
     "mxcontent.net": 96,
     "surrit.com": 60,
     "streamfastpro": 96,
@@ -837,6 +839,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "youtube": 20,
 }
 HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
+    "media-cdn": 6,
     "mxcontent.net": 16,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
@@ -920,6 +923,7 @@ SHUTDOWN_ACTIVE_DOWNLOAD_WAIT_SECONDS = 1.2
 SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS = 0.8
 SHUTDOWN_PROCESS_TERMINATE_TIMEOUT_SECONDS = 0.8
 SHUTDOWN_PROCESS_KILL_TIMEOUT_SECONDS = 0.8
+DOWNLOAD_TASK_INTERNAL_MAX_RECURSION = 18
 GIMY_DIRECT_STREAM_FALLBACK_LIMIT = 1
 GIMY_EPISODE_PAGE_PARSE_FALLBACK_LIMIT = 2
 GIMY_SOURCE_PAGE_REFRESH_LIMIT = 4
@@ -935,6 +939,7 @@ RESUMABLE_TASK_STATES = frozenset(("PAUSED", "ERROR"))
 STOP_REASON_PAUSE = "pause"
 STOP_REASON_DELETE = "delete"
 STOP_REASONS = frozenset((STOP_REASON_PAUSE, STOP_REASON_DELETE))
+ACTIVE_DOWNLOAD_SLOT_STATES = frozenset(("DOWNLOADING", "PAUSE_REQUESTED", "DELETE_REQUESTED"))
 MEDIA_DOWNLOAD_RETRY_MARKERS = (
     "http 400",
     "server returned 400 bad request",
@@ -4945,6 +4950,11 @@ def _is_gimy_play_path(path):
     return any(marker in path_text for marker in ("/play/", "/vodplay/", "/video/", "/watch/"))
 
 
+def _is_gimy_detail_path(path):
+    path_text = str(path or "").lower()
+    return any(marker in path_text for marker in ("/detail/", "/voddetail/", "/voddetail2/", "/vod/", "/title/"))
+
+
 SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "gimy",
     "movieffm",
@@ -6120,6 +6130,25 @@ def _extract_ikanbot_hidden_value(page_text, field_id):
     return ""
 
 
+def _derive_ikanbot_api_token(video_id, e_token):
+    video_id_text = re.sub(r"\D+", "", str(video_id or ""))
+    token_text = str(e_token or "").strip()
+    if not video_id_text or not token_text:
+        return ""
+    parts = []
+    remaining = token_text
+    for digit in video_id_text[-4:]:
+        try:
+            offset = int(digit) % 3 + 1
+        except ValueError:
+            return ""
+        if len(remaining) < offset + 8:
+            return ""
+        parts.append(remaining[offset:offset + 8])
+        remaining = remaining[offset + 8:]
+    return "".join(parts).strip()
+
+
 def _extract_ikanbot_media_candidates(value, base_url="https://www1.ikanbot.com/"):
     candidates = []
     seen_containers = set()
@@ -6451,13 +6480,13 @@ def _extract_gimy_search_results(page_text, base_url="https://gimy.tw/"):
     results = []
     seen = set()
     text = str(page_text or "")
-    for match in re.finditer(r'href=["\']([^"\']*/voddetail/\d+\.html)["\']', text, re.IGNORECASE):
+    for match in re.finditer(r'href=["\']([^"\']*/(?:voddetail|title)/\d+\.html)["\']', text, re.IGNORECASE):
         raw_url = html.unescape(match.group(1))
         url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
         if not url or url in seen:
             continue
         window = text[max(0, match.start() - 700):match.end() + 1800]
-        if "details-info-min" not in window and "news-box-txt" not in window:
+        if "details-info-min" not in window and "news-box-txt" not in window and "/title/" not in raw_url:
             continue
         title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*title=["\']([^"\']+)', window, re.IGNORECASE | re.DOTALL)
         if not title_match:
@@ -6910,6 +6939,8 @@ def _make_range_http_headers(headers=None, range_value="bytes=0-0"):
     range_headers["Accept-Encoding"] = "identity"
     if range_value:
         range_headers["Range"] = range_value
+    else:
+        range_headers.pop("Range", None)
     return range_headers
 
 
@@ -8706,7 +8737,7 @@ class DownloadManagerApp:
                 base = f"{parsed.scheme}://{parsed.netloc}"
 
                 if not re.search(
-                    r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
+                    r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|watch/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
                     resp_text,
                 ):
                     self._schedule_warning(t("err_site_parse"))
@@ -9389,7 +9420,7 @@ class DownloadManagerApp:
         if parsed_new_url and ("anime1.me" in parsed_new_url.netloc.lower() or "anime1.pw" in parsed_new_url.netloc.lower()) and ("/category/" in parsed_new_url.path.lower() or "cat" in new_url_query):
             self._start_background_parse(fetch_anime1)
             return
-        if "gimy" in lowered and ("/detail/" in lowered or "/voddetail/" in lowered or "/voddetail2/" in lowered or "/vod/" in lowered):
+        if "gimy" in lowered and _is_gimy_detail_path(lowered):
             self._start_background_parse(fetch_gimy_detail)
             return
         if ("hanime1.me" in lowered or "hanimeone.me" in lowered) and "list=" in lowered:
@@ -9572,12 +9603,12 @@ class DownloadManagerApp:
 
         matches = list(
             re.finditer(
-                r'href=["\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))["\'][^>]*>(.*?)</a>',
+                r'href=["\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|watch/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))["\'][^>]*>(.*?)</a>',
                 resp_text,
             )
         )
         entry_map = {}
-        for match in matches:
+        for source_order, match in enumerate(matches):
             link = match.group(1)
             title = re.sub(r"<[^>]+>", "", match.group(2)).strip()
             link_lower = link.lower()
@@ -9587,7 +9618,7 @@ class DownloadManagerApp:
             if _is_promo_title(title):
                 continue
             ep_url = urllib.parse.urljoin(base, link)
-            number_match = re.search(r"/(?:(?:vod)?play|eps)/\d+-(\d+)(?:-(\d+))?\.html", link)
+            number_match = re.search(r"/(?:(?:vod)?play|watch|eps)/\d+-(\d+)(?:-(\d+))?\.html", link)
             if number_match:
                 line_no = int(number_match.group(1))
                 episode_no = int(number_match.group(2)) if number_match.group(2) else line_no
@@ -9604,6 +9635,7 @@ class DownloadManagerApp:
                 "full_name": full_name,
                 "line_no": line_no,
                 "episode_no": episode_no,
+                "source_order": source_order,
             }
             existing = entry_map.get(ep_url)
             if existing is None or _title_score(title) > _title_score(existing.get("title", "")):
@@ -9662,8 +9694,11 @@ class DownloadManagerApp:
             title_rank = 0
         elif title:
             title_rank = 1
+        source_order = entry.get("source_order")
+        if not isinstance(source_order, int) or source_order < 0:
+            source_order = 9999
         line_no = entry.get("line_no") or 9999
-        return (title_rank, line_no, -len(title), entry.get("url", ""))
+        return (title_rank, source_order, line_no, -len(title), entry.get("url", ""))
 
     def _group_gimy_episode_entries(self, entries):
         episode_groups = {}
@@ -11201,6 +11236,7 @@ class DownloadManagerApp:
             engine_targets = (
                 ("av01.media", ("/tw/video/", "/video/")),
                 ("avhd101.com", ("/search", "/vodplay", "/video")),
+                ("ikanbot.com", ("/play/", "/voddetail/", "/vodsearch/")),
                 ("njavtv.com", ("/",)),
                 ("18av.mm-cg.com", ("/zh/",)),
                 ("99itv.net", ("/detail", "/voddetail", "/vodplay")),
@@ -11279,6 +11315,7 @@ class DownloadManagerApp:
             fast_source_jobs = common_fast_jobs + [
                 ("movieffm", fetch_movieffm_results),
                 ("gimy", fetch_gimy_results),
+                ("ikanbot", fetch_ikanbot_results),
                 ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
                 ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
             ]
@@ -11287,7 +11324,6 @@ class DownloadManagerApp:
                 ("iq", fetch_iq_results),
                 ("nnyy", fetch_nnyy_results),
                 ("yfsp", fetch_yfsp_results),
-                ("ikanbot", fetch_ikanbot_results),
                 ("tktube", fetch_tktube_results),
                 ("avjoy", fetch_avjoy_results),
                 ("hohoj", fetch_hohoj_results),
@@ -11303,6 +11339,7 @@ class DownloadManagerApp:
             fast_source_jobs = common_fast_jobs + [
                 ("movieffm", fetch_movieffm_results),
                 ("gimy", fetch_gimy_results),
+                ("ikanbot", fetch_ikanbot_results),
                 ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
                 ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
                 ("iq", fetch_iq_results),
@@ -11310,7 +11347,6 @@ class DownloadManagerApp:
             slow_source_jobs = [
                 ("anime1", fetch_anime1_results),
                 ("yfsp", fetch_yfsp_results),
-                ("ikanbot", fetch_ikanbot_results),
                 ("tktube", fetch_tktube_results),
                 ("avjoy", fetch_avjoy_results),
                 ("hohoj", fetch_hohoj_results),
@@ -12155,6 +12191,9 @@ class DownloadManagerApp:
     def _is_downloading_state(self, state):
         return state == "DOWNLOADING"
 
+    def _is_active_download_slot_state(self, state):
+        return state in ACTIVE_DOWNLOAD_SLOT_STATES
+
     def _is_deleted_state(self, state):
         return state == "DELETED"
 
@@ -12937,15 +12976,33 @@ class DownloadManagerApp:
         return any(marker in domain for marker in IMPERSONATION_SITE_MARKERS)
 
     def _request_task_deletion(self, item_id, state):
-        _set_task_aux_fields(self.tasks[item_id], state="DELETE_REQUESTED", _stop_reason=STOP_REASON_DELETE)
+        task = self.tasks.get(item_id)
+        if not task:
+            return
+        _set_task_aux_fields(task, state="DELETE_REQUESTED", _stop_reason=STOP_REASON_DELETE)
+        write_error_log(
+            "download task delete requested",
+            Exception("download task delete requested"),
+            item_id=item_id,
+            url=_normalize_download_url(_task_field_value(task, "url", "")) or "",
+            source_site=_task_source_site_name(task) or None,
+            previous_state=state,
+        )
         try:
-            self._cleanup_temp_files(item_id)
             if state in DELETE_CLEANUP_TASK_STATES:
+                self._cleanup_temp_files(item_id)
                 self._remove_partial_output(item_id)
-            self._delete_tree_item(item_id)
-            if state in DELETE_CLEANUP_TASK_STATES:
                 self.tasks.pop(item_id, None)
-            self._schedule_process_queue()
+                self._delete_tree_item(item_id)
+                self._schedule_process_queue()
+                return
+            proc = _task_field_value(task, "_proc", None)
+            if self._process_handle_is_running(proc):
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            self._delete_tree_item(item_id)
         except Exception:
             return
 
@@ -14056,7 +14113,20 @@ class DownloadManagerApp:
         removed = []
         seen = set()
         for pattern in patterns:
-            for artifact_path in glob.glob(os.path.join(directory, pattern)):
+            try:
+                artifact_paths = glob.glob(os.path.join(directory, pattern))
+            except RecursionError:
+                write_error_log(
+                    "unknown video artifact cleanup skipped",
+                    Exception("glob recursion limit reached while cleaning unknown_video artifacts"),
+                    item_id=item_id,
+                    url=url,
+                    pattern=pattern,
+                )
+                return
+            except Exception:
+                continue
+            for artifact_path in artifact_paths:
                 norm_path = os.path.normcase(os.path.abspath(artifact_path))
                 if norm_path in seen or not os.path.isfile(artifact_path):
                     continue
@@ -14692,7 +14762,13 @@ class DownloadManagerApp:
                     attempt=attempt + 1,
                     max_attempts=HTTP_RANGE_PART_MAX_ATTEMPTS,
                 )
-                time.sleep(min(HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS * (2 ** attempt), 6.0))
+                retry_delay = min(HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS * (2 ** attempt), 6.0)
+                error_text = str(exc or "").lower()
+                host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+                if ("http 503" in error_text or "http 429" in error_text) and "media-cdn" in host:
+                    retry_delay = min(2.0 * (attempt + 1), 12.0)
+                if stop_event.wait(retry_delay) or self._shutdown_started:
+                    return
         if last_exc is not None:
             raise last_exc
 
@@ -15609,6 +15685,9 @@ class DownloadManagerApp:
             mode = "wb"
             resume_bytes = 0
         switched_to_multipart = False
+        multipart_part_count = 0
+        multipart_host_marker = ""
+        multipart_remaining_size = 0
         downloaded = resume_bytes
         start_time = time.time()
         last_update_time = start_time
@@ -15716,6 +15795,9 @@ class DownloadManagerApp:
                     download_host,
                     remaining_size,
                 )
+                multipart_part_count = part_count
+                multipart_host_marker = http_host_marker
+                multipart_remaining_size = remaining_size
                 part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
                 write_error_log(
                     "http multipart download started",
@@ -15882,6 +15964,10 @@ class DownloadManagerApp:
             download_host=final_download_host,
             host_active_downloads=self._active_hls_downloads_for_host(final_download_host),
             host_worker_budget=self._hls_host_worker_budget(final_download_host),
+            used_multipart=bool(switched_to_multipart),
+            multipart_part_count=(multipart_part_count or None),
+            multipart_host_marker=(multipart_host_marker or None),
+            multipart_remaining_size=(multipart_remaining_size or None),
             output=out_path,
             bytes=final_size,
             elapsed_seconds=round(elapsed_seconds, 3),
@@ -16086,6 +16172,14 @@ class DownloadManagerApp:
         return (urllib.parse.urlsplit(normalized_media_url).netloc.lower() if normalized_media_url else ""), normalized_media_url
 
     def _parallel_hls_workers_for_segments(self, source_site, media_url, segments):
+        return int(self._parallel_hls_worker_plan(source_site, media_url, segments).get("workers", 1))
+
+    def _parallel_hls_worker_plan(self, source_site, media_url, segments):
+        site = (source_site or "").strip().lower()
+        site_worker_cap = int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, PARALLEL_HLS_SEGMENT_WORKERS))
+        workers = site_worker_cap
+        host_worker_cap = 0
+        host_worker_marker = ""
         workers = self._parallel_hls_workers_for_site(source_site, media_url)
         segment_hosts = {
             urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower()
@@ -16093,7 +16187,10 @@ class DownloadManagerApp:
         }
         for marker, host_workers in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST.items():
             if any(marker in host for host in segment_hosts):
+                host_worker_cap = int(host_workers)
+                host_worker_marker = marker
                 workers = min(workers, int(host_workers))
+                break
         dominant_host, _representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
         host_peer_count = self._active_hls_downloads_for_host(dominant_host)
         host_budget = self._hls_host_worker_budget(dominant_host)
@@ -16102,11 +16199,13 @@ class DownloadManagerApp:
             if marker in dominant_host:
                 boost_segment_threshold = int(marker_threshold)
                 break
+        boost_applied = False
         if (
             host_peer_count <= 1
             and len(segments or []) >= boost_segment_threshold
             and any(marker in dominant_host for marker in PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS)
         ):
+            boost_applied = True
             workers = max(
                 workers,
                 min(
@@ -16115,13 +16214,30 @@ class DownloadManagerApp:
                     max(len(segments or []), 1),
                 ),
             )
+        requested_workers = max(int(workers or 1), 1)
+        per_task_budget = int(host_budget)
+        budget_limited = False
         if host_peer_count > 1:
             per_task_budget = max(
                 int(PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK),
                 int(host_budget) // max(host_peer_count, 1),
             )
+            budget_limited = workers > per_task_budget
             workers = min(workers, per_task_budget)
-        return max(workers, 1)
+        return {
+            "workers": max(int(workers or 1), 1),
+            "requested_workers": requested_workers,
+            "site_worker_cap": site_worker_cap,
+            "host_worker_cap": host_worker_cap,
+            "host_worker_marker": host_worker_marker,
+            "dominant_host": dominant_host,
+            "host_peer_count": host_peer_count,
+            "host_worker_budget": int(host_budget),
+            "per_task_worker_budget": int(per_task_budget),
+            "boost_applied": bool(boost_applied),
+            "boost_segment_threshold": int(boost_segment_threshold),
+            "budget_limited": bool(budget_limited),
+        }
 
     def _fragment_workers_with_host_budget(self, desired_workers, media_url):
         try:
@@ -16152,7 +16268,7 @@ class DownloadManagerApp:
             return 1
         count = 0
         for task in self.tasks.values():
-            if not self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
+            if not self._is_active_download_slot_state(str(_task_field_value(task, "state", "") or "")):
                 continue
             active_url = _normalize_download_url(_task_field_value(task, "_active_media_url", "") or "")
             candidates = [active_url] if active_url else [_task_field_value(task, "resolved_url", "")]
@@ -16953,7 +17069,8 @@ class DownloadManagerApp:
         hls_host, representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
         if representative_segment_url:
             self._set_task_active_media_url(task, representative_segment_url)
-        worker_count = min(self._parallel_hls_workers_for_segments(source_site, media_url, segments), total_segments)
+        worker_plan = self._parallel_hls_worker_plan(source_site, media_url, segments)
+        worker_count = min(int(worker_plan.get("workers", 1)), total_segments)
         hls_host_active_downloads = self._active_hls_downloads_for_host(hls_host)
         hls_host_worker_budget = self._hls_host_worker_budget(hls_host)
         self._log_ffmpeg_event(
@@ -16964,6 +17081,13 @@ class DownloadManagerApp:
             media_url,
             segments=total_segments,
             workers=worker_count,
+            requested_workers=int(worker_plan.get("requested_workers", worker_count) or worker_count),
+            site_worker_cap=int(worker_plan.get("site_worker_cap", 0) or 0),
+            host_worker_cap=int(worker_plan.get("host_worker_cap", 0) or 0),
+            host_worker_marker=str(worker_plan.get("host_worker_marker", "") or ""),
+            per_task_worker_budget=int(worker_plan.get("per_task_worker_budget", hls_host_worker_budget) or hls_host_worker_budget),
+            worker_budget_limited=bool(worker_plan.get("budget_limited", False)),
+            single_task_boost_applied=bool(worker_plan.get("boost_applied", False)),
             hls_host=hls_host,
             manifest_host=urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower(),
             hls_host_active_downloads=hls_host_active_downloads,
@@ -19282,7 +19406,7 @@ class DownloadManagerApp:
         queued_items = []
         active_total = 0
         for item_id, task in self.tasks.items():
-            if self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
+            if self._is_active_download_slot_state(str(_task_field_value(task, "state", "") or "")):
                 active_total += 1
                 domain, source_page = (
                     self._extract_domain(_normalize_download_url(_task_field_value(task, "url", "")) or ""),
@@ -20169,6 +20293,27 @@ class DownloadManagerApp:
 
     def _download_task_internal(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         task = self.tasks.get(item_id, {})
+        recursion_depth = 0
+        try:
+            frame = sys._getframe()
+            while frame is not None:
+                if getattr(frame.f_code, "co_name", "") == "_download_task_internal":
+                    recursion_depth += 1
+                frame = frame.f_back
+        except Exception:
+            recursion_depth = 1
+        if recursion_depth > DOWNLOAD_TASK_INTERNAL_MAX_RECURSION:
+            exc = DownloadSourceUnavailableException("download fallback chain exceeded the safe retry depth")
+            write_error_log(
+                "download fallback retry depth exceeded",
+                exc,
+                item_id=item_id,
+                url=url,
+                source_site=_task_source_site_name(task) or None,
+                recursion_depth=recursion_depth,
+                max_recursion=DOWNLOAD_TASK_INTERNAL_MAX_RECURSION,
+            )
+            raise exc
         self._refresh_task_title_before_output_name(task, item_id, url)
         short_name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or (t("msg_resume_name") if "msg_resume_name" in I18N_DICT.get(CURRENT_LANG, {}) else "未完成項目") or "").strip()
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or short_name or "").strip()
@@ -21226,6 +21371,9 @@ class DownloadManagerApp:
             if v_tks_match:
                 token_candidates.append(html.unescape(v_tks_match.group(1)).strip())
             e_token = _extract_ikanbot_hidden_value(page_text, "e_token")
+            derived_token = _derive_ikanbot_api_token(video_id, e_token)
+            if derived_token:
+                token_candidates.append(derived_token)
             token_candidates.extend(["", e_token])
             if e_token.startswith("wa") and "ve" in e_token:
                 token_candidates.extend((e_token[2:], e_token[2:-2], e_token[2:34]))
@@ -22499,7 +22647,7 @@ class DownloadManagerApp:
             self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate, is_mp3)
             return
 
-        if "gimy" in parsed_url.netloc and ("/detail/" in parsed_url.path or "/voddetail/" in parsed_url.path or "/voddetail2/" in parsed_url.path or "/vod/" in parsed_url.path):
+        if "gimy" in parsed_url.netloc and _is_gimy_detail_path(parsed_url.path):
             self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": url}
@@ -22520,7 +22668,7 @@ class DownloadManagerApp:
                     raise fallback_exc from last_detail_error
             base = f"{parsed_url.scheme}://{parsed_url.netloc}"
             if not re.search(
-                r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
+                r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|watch/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
                 resp_text,
             ):
                 raise Exception("Gimy detail page did not expose episode links")
