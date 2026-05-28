@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260528-3310"
+APP_BUILD = "20260528-3320"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -718,7 +718,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "googleusercontent.com": 1,
     "upload18.org": 24,
 }
-PARALLEL_HLS_HOST_WORKER_BUDGET = 48
+PARALLEL_HLS_HOST_WORKER_BUDGET = 72
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "cdn-centaurus.com": 72,
     "premilkyway.com": 72,
@@ -956,8 +956,8 @@ UI_THROTTLE_INTERVAL_SECONDS = 2.0
 STATUS_STYLE_REFRESH_INTERVAL_MS = 600
 SUMMARY_REFRESH_INTERVAL_MS = 1200
 STARTUP_RESUME_DELAY_MS = 1200
-STARTUP_RESUME_BATCH_SIZE = 1
-STARTUP_RESUME_BATCH_DELAY_MS = 1500
+STARTUP_RESUME_BATCH_SIZE = 12
+STARTUP_RESUME_BATCH_DELAY_MS = 250
 STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS = 1200
 SHUTDOWN_ACTIVE_DOWNLOAD_WAIT_SECONDS = 1.2
 SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS = 0.8
@@ -1008,6 +1008,11 @@ MEDIA_DOWNLOAD_RETRY_MARKERS = (
     "multipart part incomplete",
     "output failed final validation",
     "direct media output failed final validation",
+    "download output file is missing",
+    "missing output",
+    "download output is not a valid media file",
+    "not a valid media file",
+    "ffprobe-error",
 )
 _ERROR_LOG_RECENT = {}
 ERROR_LOG_MAX_ENTRIES = 10
@@ -1024,8 +1029,15 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg resume segment preserved",
     "parallel hls download started",
     "parallel hls download finished",
+    "parallel hls output already finalized",
     "parallel hls concat remux fallback to transport",
+    "parallel hls resume complete before download",
+    "download task duplicate worker skipped",
+    "download task active transfer state repaired",
+    "download task worker released",
+    "retryable persisted error resumed",
     "http media download finished",
+    "direct media wrapper finalized output",
     "parallel hls setup retry next candidate",
     "parallel hls setup fallback to ffmpeg",
     "parallel hls setup candidates exhausted",
@@ -1074,10 +1086,12 @@ TRACE_LOG_CONTEXTS = frozenset((
     "native hls failed output removed",
     "ffmpeg near complete resume accepted",
     "resume invalid partial reset",
+    "resume implausible near-complete reset",
     "resume low speed reanalysis requested",
     "unsupported url alternate search prompt",
     "unsupported url alternate search declined",
     "cached resolved url startup timeout",
+    "cached resolved probe skipped",
     "cached resolved url expired",
     "cached resolved refresh preserved resume artifacts",
     "cached media link refresh",
@@ -1715,28 +1729,40 @@ def _normalize_state_entry(entry):
             ]
     if source_site == "hayav":
         hayav_page_url = normalized.get("source_page", "") or normalized.get("url", "")
+        original_hayav_name = str(normalized.get("name", "") or "")
         normalized_name = _clean_hayav_title(
-            normalized.get("name", ""),
-            normalized.get("name", "") or normalized.get("filename", "") or hayav_page_url,
+            original_hayav_name,
+            original_hayav_name or normalized.get("filename", "") or hayav_page_url,
             page_url=hayav_page_url,
+        )
+        name_code_matches = (
+            _extract_hayav_jav_code(normalized_name)
+            and _extract_hayav_jav_code(normalized_name) == _extract_hayav_jav_code(original_hayav_name)
         )
         if normalized_name and (
             _looks_like_garbled_text(normalized.get("name", ""))
             or _output_title_is_suspicious_value(normalized.get("name", ""))
             or _looks_like_code_only_title(normalized.get("name", ""))
+            or (name_code_matches and normalized_name.count("?") < original_hayav_name.count("?"))
         ):
             normalized["name"] = normalized_name
             name = normalized_name
         if "short_name" in normalized:
+            original_hayav_short_name = str(normalized.get("short_name", "") or "")
             normalized_short_name = _clean_hayav_title(
-                normalized.get("short_name", ""),
+                original_hayav_short_name,
                 normalized.get("name", "") or hayav_page_url,
                 page_url=hayav_page_url,
+            )
+            short_name_code_matches = (
+                _extract_hayav_jav_code(normalized_short_name)
+                and _extract_hayav_jav_code(normalized_short_name) == _extract_hayav_jav_code(original_hayav_short_name)
             )
             if normalized_short_name and (
                 _looks_like_garbled_text(normalized.get("short_name", ""))
                 or _output_title_is_suspicious_value(normalized.get("short_name", ""))
                 or _looks_like_code_only_title(normalized.get("short_name", ""))
+                or (short_name_code_matches and normalized_short_name.count("?") < original_hayav_short_name.count("?"))
             ):
                 normalized["short_name"] = normalized_short_name
     if source_site in ("goodav17", "hohoj"):
@@ -1797,6 +1823,9 @@ def _normalize_state_entry(entry):
     normalized["_manual_pause_requested"] = bool(normalized.get("_manual_pause_requested", False))
     normalized["_last_error_status"] = str(normalized.get("_last_error_status", "") or "").strip()
     normalized["_last_error_message"] = str(normalized.get("_last_error_message", "") or "").strip()
+    if state != "ERROR":
+        normalized["_last_error_status"] = ""
+        normalized["_last_error_message"] = ""
     page_refresh_candidates = normalized.get("page_refresh_candidates", [])
     normalized["page_refresh_candidates"] = [u for u in page_refresh_candidates if isinstance(u, str) and u.strip()] if isinstance(page_refresh_candidates, list) else []
     normalized["filename"] = str(normalized.get("filename", "") or "").strip()
@@ -3293,6 +3322,13 @@ def _site_hls_candidate_priority(source_site, url):
         return _xiaoyakankan_stream_priority(url)
     if site == "nnyy":
         return _nnyy_stream_priority(url)
+    if site == "hayav":
+        host = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or "")).netloc.lower()
+        lowered = urllib.parse.unquote(str(url or "")).lower()
+        if "premilkyway.com" in host or "premilkyway.com" in lowered:
+            return 0
+        if "masukestin.com" in host:
+            return 50
     return 0
 
 
@@ -5198,13 +5234,13 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "hohoj.tv": 80,
 }
 
-VIDEO_SEARCH_MAX_RESULTS = 12
+VIDEO_SEARCH_MAX_RESULTS = 30
 VIDEO_SEARCH_SITE_TIMEOUT_SECONDS = 8
 VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS = 10
 VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS = 8
 VIDEO_SEARCH_SOURCE_WORKERS = 12
 VIDEO_SEARCH_ENRICH_WORKERS = 8
-VIDEO_SEARCH_ENRICH_LIMIT = min(8, VIDEO_SEARCH_MAX_RESULTS)
+VIDEO_SEARCH_ENRICH_LIMIT = min(12, VIDEO_SEARCH_MAX_RESULTS)
 VIDEO_SEARCH_FAST_STAGE_TARGET_RESULTS = 3
 
 VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS = (
@@ -5605,6 +5641,17 @@ def _normalize_video_search_text_for_match(value):
 
 def _video_search_text_has_cjk(value):
     return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", str(value or "")))
+
+
+def _looks_like_actress_name_search(query_text):
+    if _extract_jav_code(query_text):
+        return False
+    normalized = _normalize_video_search_text_for_match(query_text)
+    if not normalized or not _video_search_text_has_cjk(normalized):
+        return False
+    if re.search(r"\d|第|季|集|電影|剧|劇|線上|线上|完整版|4k|1080|720", normalized, re.IGNORECASE):
+        return False
+    return 2 <= len(normalized) <= 10
 
 
 def _normalize_known_video_search_key(value):
@@ -6340,6 +6387,9 @@ def _video_search_quality_is_allowed(result, min_quality=VIDEO_SEARCH_MIN_QUALIT
 def _filter_video_search_candidates_by_quality(candidate_urls, min_quality=VIDEO_SEARCH_MIN_QUALITY, source_site=""):
     filtered = []
     for candidate in _dedupe_download_urls(candidate_urls):
+        candidate_text = str(candidate or "").lower()
+        if "magnet:" in candidate_text or "btih:" in candidate_text:
+            continue
         if _is_known_dead_external_fallback_url(candidate) or _is_known_ad_media_url(candidate):
             continue
         if source_site and _is_slow_external_fallback_url_for_site(candidate, source_site):
@@ -6399,12 +6449,45 @@ def _video_search_download_speed_score(result):
     return site_rank + direct_bonus
 
 
+def _video_search_popularity_score(result):
+    text = _video_search_result_text(result).lower()
+    score = VIDEO_SEARCH_SITE_PRIORITY.get(_video_search_site_for_url((result or {}).get("url", "")), 999)
+    if re.search(r"(熱門|人気|popular|hot|ranking|排行榜|排行|精選|精选|推薦|推荐)", text, re.IGNORECASE):
+        score -= 12
+    if re.search(r"(uncensored|无码|無碼|破解)", text, re.IGNORECASE):
+        score -= 4
+    view_match = re.search(r"(\d+(?:\.\d+)?)\s*(萬|万|k|m)?\s*(?:views?|觀看|观看|播放|瀏覽|浏览)", text, re.IGNORECASE)
+    if view_match:
+        try:
+            views = float(view_match.group(1))
+            unit = (view_match.group(2) or "").lower()
+            if unit in ("萬", "万"):
+                views *= 10000
+            elif unit == "k":
+                views *= 1000
+            elif unit == "m":
+                views *= 1000000
+            if views >= 1000000:
+                score -= 30
+            elif views >= 100000:
+                score -= 20
+            elif views >= 10000:
+                score -= 10
+        except Exception:
+            pass
+    return score
+
+
 def _video_search_result_rank(result, query_text=""):
     match_rank = _video_search_name_match_score(result, query_text)
     quality = _video_search_known_quality(result)
     subtitle_rank = _video_search_chinese_subtitle_score(result)
     speed_rank = _video_search_download_speed_score(result)
-    return (match_rank, -quality, subtitle_rank, speed_rank, len(str((result or {}).get("url", ""))))
+    popularity_rank = _video_search_popularity_score(result)
+    search_order = int((result or {}).get("_search_order", 9999) or 9999)
+    if _looks_like_actress_name_search(query_text):
+        return (match_rank, popularity_rank, subtitle_rank, search_order, -quality, speed_rank, len(str((result or {}).get("url", ""))))
+    return (match_rank, -quality, subtitle_rank, speed_rank, search_order, len(str((result or {}).get("url", ""))))
 
 
 def _video_search_matches_query(result, query_text):
@@ -6432,6 +6515,8 @@ def _video_search_result_is_downloadable(result):
     url = _normalize_download_url((result or {}).get("url", ""))
     if not url:
         return False
+    if bool((result or {}).get("downloadable_probe_failed", False)):
+        return False
     if _is_known_dead_external_fallback_url(url) or _is_known_ad_media_url(url):
         return False
     parsed_url = urllib.parse.urlsplit(url)
@@ -6447,6 +6532,10 @@ def _video_search_result_is_downloadable(result):
     if _looks_like_manifest_url(url) or _infer_media_extension_from_url(url) in (".mp4", ".mkv", ".webm", ".m4a", ".mp3"):
         return True
     site = source_site
+    if site == "movieffm.net" and not re.search(r"/(?:movies|drama|tvshows)/", lowered_path, re.IGNORECASE):
+        return False
+    if site == "avbebe.com" and not re.search(r"/archives/\d+(?:/|$)", lowered_path, re.IGNORECASE):
+        return False
     if site == "iq.com":
         path = lowered_path
         if "/play/best-episode" in path or not re.search(r"/play/.+-[a-z0-9]{8,}", path, re.IGNORECASE):
@@ -7941,6 +8030,8 @@ class DownloadManagerApp:
         self._drop_target_widgets = []
         self._active_network_sessions = {}
         self._active_network_sessions_lock = threading.Lock()
+        self._active_download_item_ids = set()
+        self._active_download_item_ids_lock = threading.Lock()
         self._startup_resume_pending = False
         self._startup_resume_scheduled = False
         self._startup_started_at = time.time()
@@ -8668,12 +8759,13 @@ class DownloadManagerApp:
                 manual_pause_requested = bool((extra_task_data or {}).get("_manual_pause_requested", False))
                 retryable_error_resume = (
                     saved_state == "ERROR"
-                    and bool((extra_task_data or {}).get("resume_requested", False))
                     and self._is_retryable_persisted_download_error(extra_task_data)
                 )
                 startup_resume_requested = (saved_state != "ERROR" or retryable_error_resume) and not (saved_state == "PAUSED" and manual_pause_requested)
                 if startup_resume_requested:
                     extra_task_data = dict(extra_task_data or {})
+                    previous_error_status = str(extra_task_data.get("_last_error_status", "") or "")
+                    previous_error_message = str(extra_task_data.get("_last_error_message", "") or "")
                     extra_task_data["state"] = "QUEUED"
                     extra_task_data["resume_requested"] = True
                     if retryable_error_resume:
@@ -8683,6 +8775,15 @@ class DownloadManagerApp:
                             extra_task_data["resolved_url"] = ""
                             extra_task_data["resolved_url_saved_at"] = 0.0
                             extra_task_data["fallback_urls"] = []
+                        write_error_log(
+                            "retryable persisted error resumed",
+                            Exception("retryable persisted error task was re-queued for resume"),
+                            url=url,
+                            source_site=source_site or None,
+                            saved_state=saved_state,
+                            last_error_status=previous_error_status,
+                            last_error_message=previous_error_message,
+                        )
                 self._start_download_thread(
                     url,
                     name,
@@ -8691,6 +8792,8 @@ class DownloadManagerApp:
                     extra_task_data=extra_task_data,
                     resume_requested=startup_resume_requested,
                 )
+            self._schedule_summary_refresh()
+            self._schedule_process_queue(delay=0)
             if end_index < len(pending_tasks):
                 self.root.after(STARTUP_RESUME_BATCH_DELAY_MS, lambda: enqueue_batch(end_index))
                 return
@@ -8699,8 +8802,6 @@ class DownloadManagerApp:
                 self.persist_unfinished_state(force=True)
             except Exception:
                 pass
-            self._schedule_summary_refresh()
-            self._schedule_process_queue(delay=0)
 
         enqueue_batch(0)
 
@@ -10348,6 +10449,8 @@ class DownloadManagerApp:
         if not task:
             return False
         state = str(_task_field_value(task, "state", "") or "")
+        if state in ("PAUSE_REQUESTED", "PAUSED"):
+            raise StopDownloadException("pause requested")
         if state in ("DELETED", "DELETE_REQUESTED"):
             self._discard_deleted_task(item_id)
             raise KeyboardInterrupt()
@@ -10403,7 +10506,13 @@ class DownloadManagerApp:
             return
         if state == "PAUSE_REQUESTED":
             self._set_task_status_mode_ui(item_id, self._paused_status_text())
-            _set_task_aux_fields(task, state="PAUSED", _stop_reason=None)
+            _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, _last_error_status="", _last_error_message="")
+            self._update_task_state_entry(
+                task,
+                state="PAUSED",
+                _last_error_status="",
+                _last_error_message="",
+            )
             return
 
     def _is_live_task(self, task):
@@ -10671,6 +10780,55 @@ class DownloadManagerApp:
     def _start_daemon_thread(self, target, *args, **kwargs):
         threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
 
+    def _download_worker_active(self, item_id):
+        if not item_id:
+            return False
+        lock = getattr(self, "_active_download_item_ids_lock", None)
+        active_ids = getattr(self, "_active_download_item_ids", None)
+        if lock is None or active_ids is None:
+            return False
+        with lock:
+            return item_id in active_ids
+
+    def _try_claim_download_worker(self, item_id):
+        if not item_id:
+            return False
+        lock = getattr(self, "_active_download_item_ids_lock", None)
+        active_ids = getattr(self, "_active_download_item_ids", None)
+        if lock is None or active_ids is None:
+            return True
+        with lock:
+            if item_id in active_ids:
+                return False
+            active_ids.add(item_id)
+            return True
+
+    def _release_download_worker(self, item_id):
+        if not item_id:
+            return
+        lock = getattr(self, "_active_download_item_ids_lock", None)
+        active_ids = getattr(self, "_active_download_item_ids", None)
+        if lock is None or active_ids is None:
+            return
+        with lock:
+            active_ids.discard(item_id)
+
+    def _download_task_worker_entry(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
+        try:
+            self.download_task(url, item_id, save_dir, use_impersonate, is_mp3)
+        finally:
+            self._release_download_worker(item_id)
+            try:
+                write_error_log(
+                    "download task worker released",
+                    Exception("download task worker released"),
+                    item_id=item_id,
+                    url=url,
+                    source_site=_task_source_site_name(self.tasks.get(item_id, {})) or None,
+                )
+            except Exception:
+                pass
+
     def _start_background_parse(self, target):
         self._start_daemon_thread(target)
         self._clear_url_entry()
@@ -10929,6 +11087,8 @@ class DownloadManagerApp:
                 candidates = _extract_tktube_media_candidates(page_text)
             if not candidates and "hayav.com" in search_host:
                 candidates = _extract_hayav_embed_candidates(page_text, base_url=url)
+                if not candidates and "jav code pattern" in str(result.get("snippet") or "").lower():
+                    result["downloadable_probe_failed"] = True
             if not candidates and "njav.com" in search_host and "/xvideos/" in parsed_search_url.path.lower():
                 candidates, njav_title, player_page = _extract_njav_media_candidates(url, page_text=page_text, session=c_req)
                 if njav_title:
@@ -11004,7 +11164,8 @@ class DownloadManagerApp:
                     return result
                 result["quality"] = max(_video_search_quality_score(candidate) for candidate in result["candidate_urls"])
         except Exception:
-            pass
+            if "jav code pattern" in str(result.get("snippet") or "").lower():
+                result["downloadable_probe_failed"] = True
         if not result.get("quality"):
             result["quality"] = _video_search_quality_score(" ".join(str(result.get(key, "")) for key in ("url", "title", "snippet")))
         return result
@@ -11016,6 +11177,7 @@ class DownloadManagerApp:
         search_variants = _video_search_query_variants(search_text)
         primary_queries = [jav_code] if jav_code else (search_variants or [search_text])
         primary_query = primary_queries[0]
+        actress_name_search = _looks_like_actress_name_search(search_text)
 
         def append_unique_results(target, new_results):
             seen_urls = {_normalize_download_url(result.get("url", "")) for result in target}
@@ -11023,6 +11185,9 @@ class DownloadManagerApp:
                 normalized_candidate = _normalize_download_url(candidate.get("url", ""))
                 if normalized_candidate and normalized_candidate not in seen_urls:
                     seen_urls.add(normalized_candidate)
+                    if "_search_order" not in candidate:
+                        candidate = dict(candidate)
+                        candidate["_search_order"] = len(target)
                     target.append(candidate)
 
         def fetch_google_results(query, timeout=VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS):
@@ -11478,7 +11643,6 @@ class DownloadManagerApp:
         cjk_query = _video_search_text_has_cjk(search_text)
         if jav_code:
             fast_source_jobs = common_fast_jobs + [
-                ("movieffm", fetch_movieffm_results),
                 ("hayav", fetch_hayav_results),
                 ("missav", fetch_missav_results),
                 ("njav", fetch_njav_results),
@@ -11487,6 +11651,7 @@ class DownloadManagerApp:
                 ("hohoj", fetch_hohoj_results),
             ]
             slow_source_jobs = [
+                ("movieffm", fetch_movieffm_results),
                 ("avbebe", fetch_avbebe_results),
                 ("goodav17", fetch_goodav_results),
                 ("18jav", fetch_18jav_results),
@@ -11498,29 +11663,55 @@ class DownloadManagerApp:
                 ("iq", fetch_iq_results),
             ] + google_jobs
         elif cjk_query:
-            fast_source_jobs = common_fast_jobs + [
-                ("movieffm", fetch_movieffm_results),
-                ("gimy", fetch_gimy_results),
-                ("ikanbot", fetch_ikanbot_results),
-                ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
-                ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
-            ]
-            slow_source_jobs = [
-                ("anime1", fetch_anime1_results),
-                ("iq", fetch_iq_results),
-                ("nnyy", fetch_nnyy_results),
-                ("yfsp", fetch_yfsp_results),
-                ("tktube", fetch_tktube_results),
-                ("avjoy", fetch_avjoy_results),
-                ("hohoj", fetch_hohoj_results),
-                ("hayav", fetch_hayav_results),
-                ("missav", fetch_missav_results),
-                ("njav", fetch_njav_results),
-                ("avbebe", fetch_avbebe_results),
-                ("goodav17", fetch_goodav_results),
-                ("18jav", fetch_18jav_results),
-                ("javfilms", fetch_javfilms_results),
-            ] + google_jobs
+            if actress_name_search:
+                fast_source_jobs = common_fast_jobs + [
+                    ("avjoy", fetch_avjoy_results),
+                    ("missav", fetch_missav_results),
+                    ("hayav", fetch_hayav_results),
+                    ("njav", fetch_njav_results),
+                    ("tktube", fetch_tktube_results),
+                    ("hohoj", fetch_hohoj_results),
+                    ("avbebe", fetch_avbebe_results),
+                ]
+                slow_source_jobs = [
+                    ("goodav17", fetch_goodav_results),
+                    ("18jav", fetch_18jav_results),
+                    ("javfilms", fetch_javfilms_results),
+                    ("njavtv", fetch_supported_site_engine_results),
+                    ("movieffm", fetch_movieffm_results),
+                    ("gimy", fetch_gimy_results),
+                    ("ikanbot", fetch_ikanbot_results),
+                    ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
+                    ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
+                    ("anime1", fetch_anime1_results),
+                    ("iq", fetch_iq_results),
+                    ("nnyy", fetch_nnyy_results),
+                    ("yfsp", fetch_yfsp_results),
+                ] + google_jobs
+            else:
+                fast_source_jobs = common_fast_jobs + [
+                    ("movieffm", fetch_movieffm_results),
+                    ("gimy", fetch_gimy_results),
+                    ("ikanbot", fetch_ikanbot_results),
+                    ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
+                    ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
+                ]
+                slow_source_jobs = [
+                    ("anime1", fetch_anime1_results),
+                    ("iq", fetch_iq_results),
+                    ("nnyy", fetch_nnyy_results),
+                    ("yfsp", fetch_yfsp_results),
+                    ("tktube", fetch_tktube_results),
+                    ("avjoy", fetch_avjoy_results),
+                    ("hohoj", fetch_hohoj_results),
+                    ("hayav", fetch_hayav_results),
+                    ("missav", fetch_missav_results),
+                    ("njav", fetch_njav_results),
+                    ("avbebe", fetch_avbebe_results),
+                    ("goodav17", fetch_goodav_results),
+                    ("18jav", fetch_18jav_results),
+                    ("javfilms", fetch_javfilms_results),
+                ] + google_jobs
         else:
             fast_source_jobs = common_fast_jobs + [
                 ("movieffm", fetch_movieffm_results),
@@ -11590,6 +11781,29 @@ class DownloadManagerApp:
                     results,
                     collect_parallel(exact_jobs, timeout_seconds=VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS + 2),
                 )
+        elif actress_name_search:
+            actress_queries = [
+                query
+                for primary in primary_queries
+                for query in (
+                    f'"{primary}" "avjoy.me/video"',
+                    f'"{primary}" site:avjoy.me/video',
+                    f'"{primary}" "missav"',
+                    f'"{primary}" "hayav.com/video"',
+                    f'"{primary}" "njav.com/xvideos"',
+                    f'"{primary}" "tktube.com"',
+                    f'"{primary}" "中文字幕"',
+                    f'"{primary}" "chinese subtitle"',
+                )
+            ]
+            actress_jobs = []
+            for actress_query in actress_queries:
+                actress_jobs.append((f"ddg:{actress_query}", lambda q=actress_query: fetch_duckduckgo_results(q, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS)))
+                actress_jobs.append((f"google:{actress_query}", lambda q=actress_query: fetch_google_results(q, timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS)))
+            append_unique_results(
+                results,
+                collect_parallel(actress_jobs, timeout_seconds=VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS + 2),
+            )
         if not results:
             results = collect_parallel(
                 [
@@ -11615,6 +11829,8 @@ class DownloadManagerApp:
             if not title:
                 return True
             if site in VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS:
+                return True
+            if "jav code pattern" in snippet:
                 return True
             if "google" in snippet or "duckduckgo" in snippet:
                 return True
@@ -11653,8 +11869,16 @@ class DownloadManagerApp:
         enriched = [result for result in enriched if _video_search_quality_is_allowed(result)]
         exact_matches = [result for result in enriched if _video_search_matches_query(result, search_text)]
         if exact_matches:
-            enriched = exact_matches
-        elif jav_code or _video_search_query_requires_exact_match(search_text):
+            if actress_name_search and len(exact_matches) < VIDEO_SEARCH_MAX_RESULTS:
+                exact_urls = {_normalize_download_url(result.get("url", "")) for result in exact_matches}
+                enriched = exact_matches + [
+                    result
+                    for result in enriched
+                    if _normalize_download_url(result.get("url", "")) not in exact_urls
+                ][: max(VIDEO_SEARCH_MAX_RESULTS - len(exact_matches), 0)]
+            else:
+                enriched = exact_matches
+        elif jav_code or (_video_search_query_requires_exact_match(search_text) and not actress_name_search):
             return []
         enriched.sort(key=lambda result: _video_search_result_rank(result, search_text))
         return enriched
@@ -12093,6 +12317,26 @@ class DownloadManagerApp:
             updates["_last_error_message"] = str(fields.get("_last_error_message") or "").strip()
         if updates:
             update_state_entry(url, **updates)
+
+    def _ensure_task_active_transfer_state(self, item_id, task=None, reason="active_transfer"):
+        task = task if task is not None else self.tasks.get(item_id)
+        if not task:
+            return task
+        state = str(_task_field_value(task, "state", "") or "").strip().upper()
+        if state != "QUEUED":
+            return task
+        _set_task_aux_fields(task, state="DOWNLOADING")
+        self._update_task_state_entry(task, state="DOWNLOADING")
+        write_error_log(
+            "download task active transfer state repaired",
+            Exception("download task active transfer state repaired"),
+            item_id=item_id,
+            url=_task_field_value(task, "url", "") or "",
+            source_site=_task_source_site_name(task) or None,
+            reason=str(reason or "active_transfer")[:120],
+        )
+        self._schedule_summary_refresh()
+        return task
 
     def _retarget_download_task(self, task, item_id, old_url, target_url, name=None, source_site=None, source_page=None, fallback_urls=None):
         target_url = _normalize_download_url(target_url)
@@ -15500,7 +15744,21 @@ class DownloadManagerApp:
             "_last_error_status": status_text,
             "_last_error_message": detail_text,
         }
-        if _task_source_site_name(task) == "avjoy" and self._is_retryable_media_download_error(f"{exc} {detail_text}"):
+        source_site = _task_source_site_name(task)
+        error_text = f"{exc} {detail_text}"
+        if source_site == "avjoy" and self._is_retryable_media_download_error(error_text):
+            state_updates.update(
+                {
+                    "resolved_url": "",
+                    "resolved_url_saved_at": 0.0,
+                    "fallback_urls": [],
+                }
+            )
+        if source_site == "hayav" and (
+            self._is_retryable_media_download_error(error_text)
+            or "not a valid media" in error_text.lower()
+            or "ffprobe-error" in error_text.lower()
+        ):
             state_updates.update(
                 {
                     "resolved_url": "",
@@ -15948,6 +16206,7 @@ class DownloadManagerApp:
     def _download_http_media(self, item_id, url, out_path, headers=None, session=None, mark_finished=True, deferred_finish_reason=""):
         headers = dict(headers or {})
         task = self._ensure_task_can_continue(item_id)
+        task = self._ensure_task_active_transfer_state(item_id, task, reason="http_media")
         self._set_task_active_media_url(task, url)
         self._cache_task_resolved_link(task, url, fallback_urls=_dedupe_download_urls(_task_field_value(task, "fallback_urls", []), primary_url=url))
         self._set_task_resume_temp_file(task, item_id, out_path)
@@ -15984,6 +16243,7 @@ class DownloadManagerApp:
                     headers["Referer"] = urllib.parse.urlunsplit((parsed_referer.scheme, parsed_referer.netloc, safe_path, parsed_referer.query, ""))
         total_info = self._probe_http_download_info(url, headers=headers, session=session)
         task = self._ensure_task_can_continue(item_id)
+        task = self._ensure_task_active_transfer_state(item_id, task, reason="http_media_probe")
         total_size = total_info.get("total_size", 0)
         range_supported = bool(total_info.get("range_supported"))
         if total_size > 0:
@@ -16420,6 +16680,15 @@ class DownloadManagerApp:
         final_output_path = self._task_output_path_or_default(task, out_path)
         if not self._mark_task_finished(item_id):
             raise Exception("direct media output failed final validation")
+        write_error_log(
+            "direct media wrapper finalized output",
+            Exception("direct media wrapper finalized output"),
+            item_id=item_id,
+            url=media_url,
+            source_site=_task_source_site_name(task) or None,
+            output=final_output_path,
+            bytes=self._get_existing_file_size(final_output_path),
+        )
         return final_output_path
 
     def _is_retryable_media_download_error(self, exc):
@@ -16675,6 +16944,23 @@ class DownloadManagerApp:
                 return int(budget)
         return int(PARALLEL_HLS_HOST_WORKER_BUDGET)
 
+    def _task_candidate_media_hosts(self, task):
+        hosts = set()
+
+        def _add_host(candidate):
+            normalized = _normalize_download_url(candidate)
+            if not normalized:
+                return
+            host = urllib.parse.urlsplit(normalized).netloc.lower()
+            if host:
+                hosts.add(host)
+
+        for field_name in ("_active_media_url", "resolved_url", "url", "source_page"):
+            _add_host(_task_field_value(task, field_name, ""))
+        for candidate in _task_field_value(task, "fallback_urls", []) or []:
+            _add_host(candidate)
+        return hosts
+
     def _active_hls_downloads_for_host(self, host):
         normalized_host = str(host or "").strip().lower()
         if not normalized_host:
@@ -16683,9 +16969,7 @@ class DownloadManagerApp:
         for task in self.tasks.values():
             if not self._is_active_download_slot_state(str(_task_field_value(task, "state", "") or "")):
                 continue
-            active_url = _normalize_download_url(_task_field_value(task, "_active_media_url", "") or "")
-            candidates = [active_url] if active_url else [_task_field_value(task, "resolved_url", "")]
-            if any(urllib.parse.urlsplit(_normalize_download_url(candidate) or "").netloc.lower() == normalized_host for candidate in candidates):
+            if normalized_host in self._task_candidate_media_hosts(task):
                 count += 1
         return max(count, 1)
 
@@ -17347,6 +17631,7 @@ class DownloadManagerApp:
 
     def _try_parallel_hls_segment_download(self, item_id, url, out_path, temp_out_path, progress_path, headers, ffmpeg_path, ffmpeg_version=""):
         task = self.tasks.get(item_id, {})
+        task = self._ensure_task_active_transfer_state(item_id, task, reason="parallel_hls")
         if not self._should_try_parallel_hls_segments(url, task):
             return False
         if bool(_task_field_value(task, "is_mp3", False)):
@@ -17694,12 +17979,15 @@ class DownloadManagerApp:
             task = self._ensure_task_can_continue(item_id)
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             with self._resume_artifact_lock_for(merged_path, out_path):
-                if os.path.exists(out_path):
-                    try:
-                        os.remove(out_path)
-                    except OSError:
-                        pass
-                self._move_file_with_retry(merged_path, out_path, attempts=48, delay_seconds=0.5)
+                if not os.path.exists(merged_path) and self._has_nonempty_file(out_path):
+                    pass
+                else:
+                    if os.path.exists(out_path):
+                        try:
+                            os.remove(out_path)
+                        except OSError:
+                            pass
+                    self._move_file_with_retry(merged_path, out_path, attempts=48, delay_seconds=0.5)
             self._remove_artifact_paths(temp_out_path, transport_path, concat_list_path, progress_path)
             shutil.rmtree(part_dir, ignore_errors=True)
             self._set_task_output_file(task, item_id, out_path)
@@ -17737,6 +18025,43 @@ class DownloadManagerApp:
             raise
         except Exception as exc:
             stop_event.set()
+            try:
+                task = self.tasks.get(item_id, task)
+                existing_info = self._probe_media_info(out_path) if self._has_nonempty_file(out_path) else {}
+                existing_duration = float(existing_info.get("duration", 0.0) or 0.0)
+                existing_size = int(existing_info.get("size", 0) or 0)
+                existing_valid = bool(existing_info.get("valid")) and existing_size > 0
+                duration_matches = (
+                    total_duration <= 300.0
+                    or existing_duration <= 0.0
+                    or existing_duration + max(60.0, total_duration * 0.02) >= total_duration
+                )
+                if (
+                    existing_valid
+                    and duration_matches
+                    and not self._is_incomplete_hls_video_artifact(task, out_path, expected_duration=total_duration)
+                ):
+                    self._set_task_output_file(task, item_id, out_path)
+                    self._set_task_named_column_text(item_id, "progress", "100%")
+                    if self._mark_task_finished(item_id):
+                        self._log_ffmpeg_event(
+                            "parallel hls output already finalized",
+                            Exception("parallel hls output already exists after remux race"),
+                            task,
+                            item_id,
+                            media_url,
+                            output=out_path,
+                            bytes=existing_size,
+                            segments=total_segments,
+                            workers=worker_count,
+                            hls_host=hls_host,
+                            hls_host_active_downloads=hls_host_active_downloads,
+                            hls_host_worker_budget=hls_host_worker_budget,
+                            original_error=str(exc)[:240],
+                        )
+                        return True
+            except Exception:
+                pass
             log_title = "parallel hls google retry later" if has_google_segments else "parallel hls fallback to ffmpeg"
             write_error_log(
                 log_title,
@@ -17957,6 +18282,7 @@ class DownloadManagerApp:
 
     def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False, _audio_transcode_retry=False):
         task = self.tasks.get(item_id, {})
+        task = self._ensure_task_active_transfer_state(item_id, task, reason="ffmpeg_hls")
         self._set_task_active_media_url(task, url)
         source_site = _task_source_site_name(task) or _infer_source_site_from_task_urls(
             url,
@@ -18355,7 +18681,7 @@ class DownloadManagerApp:
         parallel_unsupported_segment_url = ""
         parallel_unsupported_segment_error = None
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("18av", "gimy", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("18av", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -18371,7 +18697,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("18av", "gimy", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("18av", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -18808,6 +19134,40 @@ class DownloadManagerApp:
                         allowed_drift = max(30.0, total_duration * 0.05)
                         if abs(resume_seconds - estimated_resume_seconds) > allowed_drift:
                             resume_seconds = min(resume_seconds, estimated_resume_seconds)
+            if not is_mp3 and total_duration > 300 and resume_seconds > 0 and base_bytes > 0:
+                resume_ratio = min(max(resume_seconds / total_duration, 0.0), 1.0)
+                expected_bytes_for_resume = 0
+                if total_bytes:
+                    expected_bytes_for_resume = int(max(float(total_bytes), 0.0) * resume_ratio)
+                implausible_near_complete_resume = (
+                    resume_ratio >= 0.80
+                    and base_bytes < 5 * 1024 * 1024
+                ) or (
+                    expected_bytes_for_resume > 50 * 1024 * 1024
+                    and base_bytes < max(5 * 1024 * 1024, int(expected_bytes_for_resume * 0.20))
+                )
+                if implausible_near_complete_resume:
+                    write_error_log(
+                        "resume implausible near-complete reset",
+                        Exception("resume progress is far ahead of the preserved partial file"),
+                        url=candidate_url,
+                        item_id=item_id,
+                        source_site=_task_source_site_name(task) or None,
+                        resume_seconds=resume_seconds,
+                        total_duration=total_duration,
+                        resume_ratio=f"{resume_ratio:.4f}",
+                        base_bytes=base_bytes,
+                        total_bytes=total_bytes,
+                        expected_bytes_for_resume=expected_bytes_for_resume,
+                        resume_mode=resume_mode,
+                    )
+                    base_bytes, resume_seconds = self._reset_resume_artifacts(
+                        temp_out_path,
+                        resume_out_path,
+                        merged_out_path,
+                        progress_path,
+                    )
+                    resume_mode = "reset_implausible_near_complete"
             if total_duration > 0 and resume_seconds > 0:
                 resume_seconds = self._sanitize_resume_seconds(resume_seconds, total_duration)
             resume_anchor_seconds = resume_seconds
@@ -19852,7 +20212,8 @@ class DownloadManagerApp:
         queued_items = []
         active_total = 0
         for item_id, task in self.tasks.items():
-            if self._is_active_download_slot_state(str(_task_field_value(task, "state", "") or "")):
+            worker_active = self._download_worker_active(item_id)
+            if self._is_active_download_slot_state(str(_task_field_value(task, "state", "") or "")) or worker_active:
                 active_total += 1
                 domain, source_page = (
                     self._extract_domain(_normalize_download_url(_task_field_value(task, "url", "")) or ""),
@@ -19872,6 +20233,8 @@ class DownloadManagerApp:
         self._log_domain_limit_change(domain_limit, sum(domain_counts.values()), len(queued_items), global_limit=global_limit)
         for item_id in queued_items:
             task = self.tasks[item_id]
+            if self._download_worker_active(item_id):
+                continue
             domain, source_page = (
                 self._extract_domain(_normalize_download_url(_task_field_value(task, "url", "")) or ""),
                 self._get_task_source_page(task),
@@ -19889,6 +20252,16 @@ class DownloadManagerApp:
                 continue
             if source_site and source_site_counts.get(source_site, 0) >= source_site_limit:
                 continue
+            if not self._try_claim_download_worker(item_id):
+                write_error_log(
+                    "download task duplicate worker skipped",
+                    Exception("download task already has an active worker"),
+                    item_id=item_id,
+                    state=_task_field_value(task, "state", "") or "",
+                    url=_task_field_value(task, "url", "") or "",
+                    source_site=source_site or None,
+                )
+                continue
             _set_task_aux_fields(task, state="DOWNLOADING")
             domain_counts[domain] = domain_counts.get(domain, 0) + 1
             if source_page:
@@ -19899,14 +20272,19 @@ class DownloadManagerApp:
                 media_key_counts[media_key] = media_key_counts.get(media_key, 0) + 1
             active_total += 1
             self._set_task_status_mode_ui(item_id, t("status_downloading") if "status_downloading" in I18N_DICT.get(CURRENT_LANG, {}) else "下載中")
-            self._start_daemon_thread(
-                self.download_task,
-                _normalize_download_url(_task_field_value(task, "url", "")) or "",
-                item_id,
-                self.save_dir_var.get(),
-                self._should_use_impersonation(_normalize_download_url(_task_field_value(task, "url", "")) or "", _task_source_site_name(task)),
-                bool(_task_field_value(task, "is_mp3", False)),
-            )
+            try:
+                task_url = _normalize_download_url(_task_field_value(task, "url", "")) or ""
+                self._start_daemon_thread(
+                    self._download_task_worker_entry,
+                    task_url,
+                    item_id,
+                    self.save_dir_var.get(),
+                    self._should_use_impersonation(task_url, _task_source_site_name(task)),
+                    bool(_task_field_value(task, "is_mp3", False)),
+                )
+            except Exception:
+                self._release_download_worker(item_id)
+                raise
 
     def _cleanup_temp_files(self, item_id):
         task = self.tasks.get(item_id)
@@ -20530,12 +20908,29 @@ class DownloadManagerApp:
                 failed_resolved_url=cached_resolved_url,
             )
             return True
-        can_start_cached_link, cached_start_exc = self._cached_resolved_link_can_start_download(
-            task,
-            cached_resolved_url,
-            source_url,
-            timeout_seconds=CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS,
+        skip_start_probe = (
+            source_site == "hayav"
+            and _looks_like_manifest_url(cached_resolved_url)
+            and self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
         )
+        if skip_start_probe:
+            write_error_log(
+                "cached resolved probe skipped",
+                Exception("HayAV HLS resume uses the saved manifest directly to avoid false startup probe failures"),
+                item_id=item_id,
+                source_url=source_url,
+                resolved_url=cached_resolved_url,
+                source_site=source_site,
+                timeout_seconds=CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS,
+            )
+            can_start_cached_link, cached_start_exc = True, None
+        else:
+            can_start_cached_link, cached_start_exc = self._cached_resolved_link_can_start_download(
+                task,
+                cached_resolved_url,
+                source_url,
+                timeout_seconds=CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS,
+            )
         if not can_start_cached_link:
             write_error_log(
                 "cached resolved url startup timeout",
