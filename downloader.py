@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260530-3340"
+APP_BUILD = "20260530-3350"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -88,6 +88,7 @@ LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 3
 RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
 RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 64 * 1024
 CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS = 5.0
+CACHED_RESOLVED_LINK_FRESH_SKIP_PROBE_SECONDS = 120.0
 HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS = 8 * 60
 AVJOY_RESOLVED_URL_CACHE_TTL_SECONDS = 8 * 60
 MAX_QUEUE_TASKS = 300
@@ -3608,6 +3609,153 @@ def _decrypt_3kor_stream_url(encrypted_text, key="my-to-newhan-2025"):
     return _normalize_download_url(stream_url)
 
 
+def _clean_series_site_title(raw_title, fallback_title="Video"):
+    title = html.unescape(re.sub(r"<[^>]+>", " ", str(raw_title or "")))
+    title = re.sub(r"\s+", " ", title).strip()
+    title = re.sub(r"\s*(?:[-_｜|]\s*)?(?:DramasQ.*|欧乐影院.*|歐樂影院.*|新韓劇網.*|線上看.*|线上看.*)$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s+第\s*\d+\s*集\s*$", "", title)
+    title = title.strip(" -_|｜")
+    if not title or _looks_like_garbled_text(title) or _output_title_is_suspicious_value(title):
+        title = str(fallback_title or "Video").strip() or "Video"
+    return title
+
+
+def _extract_3kor_search_results(page_text, base_url="https://3kor.com/"):
+    return [
+        {"url": detail_url, "title": title, "snippet": "3kor site search", "quality": _video_search_quality_score(title)}
+        for detail_url, title in _extract_3kor_detail_entries(page_text, base_url=base_url)
+    ]
+
+
+def _extract_dramasq_episode_entries(page_text, page_url, title_hint="DramasQ"):
+    text = str(page_text or "")
+    base_url = page_url or "https://dramasq.io/"
+    page_title = _clean_series_site_title(_extract_html_title(text, title_hint), fallback_title=title_hint or "DramasQ")
+    entries = []
+    for match in re.finditer(r'href=["\']([^"\']*/vodplay/\d+/ep\d+\.html)["\'][^>]*>(.*?)</a>', text, re.IGNORECASE | re.DOTALL):
+        raw_url = html.unescape(match.group(1) or "").strip()
+        episode_url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not episode_url:
+            continue
+        label = html.unescape(re.sub(r"<[^>]+>", " ", match.group(2) or "")).strip()
+        label = re.sub(r"\s+", " ", label).strip()
+        if not label:
+            ep_match = re.search(r"/ep(\d+)\.html", urllib.parse.urlsplit(episode_url).path, re.IGNORECASE)
+            label = f"第{int(ep_match.group(1)):02d}集" if ep_match else default_short_name_for_url(episode_url)
+        entries.append((episode_url, f"{page_title} {label}".strip()))
+    deduped = []
+    seen = set()
+    for episode_url, label in entries:
+        if episode_url in seen:
+            continue
+        seen.add(episode_url)
+        deduped.append((episode_url, label))
+    return _sort_download_targets_naturally(deduped)
+
+
+def _extract_dramasq_search_results(page_text, base_url="https://dramasq.io/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'href=["\']([^"\']*/(?:detail|vodplay)/\d+(?:/ep\d+)?\.html)["\']', text, re.IGNORECASE):
+        raw_url = html.unescape(match.group(1) or "")
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen:
+            continue
+        window = text[max(0, match.start() - 800):match.end() + 1400]
+        title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*>(.*?)</a>', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<img[^>]+(?:alt|title)=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        title = _clean_series_site_title(title_match.group(1) if title_match else "", fallback_title=default_short_name_for_url(url))
+        seen.add(url)
+        results.append({"url": url, "title": title, "snippet": "dramasq site search", "quality": _video_search_quality_score(title)})
+    return results
+
+
+def _extract_dramasq_playback_candidates(api_text):
+    candidates = []
+    try:
+        data = json.loads(str(api_text or "{}"))
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        for entry in data.get("video_plays") or []:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("play_data", "v_data", "url", "play_url", "src"):
+                candidate = _normalize_download_url(entry.get(key))
+                if candidate:
+                    candidates.append(candidate)
+        _walk_media_urls(data, candidates)
+    if not candidates:
+        candidates = _extract_candidate_media_urls(str(api_text or ""), allowed_exts=(".m3u8", ".mp4", ".mpd"))
+    return _dedupe_download_urls(candidates)
+
+
+def _extract_olevod_episode_entries(page_text, page_url, title_hint="Olevod"):
+    text = str(page_text or "")
+    base_url = page_url or "https://olevod.com/"
+    page_title = _clean_series_site_title(_extract_html_title(text, title_hint), fallback_title=title_hint or "Olevod")
+    entries = []
+    for match in re.finditer(r'href=["\']([^"\']*/index\.php/vod/play/id/\d+/sid/\d+/nid/\d+\.html)["\'][^>]*>(.*?)</a>', text, re.IGNORECASE | re.DOTALL):
+        raw_url = html.unescape(match.group(1) or "").strip()
+        episode_url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not episode_url:
+            continue
+        label = html.unescape(re.sub(r"<[^>]+>", " ", match.group(2) or "")).strip()
+        label = re.sub(r"\s+", " ", label).strip()
+        if not label or len(label) > 40:
+            nid_match = re.search(r"/nid/(\d+)\.html", urllib.parse.urlsplit(episode_url).path, re.IGNORECASE)
+            label = f"第{int(nid_match.group(1)):02d}集" if nid_match else default_short_name_for_url(episode_url)
+        entries.append((episode_url, f"{page_title} {label}".strip()))
+    deduped = []
+    seen = set()
+    for episode_url, label in entries:
+        if episode_url in seen:
+            continue
+        seen.add(episode_url)
+        deduped.append((episode_url, label))
+    return _sort_download_targets_naturally(deduped)
+
+
+def _extract_olevod_search_results(page_text, base_url="https://olevod.com/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'href=["\']([^"\']*/index\.php/vod/detail/id/\d+\.html)["\']', text, re.IGNORECASE):
+        raw_url = html.unescape(match.group(1) or "")
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen:
+            continue
+        window = text[max(0, match.start() - 900):match.end() + 1800]
+        title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*(?:title|alt)=["\']([^"\']+)', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<a[^>]+(?:title|alt)=["\']([^"\']+)["\'][^>]+href=["\']' + re.escape(match.group(1)) + r'["\']', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<img[^>]+(?:alt|title)=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        title = _clean_series_site_title(title_match.group(1) if title_match else "", fallback_title=default_short_name_for_url(url))
+        seen.add(url)
+        results.append({"url": url, "title": title, "snippet": "olevod site search", "quality": _video_search_quality_score(title)})
+    return results
+
+
+def _extract_olevod_playback_candidates(page_text):
+    text = str(page_text or "")
+    player_data = _extract_player_js_object(text, "player_aaaa", "player_data", "player")
+    candidates = []
+    if isinstance(player_data, dict):
+        for key in ("url", "src", "play_url", "playUrl", "m3u8", "url_next"):
+            candidate = _decode_maccms_player_url(player_data.get(key), player_data.get("encrypt", 0))
+            if candidate:
+                candidates.append(candidate)
+        for key in ("urls", "backup", "backup_urls", "m3u8_urls"):
+            value = player_data.get(key)
+            if isinstance(value, (list, tuple)):
+                candidates.extend(value)
+    candidates.extend(_extract_candidate_media_urls(text, allowed_exts=(".m3u8", ".mp4", ".mpd")))
+    return _dedupe_download_urls(candidates)
+
+
 def _clean_99itv_title(raw_title):
     cleaned = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     if not cleaned:
@@ -5164,6 +5312,10 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "99itv.net",
     "hanime1.me",
     "hanimeone.me",
+    "3kor.com",
+    "dramasq.io",
+    "olevod.com",
+    "olehdtv.com",
 )
 
 VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
@@ -5204,6 +5356,10 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "99itv.net",
     "hanime1.me",
     "hanimeone.me",
+    "3kor.com",
+    "dramasq.io",
+    "olevod.com",
+    "olehdtv.com",
 )
 
 VIDEO_SEARCH_SITE_PRIORITY = {
@@ -5226,6 +5382,10 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "gimy01.co": 15,
     "gimy01.tv": 16,
     "gimy.tube": 17,
+    "3kor.com": 17,
+    "dramasq.io": 17,
+    "olevod.com": 18,
+    "olehdtv.com": 18,
     "avbebe.com": 18,
     "hayav.com": 18,
     "avjoy.me": 20,
@@ -5260,6 +5420,25 @@ VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS = (
     "dailymotion.com",
     "iq.com",
     "yfsp.tv",
+)
+
+VIDEO_SEARCH_PLAYLIST_DETAIL_SITE_MARKERS = (
+    "anime1.me",
+    "anime1.pw",
+    "gimy.cc",
+    "gimy.tw",
+    "gimy01.co",
+    "gimy01.tv",
+    "gimy.tube",
+    "movieffm.net",
+    "nnyy.in",
+    "xiaoyakankan.io",
+    "xiaoyakankan.tv",
+    "xiaoyakankan.com",
+    "3kor.com",
+    "dramasq.io",
+    "olevod.com",
+    "olehdtv.com",
 )
 
 VIDEO_SEARCH_CHINESE_SUBTITLE_MARKERS = (
@@ -5516,7 +5695,7 @@ def _video_search_site_for_url(url):
 
 SIMPLIFIED_TO_TRADITIONAL_SEARCH_CHARS = str.maketrans({
     "异": "異", "国": "國", "台": "臺", "后": "後", "发": "發", "复": "復", "尽": "盡",
-    "里": "裡", "冲": "衝", "丑": "醜", "并": "並", "别": "別", "卧": "臥", "卷": "捲",
+    "里": "裡", "冲": "衝", "丑": "醜", "并": "並", "别": "別", "卧": "臥", "卷": "捲", "医": "醫",
     "只": "隻", "叶": "葉", "吁": "籲", "听": "聽", "启": "啟", "吴": "吳", "周": "週",
     "呆": "獃", "员": "員", "响": "響", "唇": "脣", "问": "問", "啸": "嘯", "喂": "餵",
     "团": "團", "园": "園", "围": "圍", "图": "圖", "圆": "圓", "圣": "聖", "场": "場",
@@ -5677,6 +5856,15 @@ def _anime1_url_is_category_listing(url):
     if "/category/" in parsed.path.lower():
         return True
     return bool(urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("cat"))
+
+
+def _anime1_url_is_episode_page(url):
+    parsed = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or ""))
+    if "anime1." not in parsed.netloc.lower():
+        return False
+    if _anime1_url_is_category_listing(url):
+        return False
+    return bool(re.fullmatch(r"/\d+/?", parsed.path or ""))
 
 
 def _is_known_non_download_listing_url(url):
@@ -6585,6 +6773,10 @@ def _video_search_result_is_downloadable(result):
         "99itv.net",
         "hanime1.me",
         "hanimeone.me",
+        "3kor.com",
+        "dramasq.io",
+        "olevod.com",
+        "olehdtv.com",
     ):
         return True
     return site in VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS
@@ -6872,6 +7064,58 @@ def _extract_xiaoyakankan_play_urls(page_text, base_url):
         if url and url not in urls:
             urls.append(url)
     return urls
+
+
+def _collect_xiaoyakankan_playlist_entries(page_text, base_url, fallback_title=""):
+    text = str(page_text or "")
+    base_url = _normalize_download_url(base_url) or str(base_url or "")
+    series_title = _clean_xiaoyakankan_title(fallback_title or _extract_html_title(text, "XiaoyaKankan")) or "XiaoyaKankan"
+
+    def collect_from_block(block_text):
+        entries = []
+        seen = set()
+        for match in re.finditer(r'<a\b([^>]*)href=["\']([^"\']*/vod/play/id/[^"\']+)["\']([^>]*)>(.*?)</a>', str(block_text or ""), re.IGNORECASE | re.DOTALL):
+            attrs = f"{match.group(1) or ''} {match.group(3) or ''}"
+            raw_url = html.unescape(match.group(2))
+            url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+            if not url or url in seen:
+                continue
+            title_match = re.search(r'title=["\']([^"\']+)["\']', attrs, re.IGNORECASE | re.DOTALL)
+            raw_label = title_match.group(1) if title_match else match.group(4)
+            label = html.unescape(re.sub(r"<[^>]+>", " ", str(raw_label or ""))).strip()
+            label = re.sub(r"\s+", " ", label)
+            label = re.sub(r"\s*線上看\s*$", "", label, flags=re.IGNORECASE).strip()
+            episode_no = _extract_episode_order_number(label) or _extract_episode_order_number(url)
+            if episode_no is not None:
+                label = f"第{int(episode_no):02d}集"
+            elif not label:
+                label = f"Episode {len(entries) + 1:02d}"
+            if series_title and series_title not in label:
+                label = f"{series_title} {label}".strip()
+            seen.add(url)
+            entries.append({"url": url, "title": label})
+        return _sort_download_targets_naturally(entries)
+
+    grouped_entries = []
+    for group_match in re.finditer(
+        r'<div[^>]+class=["\'][^"\']*play-name[^"\']*["\'][^>]*>(.*?)</div>\s*<div[^>]+class=["\'][^"\']*play-list-link[^"\']*["\'][^>]*>(.*?)</div>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        source_name = html.unescape(re.sub(r"<[^>]+>", " ", group_match.group(1) or "")).strip()
+        entries = collect_from_block(group_match.group(2))
+        if entries:
+            grouped_entries.append(
+                {
+                    "entries": entries,
+                    "quality": _video_search_quality_score(source_name),
+                    "source": source_name,
+                }
+            )
+    if grouped_entries:
+        grouped_entries.sort(key=lambda item: (-len(item["entries"]), -int(item.get("quality") or 0), str(item.get("source") or "")))
+        return grouped_entries[0]["entries"]
+    return collect_from_block(text)
 
 
 def save_state_entries(entries):
@@ -9559,6 +9803,75 @@ class DownloadManagerApp:
                 write_error_log("3kor detail parse failure", exc, url=new_url)
                 self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
 
+        def fetch_dramasq_playlist():
+            try:
+                parsed_url = urllib.parse.urlsplit(new_url)
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome120",
+                    timeout=20,
+                    headers=_make_ytdlp_http_headers(referer="https://dramasq.io/"),
+                )
+                page_text = _response_text_utf8(resp)
+                page_title = _clean_series_site_title(_extract_html_title(page_text, "DramasQ"), fallback_title="DramasQ")
+                episodes = _extract_dramasq_episode_entries(page_text, new_url, page_title)
+                if not episodes and re.search(r"/vodplay/\d+/ep\d+\.html$", parsed_url.path, re.IGNORECASE):
+                    ep_match = re.search(r"/ep(\d+)\.html$", parsed_url.path, re.IGNORECASE)
+                    ep_name = f"第{int(ep_match.group(1)):02d}集" if ep_match else ""
+                    episodes = [(new_url, f"{page_title} {ep_name}".strip())]
+                if not episodes:
+                    self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="dramasq")
+                    return
+
+                def enqueue():
+                    targets = self._choose_playlist_targets(episodes, episodes[0])
+                    for episode_url, episode_name in targets:
+                        self._final_add_download(
+                            episode_url,
+                            is_mp3=is_mp3,
+                            custom_name=episode_name,
+                            source_site="dramasq",
+                            extra_task_data=self._build_extra_task_data(source_page=new_url),
+                        )
+
+                self._schedule_ui_call(enqueue)
+            except Exception as exc:
+                write_error_log("dramasq playlist parse failure", exc, url=new_url)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
+
+        def fetch_olevod_playlist():
+            try:
+                c_req = get_curl_cffi_requests()
+                resp = c_req.get(
+                    new_url,
+                    impersonate="chrome120",
+                    timeout=20,
+                    headers=_make_ytdlp_http_headers(referer="https://olevod.com/"),
+                )
+                page_text = _response_text_utf8(resp)
+                page_title = _clean_series_site_title(_extract_html_title(page_text, "Olevod"), fallback_title="Olevod")
+                episodes = _extract_olevod_episode_entries(page_text, new_url, page_title)
+                if not episodes:
+                    self._final_add_download(new_url, is_mp3=is_mp3, custom_name=page_title, source_site="olevod")
+                    return
+
+                def enqueue():
+                    targets = self._choose_playlist_targets(episodes, episodes[0])
+                    for episode_url, episode_name in targets:
+                        self._final_add_download(
+                            episode_url,
+                            is_mp3=is_mp3,
+                            custom_name=episode_name,
+                            source_site="olevod",
+                            extra_task_data=self._build_extra_task_data(source_page=new_url),
+                        )
+
+                self._schedule_ui_call(enqueue)
+            except Exception as exc:
+                write_error_log("olevod playlist parse failure", exc, url=new_url)
+                self._schedule_error(f"{self._ui_text('err_site_parse', '解析失敗')}: {str(exc)[:120]}")
+
         def fetch_99itv_single():
             try:
                 c_req = get_curl_cffi_requests()
@@ -9748,6 +10061,12 @@ class DownloadManagerApp:
             return
         if "3kor.com" in lowered and re.search(r"/detail/\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
             self._start_background_parse(fetch_3kor_detail)
+            return
+        if "dramasq.io" in lowered and re.search(r"/(?:detail|vodplay)/\d+(?:/ep\d+)?\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
+            self._start_background_parse(fetch_dramasq_playlist)
+            return
+        if ("olevod.com" in lowered or "olehdtv.com" in lowered) and re.search(r"/index\.php/vod/(?:detail|play)/id/\d+", lowered, re.IGNORECASE):
+            self._start_background_parse(fetch_olevod_playlist)
             return
         if "99itv.net" in lowered and re.search(r"/vodplay/\d+-\d+-\d+\.html(?:[?#].*)?$", lowered, re.IGNORECASE):
             self._start_background_parse(fetch_99itv_single)
@@ -11012,7 +11331,107 @@ class DownloadManagerApp:
             "99itv.net": "99itv",
             "hanime1.me": "hanime1",
             "hanimeone.me": "hanime1",
+            "3kor.com": "3kor",
+            "dramasq.io": "dramasq",
+            "olevod.com": "olevod",
+            "olehdtv.com": "olevod",
         }.get(site, "missav" if site == "missav" else site.replace(".com", "").replace(".tv", ""))
+
+    def _extract_search_result_playlist_entries(self, url, page_text, title_hint="", query_text="", c_req=None):
+        normalized_url = _normalize_download_url(url)
+        if not normalized_url:
+            return []
+        parsed = urllib.parse.urlsplit(normalized_url)
+        site = _video_search_site_for_url(normalized_url)
+        page_title = str(title_hint or _extract_html_title(page_text, query_text) or query_text or "").strip()
+        if site in ("xiaoyakankan.io", "xiaoyakankan.tv", "xiaoyakankan.com"):
+            return _collect_xiaoyakankan_playlist_entries(page_text, normalized_url, page_title)
+        if site == "3kor.com" and re.search(r"/detail/\d+\.html$", parsed.path, re.IGNORECASE):
+            base_page_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+            play_entries = _extract_3kor_play_entries(page_text)
+            return _sort_download_targets_naturally(
+                {
+                    "url": f"{base_page_url}?play={urllib.parse.quote(play_id)}",
+                    "title": f"{page_title or '3KOR'} {play_name}".strip(),
+                }
+                for play_id, play_name in play_entries
+                if play_id
+            )
+        if site == "dramasq.io":
+            return [
+                {"url": episode_url, "title": title}
+                for episode_url, title in _extract_dramasq_episode_entries(page_text, normalized_url, page_title or query_text or "DramasQ")
+            ]
+        if site in ("olevod.com", "olehdtv.com"):
+            return [
+                {"url": episode_url, "title": title}
+                for episode_url, title in _extract_olevod_episode_entries(page_text, normalized_url, page_title or query_text or "Olevod")
+            ]
+        if site in ("gimy.cc", "gimy.tw", "gimy01.co", "gimy01.tv", "gimy.tube") and _is_gimy_detail_path(parsed.path):
+            base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+            drama_name = _clean_gimy_title(page_title or "Gimy", fallback_title=page_title or query_text or "Gimy", page_url=normalized_url)
+            entries = self._extract_gimy_detail_entries(page_text, base, drama_name)
+            if not entries or self._is_gimy_movie_detail(entries):
+                return []
+            grouped_entries = self._group_gimy_episode_entries(entries)
+            return _sort_download_targets_naturally(
+                {
+                    "url": entry.get("url", ""),
+                    "title": entry.get("full_name") or entry.get("title") or drama_name,
+                }
+                for entry in grouped_entries
+                if _normalize_download_url(entry.get("url", ""))
+            )
+        if site == "movieffm.net":
+            if "/drama/" in parsed.path.lower():
+                _drama_title, episodes, _episode_fallbacks = _collect_movieffm_drama_episodes(page_text, normalized_url, page_title or "MovieFFM")
+                return _sort_download_targets_naturally(
+                    {"url": ep_url, "title": ep_name}
+                    for ep_url, ep_name in episodes
+                    if _normalize_download_url(ep_url)
+                )
+            if "/tvshows/" in parsed.path.lower():
+                request_client = c_req or get_curl_cffi_requests()
+                detail_pages = _collect_movieffm_tvshow_detail_pages(page_text, normalized_url, page_title or "MovieFFM")[1]
+                playlist_entries = []
+                seen_urls = set()
+                for detail_url, _season_name in detail_pages[:8]:
+                    try:
+                        detail_resp = request_client.get(
+                            detail_url,
+                            impersonate="chrome110",
+                            timeout=VIDEO_SEARCH_ENRICH_TIMEOUT_SECONDS,
+                            headers={"Referer": normalized_url},
+                        )
+                        _drama_title, episodes, _episode_fallbacks = _collect_movieffm_drama_episodes(
+                            _response_text_utf8(detail_resp),
+                            detail_url,
+                            page_title or "MovieFFM",
+                        )
+                    except Exception:
+                        episodes = []
+                    for ep_url, ep_name in episodes:
+                        normalized_ep_url = _normalize_download_url(ep_url)
+                        if not normalized_ep_url or normalized_ep_url in seen_urls:
+                            continue
+                        seen_urls.add(normalized_ep_url)
+                        playlist_entries.append({"url": normalized_ep_url, "title": ep_name})
+                return _sort_download_targets_naturally(playlist_entries)
+        if site == "nnyy.in" and re.search(r"/(?:dianshiju|dongman|zongyi)/\d+\.html$", parsed.path, re.IGNORECASE):
+            episode_entries, _default_slug = _extract_nnyy_episode_entries(page_text)
+            if len(episode_entries) <= 1:
+                return []
+            base_page_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+            episode_pad_width = max(2, len(str(len(episode_entries) or 0)))
+            return _sort_download_targets_naturally(
+                {
+                    "url": f"{base_page_url}?ep={urllib.parse.quote(ep_slug)}",
+                    "title": f"{page_title or '努努影院'} {_normalize_nnyy_episode_name(ep_name, ep_slug=ep_slug, pad_width=episode_pad_width)}".strip(),
+                }
+                for ep_slug, ep_name in episode_entries
+                if ep_slug
+            )
+        return []
 
     def _enrich_video_search_result(self, result, query_text):
         result = dict(result or {})
@@ -11083,6 +11502,19 @@ class DownloadManagerApp:
             candidates = []
             parsed_search_url = urllib.parse.urlsplit(url)
             search_host = parsed_search_url.netloc.lower()
+            playlist_entries = self._extract_search_result_playlist_entries(
+                url,
+                page_text,
+                result.get("title") or enriched_title or query_text,
+                query_text=query_text,
+                c_req=c_req,
+            )
+            if len(playlist_entries) > 1:
+                result["playlist_entries"] = playlist_entries
+                result["playlist_count"] = len(playlist_entries)
+                result["playlist_source_page"] = url
+                result["source_page"] = url
+                candidates = [entry["url"] for entry in playlist_entries if _normalize_download_url(entry.get("url", ""))]
             if _is_ani_gamer_video_url(url):
                 sn = (urllib.parse.parse_qs(parsed_search_url.query, keep_blank_values=True).get("sn") or [""])[0]
                 fallback_query = ANI_GAMER_SN_SEARCH_FALLBACKS.get(str(sn or "").strip(), "")
@@ -11652,9 +12084,52 @@ class DownloadManagerApp:
                 ]
             )
 
+        def fetch_3kor_results():
+            collected = []
+            for variant in search_variants:
+                try:
+                    headers = _make_ytdlp_http_headers(referer="https://3kor.com/")
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    resp = c_req.post(
+                        "https://3kor.com/search/",
+                        data={"show": "searchkey", "keyboard": variant},
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=headers,
+                    )
+                    append_unique_results(collected, _extract_3kor_search_results(_response_text_utf8(resp), base_url=str(getattr(resp, "url", "https://3kor.com/search/"))))
+                except Exception:
+                    pass
+            return collected
+
+        def fetch_dramasq_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://dramasq.io",
+                        "url": lambda variant: "https://dramasq.io/search?" + urllib.parse.urlencode({"q": variant}),
+                        "extractor": _extract_dramasq_search_results,
+                    }
+                ]
+            )
+
+        def fetch_olevod_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://olevod.com",
+                        "url": lambda variant: "https://olevod.com/index.php/vod/search.html?" + urllib.parse.urlencode({"wd": variant}),
+                        "extractor": _extract_olevod_search_results,
+                    }
+                ]
+            )
+
         def fetch_supported_site_engine_results():
             collected = []
             engine_targets = (
+                ("3kor.com", ("/detail/", "/list/")),
+                ("dramasq.io", ("/detail/", "/vodplay/")),
+                ("olevod.com", ("/index.php/vod/detail/", "/index.php/vod/play/")),
                 ("av01.media", ("/tw/video/", "/video/")),
                 ("avhd101.com", ("/search", "/vodplay", "/video")),
                 ("ikanbot.com", ("/play/", "/voddetail/", "/vodsearch/")),
@@ -11680,9 +12155,22 @@ class DownloadManagerApp:
                         break
             return collected
 
-        def collect_parallel(search_jobs, timeout_seconds):
+        def collect_parallel(search_jobs, timeout_seconds, target_exact_results=0):
             collected = []
             if not search_jobs:
+                return collected
+            if target_exact_results:
+                deadline = time.time() + max(float(timeout_seconds or 0), 1.0)
+                for _label, job in search_jobs:
+                    if time.time() >= deadline:
+                        break
+                    try:
+                        append_unique_results(collected, job())
+                    except Exception:
+                        continue
+                    exact_count = sum(1 for result in collected if _video_search_matches_query(result, search_text))
+                    if exact_count >= int(target_exact_results):
+                        break
                 return collected
             executor = DaemonThreadPoolExecutor(max_workers=min(len(search_jobs), VIDEO_SEARCH_SOURCE_WORKERS))
             future_map = {}
@@ -11692,6 +12180,10 @@ class DownloadManagerApp:
                     for future in concurrent.futures.as_completed(future_map, timeout=timeout_seconds):
                         try:
                             append_unique_results(collected, future.result())
+                            if target_exact_results:
+                                exact_count = sum(1 for result in collected if _video_search_matches_query(result, search_text))
+                                if exact_count >= int(target_exact_results):
+                                    break
                         except Exception:
                             continue
                 except concurrent.futures.TimeoutError:
@@ -11723,6 +12215,7 @@ class DownloadManagerApp:
             slow_source_jobs = [
                 ("movieffm", fetch_movieffm_results),
                 ("avbebe", fetch_avbebe_results),
+                ("3kor", fetch_3kor_results),
                 ("goodav17", fetch_goodav_results),
                 ("18jav", fetch_18jav_results),
                 ("javfilms", fetch_javfilms_results),
@@ -11751,26 +12244,34 @@ class DownloadManagerApp:
                     ("movieffm", fetch_movieffm_results),
                     ("gimy", fetch_gimy_results),
                     ("ikanbot", fetch_ikanbot_results),
+                    ("3kor", fetch_3kor_results),
                     ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
                     ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
                     ("anime1", fetch_anime1_results),
                     ("iq", fetch_iq_results),
                     ("nnyy", fetch_nnyy_results),
                     ("yfsp", fetch_yfsp_results),
+                    ("dramasq", fetch_dramasq_results),
+                    ("olevod", fetch_olevod_results),
                 ] + google_jobs
             else:
                 fast_source_jobs = common_fast_jobs + [
-                    ("movieffm", fetch_movieffm_results),
-                    ("gimy", fetch_gimy_results),
-                    ("ikanbot", fetch_ikanbot_results),
+                    ("3kor", fetch_3kor_results),
+                    ("dramasq", fetch_dramasq_results),
+                    ("olevod", fetch_olevod_results),
                     ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
                     ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
+                    ("gimy", fetch_gimy_results),
+                    ("movieffm", fetch_movieffm_results),
+                    ("ikanbot", fetch_ikanbot_results),
                 ]
                 slow_source_jobs = [
                     ("anime1", fetch_anime1_results),
                     ("iq", fetch_iq_results),
                     ("nnyy", fetch_nnyy_results),
                     ("yfsp", fetch_yfsp_results),
+                    ("dramasq", fetch_dramasq_results),
+                    ("olevod", fetch_olevod_results),
                     ("tktube", fetch_tktube_results),
                     ("avjoy", fetch_avjoy_results),
                     ("hohoj", fetch_hohoj_results),
@@ -11787,6 +12288,9 @@ class DownloadManagerApp:
                 ("movieffm", fetch_movieffm_results),
                 ("gimy", fetch_gimy_results),
                 ("ikanbot", fetch_ikanbot_results),
+                ("3kor", fetch_3kor_results),
+                ("dramasq", fetch_dramasq_results),
+                ("olevod", fetch_olevod_results),
                 ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
                 ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
                 ("iq", fetch_iq_results),
@@ -11809,6 +12313,7 @@ class DownloadManagerApp:
         results = collect_parallel(
             fast_source_jobs,
             timeout_seconds=max(VIDEO_SEARCH_SITE_TIMEOUT_SECONDS, VIDEO_SEARCH_ENGINE_TIMEOUT_SECONDS) + 2,
+            target_exact_results=VIDEO_SEARCH_FAST_STAGE_TARGET_RESULTS,
         )
         exact_fast_results = [result for result in results if _video_search_matches_query(result, search_text)]
         if len(exact_fast_results) < VIDEO_SEARCH_FAST_STAGE_TARGET_RESULTS:
@@ -11897,6 +12402,8 @@ class DownloadManagerApp:
             title = str(result.get("title") or "").strip()
             snippet = str(result.get("snippet") or "").strip().lower()
             if not title:
+                return True
+            if site in VIDEO_SEARCH_PLAYLIST_DETAIL_SITE_MARKERS:
                 return True
             if site in VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS:
                 return True
@@ -16498,7 +17005,7 @@ class DownloadManagerApp:
                     if immediate_multipart and not switched_to_multipart:
                         switched_to_multipart = True
                         break
-                    if not switched_to_multipart and range_supported and total_size > 0:
+                    if not switched_to_multipart and range_supported and total_size > 0 and _task_source_site_name(task) != "anime1":
                         elapsed_probe = time.time() - start_time
                         if elapsed_probe >= HTTP_MULTIPART_TRIGGER_SECONDS:
                             current_speed = max((downloaded - resume_bytes) / max(elapsed_probe, 0.001), 0.0)
@@ -20610,6 +21117,14 @@ class DownloadManagerApp:
         else:
             self._set_task_parse_ui(item_id, message="已記錄連結失效，重新分析頁面...")
         retry_url = self._get_task_source_page(task, fallback_url=source_url)
+        if _task_source_site_name(task) == "anime1":
+            task_url = _normalize_download_url(_task_field_value(task, "url", "")) or ""
+            for candidate in (source_url, task_url, retry_url):
+                if _anime1_url_is_episode_page(candidate):
+                    retry_url = candidate
+                    break
+            if _anime1_url_is_category_listing(retry_url):
+                retry_url = task_url or source_url
         if retry_url and retry_url != source_url:
             self._download_task_internal(retry_url, item_id, save_dir, use_impersonate, is_mp3)
             return
@@ -20617,14 +21132,56 @@ class DownloadManagerApp:
 
     def _cached_resolved_link_probe_headers(self, task, probe_url, source_url):
         source_page = self._get_task_source_page(task, fallback_url=source_url) or source_url
+        if _task_source_site_name(task) == "anime1":
+            task_url = _normalize_download_url(_task_field_value(task, "url", "")) or ""
+            if _anime1_url_is_episode_page(source_url):
+                source_page = source_url
+            elif _anime1_url_is_episode_page(task_url):
+                source_page = task_url
         parsed_source = urllib.parse.urlsplit(str(source_page or ""))
         origin = f"{parsed_source.scheme}://{parsed_source.netloc}" if parsed_source.scheme and parsed_source.netloc else None
         base_headers = _make_hls_http_headers(referer=source_page, origin=origin) if _looks_like_manifest_url(probe_url) else _make_ytdlp_http_headers(referer=source_page, origin=origin)
         return _make_range_http_headers(base_headers, "bytes=0-0")
 
-    def _read_probe_url_start_bytes(self, probe_url, headers, timeout_seconds):
+    def _read_probe_url_start_bytes(self, probe_url, headers, timeout_seconds, use_browser_probe=False, browser_probe_session=None):
         request_headers = dict(headers or {})
         request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        probe_host = urllib.parse.urlsplit(str(probe_url or "")).netloc.lower()
+        header_blob = " ".join(str(value or "") for value in request_headers.values()).lower()
+        use_browser_probe = bool(use_browser_probe) or "anime1.me" in probe_host or "anime1.pw" in probe_host or "anime1." in header_blob
+        if use_browser_probe:
+            c_req = get_curl_cffi_requests()
+            session = browser_probe_session or c_req.Session(impersonate="chrome110")
+            owns_session = browser_probe_session is None
+            response = None
+            try:
+                response = session.get(
+                    probe_url,
+                    headers=request_headers,
+                    timeout=max(float(timeout_seconds or 0.0), 1.0),
+                    stream=True,
+                )
+                status = int(getattr(response, "status_code", 0) or 0)
+                if status >= 400:
+                    raise Exception(f"HTTP {status}")
+                content_type = str(response.headers.get("Content-Type") or "").lower()
+                data = b""
+                for chunk in response.iter_content(chunk_size=512):
+                    if chunk:
+                        data = chunk[:512]
+                        break
+                return data or b"", content_type
+            finally:
+                try:
+                    if response is not None:
+                        response.close()
+                except Exception:
+                    pass
+                try:
+                    if owns_session:
+                        session.close()
+                except Exception:
+                    pass
         req = urllib.request.Request(probe_url, headers=request_headers)
         with urllib.request.urlopen(req, timeout=max(float(timeout_seconds or 0.0), 1.0)) as resp:
             status = int(getattr(resp, "status", 0) or resp.getcode() or 0)
@@ -20643,10 +21200,18 @@ class DownloadManagerApp:
         def _remaining_timeout():
             return max(deadline - time.time(), 0.5)
 
+        browser_probe_session = None
         try:
             headers = self._cached_resolved_link_probe_headers(task, normalized_url, source_url)
+            source_site = _task_source_site_name(task)
+            prefer_browser_probe = self._should_use_impersonation(source_url, source_site) or self._should_use_impersonation(normalized_url, source_site)
+            if prefer_browser_probe:
+                try:
+                    browser_probe_session = get_curl_cffi_requests().Session(impersonate="chrome110")
+                except Exception:
+                    browser_probe_session = None
             if not _looks_like_manifest_url(normalized_url):
-                data, content_type = self._read_probe_url_start_bytes(normalized_url, headers, _remaining_timeout())
+                data, content_type = self._read_probe_url_start_bytes(normalized_url, headers, _remaining_timeout(), use_browser_probe=prefer_browser_probe, browser_probe_session=browser_probe_session)
                 if _is_non_video_probe_payload(data, content_type):
                     raise Exception(f"cached resolved URL returned non-video payload: {content_type or 'unknown'}")
                 return bool(data), None
@@ -20655,6 +21220,8 @@ class DownloadManagerApp:
                 normalized_url,
                 _make_range_http_headers(headers, ""),
                 _remaining_timeout(),
+                use_browser_probe=prefer_browser_probe,
+                browser_probe_session=browser_probe_session,
             )
             manifest_text = manifest_data.decode("utf-8", "ignore")
             if "#EXTM3U" not in manifest_text:
@@ -20666,6 +21233,8 @@ class DownloadManagerApp:
                     variant_url,
                     _make_range_http_headers(headers, ""),
                     _remaining_timeout(),
+                    use_browser_probe=prefer_browser_probe,
+                    browser_probe_session=browser_probe_session,
                 )
                 manifest_text = variant_data.decode("utf-8", "ignore")
                 if "#EXTM3U" not in manifest_text:
@@ -20680,12 +21249,18 @@ class DownloadManagerApp:
             if not first_segment_url:
                 return True, None
             segment_headers = self._cached_resolved_link_probe_headers(task, first_segment_url, source_url)
-            data, content_type = self._read_probe_url_start_bytes(first_segment_url, segment_headers, _remaining_timeout())
+            data, content_type = self._read_probe_url_start_bytes(first_segment_url, segment_headers, _remaining_timeout(), use_browser_probe=prefer_browser_probe, browser_probe_session=browser_probe_session)
             if _is_non_video_probe_payload(data, content_type):
                 raise Exception(f"cached HLS segment returned non-video payload: {content_type or 'unknown'}")
             return bool(data), None
         except Exception as exc:
             return False, exc
+        finally:
+            try:
+                if browser_probe_session is not None:
+                    browser_probe_session.close()
+            except Exception:
+                pass
 
     def _cached_resolved_link_needs_source_refresh(self, task, cached_resolved_url):
         source_site = _task_source_site_name(task)
@@ -21065,16 +21640,34 @@ class DownloadManagerApp:
             and _looks_like_manifest_url(cached_resolved_url)
             and self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
         )
+        if not skip_start_probe and not _looks_like_manifest_url(cached_resolved_url):
+            try:
+                cached_age = time.time() - float(_task_field_value(task, "resolved_url_saved_at", 0.0) or 0.0)
+            except Exception:
+                cached_age = CACHED_RESOLVED_LINK_FRESH_SKIP_PROBE_SECONDS + 1.0
+            if 0 <= cached_age <= CACHED_RESOLVED_LINK_FRESH_SKIP_PROBE_SECONDS and not _is_expired_signed_media_url(cached_resolved_url):
+                skip_start_probe = True
+                write_error_log(
+                    "cached resolved probe skipped",
+                    Exception("fresh cached direct media URL starts without an extra startup probe"),
+                    item_id=item_id,
+                    source_url=source_url,
+                    resolved_url=cached_resolved_url,
+                    source_site=source_site,
+                    cached_age_seconds=round(max(cached_age, 0.0), 3),
+                    fresh_skip_seconds=CACHED_RESOLVED_LINK_FRESH_SKIP_PROBE_SECONDS,
+                )
         if skip_start_probe:
-            write_error_log(
-                "cached resolved probe skipped",
-                Exception("HayAV HLS resume uses the saved manifest directly to avoid false startup probe failures"),
-                item_id=item_id,
-                source_url=source_url,
-                resolved_url=cached_resolved_url,
-                source_site=source_site,
-                timeout_seconds=CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS,
-            )
+            if source_site == "hayav" and _looks_like_manifest_url(cached_resolved_url):
+                write_error_log(
+                    "cached resolved probe skipped",
+                    Exception("HayAV HLS resume uses the saved manifest directly to avoid false startup probe failures"),
+                    item_id=item_id,
+                    source_url=source_url,
+                    resolved_url=cached_resolved_url,
+                    source_site=source_site,
+                    timeout_seconds=CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS,
+                )
             can_start_cached_link, cached_start_exc = True, None
         else:
             can_start_cached_link, cached_start_exc = self._cached_resolved_link_can_start_download(
@@ -23302,6 +23895,84 @@ class DownloadManagerApp:
                 stream_url,
                 referer=detail_url,
                 origin="https://3kor.com",
+                default_route="ffmpeg",
+            )
+            return
+
+        if "dramasq.io" in parsed_url.netloc and re.search(r"/(?:detail|vodplay)/\d+(?:/ep\d+)?\.html$", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, message="正在解析 DramasQ...")
+            c_req = get_curl_cffi_requests()
+            page_resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=_make_ytdlp_http_headers(referer="https://dramasq.io/"),
+            )
+            page_text = _response_text_utf8(page_resp)
+            page_title = _clean_series_site_title(_extract_html_title(page_text, short_name or "DramasQ"), fallback_title=short_name or "DramasQ")
+            if re.search(r"/detail/\d+\.html$", parsed_url.path, re.IGNORECASE):
+                episodes = _extract_dramasq_episode_entries(page_text, url, page_title)
+                if not episodes:
+                    raise Exception("DramasQ detail page did not expose episode links")
+                fallback_urls = [episode_url for episode_url, _episode_name in episodes[1:]]
+                _set_task_identity(name=episodes[0][1] or page_title, source_site="dramasq", source_page=url, fallback_urls=fallback_urls)
+                self._download_task_internal(episodes[0][0], item_id, save_dir, use_impersonate, is_mp3)
+                return
+            api_match = re.search(r"/vodplay/(\d+)/(ep\d+)\.html$", parsed_url.path, re.IGNORECASE)
+            if not api_match:
+                raise Exception("DramasQ play id missing")
+            api_url = f"https://dramasq.io/drq/{api_match.group(1)}/{api_match.group(2)}"
+            api_resp = c_req.get(
+                api_url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=_make_ytdlp_http_headers(referer=url),
+            )
+            candidates = _extract_dramasq_playback_candidates(_response_text_utf8(api_resp))
+            if not candidates:
+                candidates = _extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            if not candidates:
+                raise Exception("DramasQ stream URL missing")
+            fallback_urls = candidates[1:]
+            _set_task_identity(name=page_title, source_site="dramasq", source_page=url, fallback_urls=fallback_urls)
+            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="dramasq", fallback_urls=fallback_urls)
+            _download_manifest_with_site_strategy(
+                candidates[0],
+                referer=url,
+                origin="https://dramasq.io",
+                default_route="ffmpeg",
+            )
+            return
+
+        if ("olevod.com" in parsed_url.netloc or "olehdtv.com" in parsed_url.netloc) and re.search(r"/index\.php/vod/(?:detail|play)/id/\d+", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, message="正在解析 Olevod...")
+            c_req = get_curl_cffi_requests()
+            page_resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=_make_ytdlp_http_headers(referer="https://olevod.com/"),
+            )
+            page_text = _response_text_utf8(page_resp)
+            page_title = _clean_series_site_title(_extract_html_title(page_text, short_name or "Olevod"), fallback_title=short_name or "Olevod")
+            if "/vod/detail/" in parsed_url.path.lower():
+                episodes = _extract_olevod_episode_entries(page_text, url, page_title)
+                if not episodes:
+                    raise Exception("Olevod detail page did not expose episode links")
+                fallback_urls = [episode_url for episode_url, _episode_name in episodes[1:]]
+                _set_task_identity(name=episodes[0][1] or page_title, source_site="olevod", source_page=url, fallback_urls=fallback_urls)
+                self._download_task_internal(episodes[0][0], item_id, save_dir, use_impersonate, is_mp3)
+                return
+            candidates = _extract_olevod_playback_candidates(page_text)
+            if not candidates:
+                raise Exception("Olevod stream URL missing")
+            fallback_urls = candidates[1:]
+            _set_task_identity(name=page_title, source_site="olevod", source_page=url, fallback_urls=fallback_urls)
+            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="olevod", fallback_urls=fallback_urls)
+            _download_manifest_with_site_strategy(
+                candidates[0],
+                referer=url,
+                origin="https://olevod.com",
                 default_route="ffmpeg",
             )
             return
@@ -25954,8 +26625,29 @@ class DownloadManagerApp:
                 write_error_log("anime1 custom parser fallback", e, page_url=page_url, item_id=item_id, use_impersonate=use_impersonate)
                 if not page_url or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", _normalize_download_url(page_url) or ""):
                     raise
-                url = page_url
-                self._set_task_parse_ui(item_id, error=e)
+                if self._is_retryable_media_download_error(e):
+                    retry_attempts = int(_task_field_value(task, "_anime1_source_retry_attempts", 0) or 0)
+                    if retry_attempts < 3:
+                        _set_task_aux_fields(task, _anime1_source_retry_attempts=retry_attempts + 1)
+                        self._set_cached_resolved_link_state(
+                            task,
+                            resolved_url="",
+                            resolved_url_saved_at=0.0,
+                            page_refresh_candidates=[],
+                            clear_source_refresh_history=True,
+                        )
+                        write_error_log(
+                            "anime1 source retry after media failure",
+                            e,
+                            page_url=page_url,
+                            item_id=item_id,
+                            retry_attempt=retry_attempts + 1,
+                        )
+                        self._set_task_parse_ui(item_id, message="Anime1 直連已失效，重新解析來源頁...")
+                        self._download_task_internal(page_url, item_id, save_dir, use_impersonate, is_mp3)
+                        return
+                self._mark_task_error_state(item_id, e)
+                return
 
         try:
             task = self.tasks.get(item_id, {})
