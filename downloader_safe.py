@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260530-3330"
+APP_BUILD = "20260530-3340"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -973,7 +973,7 @@ TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
 IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "tktube", "bilibili", "ikanbot")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
-CLOSE_WARNING_TASK_STATES = frozenset(("DOWNLOADING", "PAUSE_REQUESTED", "QUEUED"))
+CLOSE_WARNING_TASK_STATES = frozenset(("DOWNLOADING", "PAUSE_REQUESTED", "DELETE_REQUESTED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
 STOP_REQUEST_TASK_STATES = frozenset(("PAUSE_REQUESTED", "DELETE_REQUESTED"))
 RESUMABLE_TASK_STATES = frozenset(("PAUSED", "ERROR"))
@@ -1072,6 +1072,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "http multipart download started",
     "http range part retry",
     "http media output incomplete",
+    "state save skipped disk full",
     "unknown video artifact removed",
     "direct media fallback retry",
     "hayav stream fallback",
@@ -1208,7 +1209,7 @@ state_lock = threading.RLock()
 log_file_lock = threading.RLock()
 parallel_hls_thread_local = threading.local()
 single_instance_mutex = None
-anime1_dl_lock = threading.Lock()
+anime1_dl_lock = threading.BoundedSemaphore(MAX_DOWNLOADS_PER_SOURCE_SITE_BY_SITE.get("anime1", MAX_DOWNLOADS_PER_SOURCE_SITE))
 ytdl_init_lock = threading.Lock()
 
 _I18N_SNAPSHOT = Path(__file__).with_name("downloader_2122_i18n_snapshot.json")
@@ -1606,6 +1607,13 @@ class ParallelHlsUnsupportedSegmentContentException(Exception):
 
 class DownloadSourceUnavailableException(Exception):
     """Expected final state when every known source for a task is unavailable."""
+
+
+def _is_no_space_left_error(exc):
+    if getattr(exc, "errno", None) == 28:
+        return True
+    text = str(exc or "").lower()
+    return "no space left on device" in text or "errno 28" in text
 
 
 def t(key, **kwargs):
@@ -6876,7 +6884,19 @@ def save_state_entries(entries):
             continue
         seen.add(normalized_url)
         normalized_entries.append(normalized)
-    _atomic_json_dump(STATE_FILE, normalized_entries)
+    try:
+        _atomic_json_dump(STATE_FILE, normalized_entries)
+    except Exception as exc:
+        if _is_no_space_left_error(exc):
+            write_error_log(
+                "state save skipped disk full",
+                exc,
+                path=STATE_FILE,
+                entries=len(normalized_entries),
+            )
+            return False
+        raise
+    return True
 
 
 def _atomic_json_dump(path, payload):
@@ -6884,11 +6904,19 @@ def _atomic_json_dump(path, payload):
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     temp_path = f"{path}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temp_path, path)
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        raise
     try:
         shutil.copyfile(path, f"{path}.bak")
     except Exception:
@@ -6944,7 +6972,7 @@ def _ytdlp_retry_sleep_http(*args, **kwargs):
     if count is None and args:
         count = args[0]
     count = max(int(count or 0), 0)
-    return min(float(2 ** max(count - 1, 0)), 10.0)
+    return min(float(1.5 ** max(count - 1, 0)), 6.0)
 
 
 def _ytdlp_retry_sleep_fragment(*args, **kwargs):
@@ -6952,7 +6980,7 @@ def _ytdlp_retry_sleep_fragment(*args, **kwargs):
     if count is None and args:
         count = args[0]
     count = max(int(count or 0), 0)
-    return min(float(1.5 * (2 ** max(count - 1, 0))), 12.0)
+    return min(float(1.0 * (1.5 ** max(count - 1, 0))), 6.0)
 
 
 def _ytdlp_retry_sleep_file_access(*args, **kwargs):
@@ -8683,7 +8711,24 @@ class DownloadManagerApp:
         status_text = str(task_data.get("_last_error_status", "") or "")
         message_text = str(task_data.get("_last_error_message", "") or "")
         error_text = f"{status_text} {message_text}".lower()
-        return any(marker in error_text for marker in MEDIA_DOWNLOAD_RETRY_MARKERS)
+        if any(marker in error_text for marker in MEDIA_DOWNLOAD_RETRY_MARKERS):
+            return True
+        if bool(_task_field_value(task_data, "_manual_pause_requested", False)):
+            return False
+        if not bool(_task_field_value(task_data, "resume_requested", False)):
+            return False
+        if str(_task_field_value(task_data, "temp_filename", "") or "").strip():
+            return True
+        if _normalize_download_url(_task_field_value(task_data, "resolved_url", "")):
+            return True
+        try:
+            return self._has_resume_artifact_state(
+                task_data,
+                save_dir=self._safe_get_save_dir(),
+                is_mp3=bool(_task_field_value(task_data, "is_mp3", False)),
+            )
+        except Exception:
+            return False
 
     def resume_unfinished_tasks(self):
         saved_tasks = load_state()
@@ -8712,7 +8757,7 @@ class DownloadManagerApp:
                         task,
                         url,
                         ext="mp4",
-                        save_dir=self.save_dir_var.get(),
+                        save_dir=self._safe_get_save_dir(),
                         fallback_name=display_name or "Video",
                     )
                     if temp_filename:
@@ -10131,7 +10176,7 @@ class DownloadManagerApp:
             if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".webm", ".mov", ".mp3", ".m4a"):
                 continue
             try:
-                dest = os.path.join(self.save_dir_var.get(), os.path.basename(path_str))
+                dest = os.path.join(self._safe_get_save_dir(), os.path.basename(path_str))
                 if os.path.abspath(path_str) != os.path.abspath(dest):
                     shutil.copy2(path_str, dest)
                     copied_id = self.tree.insert(
@@ -10792,7 +10837,17 @@ class DownloadManagerApp:
         url_entry.insert(0, value)
 
     def _start_daemon_thread(self, target, *args, **kwargs):
-        threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
+        def guarded_target():
+            try:
+                target(*args, **kwargs)
+            except Exception as exc:
+                write_error_log(
+                    "background task exception",
+                    exc,
+                    target=getattr(target, "__name__", repr(target)),
+                )
+
+        threading.Thread(target=guarded_target, daemon=True).start()
 
     def _download_worker_active(self, item_id):
         if not item_id:
@@ -12891,7 +12946,7 @@ class DownloadManagerApp:
     def _recover_finished_output_path(self, task, missing_output_path=""):
         save_dir = os.path.dirname(str(missing_output_path or "").strip())
         if not save_dir:
-            save_dir = self.save_dir_var.get() if hasattr(self, "save_dir_var") else ""
+            save_dir = self._safe_get_save_dir()
         save_dir = save_dir or _APP_DIR
         stems = []
         for candidate in (
@@ -12918,11 +12973,27 @@ class DownloadManagerApp:
                 return found_path
         return ""
 
+    def _safe_get_save_dir(self):
+        value = ""
+        try:
+            if hasattr(self, "save_dir_var"):
+                value = str(self.save_dir_var.get() or "").strip()
+        except RuntimeError:
+            value = ""
+        except Exception:
+            value = ""
+        if not value:
+            try:
+                value = str((getattr(self, "config", {}) or {}).get("save_dir", "") or "").strip()
+            except Exception:
+                value = ""
+        return value or os.path.expanduser("~/Downloads") or _APP_DIR
+
     def _has_resume_artifact_state(self, task, save_dir=None, is_mp3=None):
         if not task:
             return False
         effective_is_mp3 = bool(_task_field_value(task, "is_mp3", False)) if is_mp3 is None else bool(is_mp3)
-        effective_save_dir = save_dir or self.save_dir_var.get()
+        effective_save_dir = save_dir or self._safe_get_save_dir()
         ext = "mp3" if effective_is_mp3 else "mp4"
         source_url = (_normalize_download_url(_task_field_value(task, "resolved_url", "")) or "") or (_normalize_download_url(_task_field_value(task, "url", "")) or "") or self._get_task_source_page(task)
         _primary_key, resume_keys = self._build_resume_match_keys(
@@ -13189,7 +13260,7 @@ class DownloadManagerApp:
         short_name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
         if not short_name or short_name == "Queued":
             return False
-        save_dir = self.save_dir_var.get()
+        save_dir = self._safe_get_save_dir()
         possible_exts = [".mp4", ".mkv", ".webm", ".mp3", ".m4a"]
         message = self._ui_text("msg_file_exists", "檔案已存在")
         safe_name = _safe_output_stem(short_name, fallback="download")
@@ -13203,7 +13274,7 @@ class DownloadManagerApp:
 
     def _set_task_output_file(self, task, item_id, output_path):
         clean_output_path = str(output_path or "").strip()
-        output_dir = os.path.dirname(clean_output_path) or (self.save_dir_var.get() if hasattr(self, "save_dir_var") else "")
+        output_dir = os.path.dirname(clean_output_path) or self._safe_get_save_dir()
         output_ext = os.path.splitext(clean_output_path)[1] or ".mp4"
         output_stem = os.path.splitext(os.path.basename(clean_output_path))[0]
         repaired_output_title = _repair_mixed_garbled_jav_title(
@@ -13873,7 +13944,7 @@ class DownloadManagerApp:
         safe_name = _safe_output_stem(name, fallback=fallback_name)
         if not safe_name:
             return ""
-        output_dir = save_dir or self.save_dir_var.get() or _APP_DIR
+        output_dir = save_dir or self._safe_get_save_dir() or _APP_DIR
         try:
             output_dir = os.path.abspath(os.path.expanduser(str(output_dir or _APP_DIR)))
         except Exception:
@@ -15438,7 +15509,11 @@ class DownloadManagerApp:
             "vr.goodav17.com" in download_netloc
             or "ggjav.com" in download_netloc
         )
-        prefer_curl_transport = disable_ssl_verify or ("avjoy.me" in download_netloc and "media-cdn" in download_netloc)
+        prefer_curl_transport = (
+            disable_ssl_verify
+            or ("avjoy.me" in download_netloc and "media-cdn" in download_netloc)
+            or "anime1.me" in download_netloc
+        )
         expected_size = max(int(expected_total_size if expected_total_size is not None else int(end_byte) - int(start_byte) + 1), 0)
         if prefer_curl_transport:
             c_req = get_curl_cffi_requests()
@@ -15705,7 +15780,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id) or {}
         primary_value = str(_task_field_value(task, "filename") or "").strip()
         secondary_value = str(_task_field_value(task, "temp_filename") or "").strip()
-        target_path = primary_value or secondary_value or str(self.save_dir_var.get() or _APP_DIR)
+        target_path = primary_value or secondary_value or str(self._safe_get_save_dir() or _APP_DIR)
         free_bytes = self._get_disk_free_bytes(target_path)
         if free_bytes is None:
             return True
@@ -15864,7 +15939,7 @@ class DownloadManagerApp:
 
     def _has_startup_resume_workload(self):
         try:
-            save_dir = self.save_dir_var.get()
+            save_dir = self._safe_get_save_dir()
         except Exception:
             save_dir = None
         for task in self.tasks.values():
@@ -16286,11 +16361,11 @@ class DownloadManagerApp:
         resume_bytes = self._get_existing_file_size(out_path)
         resume_requested_for_output = self._is_resume_download_active(
             task,
-            save_dir=os.path.dirname(out_path) or self.save_dir_var.get(),
+            save_dir=os.path.dirname(out_path) or self._safe_get_save_dir(),
             is_mp3=bool(_task_field_value(task, "is_mp3", False)),
             include_cached_resolved=True,
         )
-        if prefer_curl_stream:
+        if prefer_curl_stream and not range_supported:
             if resume_bytes > 0:
                 try:
                     os.remove(out_path)
@@ -16314,8 +16389,7 @@ class DownloadManagerApp:
             )
             resume_bytes = 0
         immediate_multipart = (
-            not prefer_curl_stream
-            and range_supported
+            range_supported
             and total_size > 0
             and resume_bytes <= 0
             and _task_source_site_name(task) in HTTP_MULTIPART_IMMEDIATE_SITES
@@ -16424,7 +16498,7 @@ class DownloadManagerApp:
                     if immediate_multipart and not switched_to_multipart:
                         switched_to_multipart = True
                         break
-                    if not switched_to_multipart and not prefer_curl_stream and range_supported and total_size > 0:
+                    if not switched_to_multipart and range_supported and total_size > 0:
                         elapsed_probe = time.time() - start_time
                         if elapsed_probe >= HTTP_MULTIPART_TRIGGER_SECONDS:
                             current_speed = max((downloaded - resume_bytes) / max(elapsed_probe, 0.001), 0.0)
@@ -17914,14 +17988,22 @@ class DownloadManagerApp:
             if self._is_pause_requested_state(task_state) or self._is_delete_requested_state(task_state):
                 stop_event.set()
                 raise StopDownloadException("stop requested")
-            part_size = self._download_parallel_hls_segment(
-                segment,
-                _part_path(segment),
-                headers,
-                key_cache,
-                stop_event,
-                prefer_curl=prefer_curl_segments,
-            )
+            try:
+                part_size = self._download_parallel_hls_segment(
+                    segment,
+                    _part_path(segment),
+                    headers,
+                    key_cache,
+                    stop_event,
+                    prefer_curl=prefer_curl_segments,
+                )
+            except OSError as exc:
+                if _is_no_space_left_error(exc):
+                    stop_event.set()
+                    free_bytes = self._get_disk_free_bytes(out_path)
+                    self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=self._disk_full_pause_note())
+                    raise StopDownloadException("disk space low")
+                raise
             with completed_lock:
                 completed_segment_indexes.add(int(segment["index"]))
                 completed_bytes += int(part_size or 0)
@@ -18091,6 +18173,10 @@ class DownloadManagerApp:
             raise
         except Exception as exc:
             stop_event.set()
+            if _is_no_space_left_error(exc):
+                free_bytes = self._get_disk_free_bytes(out_path)
+                self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=self._disk_full_pause_note())
+                raise StopDownloadException("disk space low")
             try:
                 task = self.tasks.get(item_id, task)
                 existing_info = self._probe_media_info(out_path) if self._has_nonempty_file(out_path) else {}
@@ -20029,7 +20115,7 @@ class DownloadManagerApp:
                     task,
                     source_url,
                     ext=ext,
-                    save_dir=self.save_dir_var.get() if hasattr(self, "save_dir_var") else os.path.dirname(secondary_value),
+                    save_dir=self._safe_get_save_dir() or os.path.dirname(secondary_value),
                     fallback_name=str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "Video"),
                 )
             except Exception:
@@ -20344,7 +20430,7 @@ class DownloadManagerApp:
                     self._download_task_worker_entry,
                     task_url,
                     item_id,
-                    self.save_dir_var.get(),
+                    self._safe_get_save_dir(),
                     self._should_use_impersonation(task_url, _task_source_site_name(task)),
                     bool(_task_field_value(task, "is_mp3", False)),
                 )
@@ -20409,7 +20495,7 @@ class DownloadManagerApp:
                 continue
         if not save_dir:
             try:
-                save_dir = self.save_dir_var.get()
+                save_dir = self._safe_get_save_dir()
             except Exception:
                 save_dir = ""
         is_mp3 = bool(_task_field_value(task, "is_mp3", False))
