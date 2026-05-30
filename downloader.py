@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260528-3320"
+APP_BUILD = "20260530-3330"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -720,15 +720,16 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
 }
 PARALLEL_HLS_HOST_WORKER_BUDGET = 72
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
-    "cdn-centaurus.com": 72,
-    "premilkyway.com": 72,
+    "cdn-centaurus.com": 96,
+    "premilkyway.com": 96,
     "ggjav.com": 120,
-    "media-cdn": 24,
+    "media-cdn": 48,
     "mxcontent.net": 96,
-    "surrit.com": 60,
+    "surrit.com": 90,
     "streamfastpro": 96,
     "upload18.org": 72,
 }
+PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX = 120
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
 PARALLEL_HLS_IN_FLIGHT_MULTIPLIER = 4
 PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS = 1800
@@ -759,7 +760,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
 )
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 30
-PARALLEL_HLS_SEGMENT_RETRIES = 5
+PARALLEL_HLS_SEGMENT_RETRIES = 10
 PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES = 20
 PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
@@ -879,7 +880,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "youtube": 20,
 }
 HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
-    "media-cdn": 6,
+    "media-cdn": 12,
     "mxcontent.net": 16,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
@@ -2024,6 +2025,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "avjoy"
         if "av01.media" in host or "av01.tv" in host:
             return "av01"
+        if "tktube.com" in host:
+            return "tktube"
         if "ikanbot.com" in host:
             return "ikanbot"
         if "movieffm.net" in host:
@@ -10163,6 +10166,13 @@ class DownloadManagerApp:
             )
             self._show_warning("下載網址是空的，已取消建立下載任務。")
             return
+        extra_task_data = extra_task_data or {}
+        if source_site is None:
+            source_site = _infer_source_site_from_task_urls(
+                url,
+                _task_field_value(extra_task_data, "source_page", ""),
+                _task_field_value(extra_task_data, "resolved_url", ""),
+            ) or None
         short_name = str(short_name or "").strip()
         repaired_mixed_title = _repair_mixed_garbled_jav_title(
             short_name,
@@ -10244,7 +10254,7 @@ class DownloadManagerApp:
         else:
             self._set_task_status_mode_ui(item_id, t("status_queued") if "status_queued" in I18N_DICT.get(CURRENT_LANG, {}) else "排隊中", clear_metrics=True)
             if source_site is None:
-                source_site = _task_source_site_name(self.tasks.get(item_id, {}))
+                source_site = _task_source_site_name(self.tasks.get(item_id, {})) or _infer_source_site_from_task_urls(url)
         task_data = {
             "url": url,
             "state": "QUEUED",
@@ -10257,7 +10267,11 @@ class DownloadManagerApp:
         if extra_task_data:
             task_data.update(extra_task_data)
         task_data["is_mp3"] = bool(_task_field_value(task_data, "is_mp3", False))
-        task_data["source_site"] = _task_source_site_name(task_data)
+        task_data["source_site"] = _task_source_site_name(task_data) or _infer_source_site_from_task_urls(
+            url,
+            _task_field_value(task_data, "source_page", ""),
+            _task_field_value(task_data, "resolved_url", ""),
+        )
         normalized_extra = self._build_extra_task_data(
             source_page=self._get_task_source_page(task_data),
             fallback_urls=_dedupe_download_urls(_task_field_value(task_data, "fallback_urls", []), primary_url=url),
@@ -10815,6 +10829,7 @@ class DownloadManagerApp:
 
     def _download_task_worker_entry(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         try:
+            self._ensure_task_active_transfer_state(item_id, reason="worker_entry")
             self.download_task(url, item_id, save_dir, use_impersonate, is_mp3)
         finally:
             self._release_download_worker(item_id)
@@ -15311,10 +15326,23 @@ class DownloadManagerApp:
                             pass
             return {"total_size": total_size, "range_supported": range_supported, "content_type": content_type}
 
-    def _http_multipart_part_path(self, out_path, index):
+    def _http_multipart_part_path(self, out_path, index, start_byte=None, end_byte=None):
         normalized_out_path = os.path.abspath(str(out_path or "download"))
         digest = hashlib.sha1(normalized_out_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        return os.path.join(tempfile.gettempdir(), f"downloader_http_{digest}.part{index}")
+        suffix = f"part{index}"
+        if str(index) != "" and start_byte is not None and end_byte is not None:
+            suffix = f"{suffix}.bytes{int(start_byte)}-{int(end_byte)}"
+        return os.path.join(tempfile.gettempdir(), f"downloader_http_{digest}.{suffix}")
+
+    def _http_multipart_part_range_from_path(self, part_path):
+        match = re.search(r"\.part\d+\.bytes(\d+)-(\d+)$", os.path.basename(str(part_path or "")))
+        if not match:
+            return None
+        start_byte = int(match.group(1))
+        end_byte = int(match.group(2))
+        if end_byte < start_byte:
+            return None
+        return start_byte, end_byte
 
     def _http_multipart_existing_part_bytes(self, out_path):
         if not out_path:
@@ -15326,8 +15354,14 @@ class DownloadManagerApp:
                 size = os.path.getsize(part_path)
             except OSError:
                 continue
+            part_range = self._http_multipart_part_range_from_path(part_path)
+            if part_range is None:
+                continue
+            expected_size = max(part_range[1] - part_range[0] + 1, 0)
+            if expected_size > 0 and size > expected_size:
+                continue
             if size > 0:
-                total += size
+                total += min(size, expected_size) if expected_size > 0 else size
         return total
 
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
@@ -16493,7 +16527,7 @@ class DownloadManagerApp:
                         if part_start > remaining_end:
                             break
                         part_end = remaining_end if index == part_count - 1 else min(remaining_end, part_start + part_size - 1)
-                        part_path = self._http_multipart_part_path(out_path, index)
+                        part_path = self._http_multipart_part_path(out_path, index, part_start, part_end)
                         part_paths.append(part_path)
                         part_specs.append((part_path, part_start, part_end))
                         box = {"bytes": 0}
@@ -16939,10 +16973,24 @@ class DownloadManagerApp:
 
     def _hls_host_worker_budget(self, host):
         normalized_host = str(host or "").strip().lower()
+        configured_budget = int(PARALLEL_HLS_HOST_WORKER_BUDGET)
         for marker, budget in PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST.items():
             if marker in normalized_host:
-                return int(budget)
-        return int(PARALLEL_HLS_HOST_WORKER_BUDGET)
+                configured_budget = int(budget)
+                break
+        host_worker_cap = 0
+        for marker, host_workers in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST.items():
+            if marker in normalized_host:
+                host_worker_cap = int(host_workers)
+                break
+        if host_worker_cap > 0:
+            concurrent_host_slots = max(1, min(int(MAX_DOWNLOADS_PER_SOURCE_SITE), int(MAX_DOWNLOADS_PER_DOMAIN)))
+            auto_budget = min(
+                int(PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX),
+                int(host_worker_cap) * concurrent_host_slots,
+            )
+            configured_budget = max(configured_budget, auto_budget)
+        return int(configured_budget)
 
     def _task_candidate_media_hosts(self, task):
         hosts = set()
@@ -16961,15 +17009,33 @@ class DownloadManagerApp:
             _add_host(candidate)
         return hosts
 
+    def _download_host_group_marker(self, host):
+        normalized_host = str(host or "").strip().lower()
+        if not normalized_host:
+            return ""
+        markers = set()
+        markers.update(str(marker).lower() for marker in PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST)
+        markers.update(str(marker).lower() for marker in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST)
+        markers.update(str(marker).lower() for marker in HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER)
+        matched = [marker for marker in markers if marker and marker in normalized_host]
+        if matched:
+            return max(matched, key=len)
+        return normalized_host
+
     def _active_hls_downloads_for_host(self, host):
         normalized_host = str(host or "").strip().lower()
         if not normalized_host:
             return 1
+        target_group = self._download_host_group_marker(normalized_host)
         count = 0
         for task in self.tasks.values():
             if not self._is_active_download_slot_state(str(_task_field_value(task, "state", "") or "")):
                 continue
-            if normalized_host in self._task_candidate_media_hosts(task):
+            task_hosts = self._task_candidate_media_hosts(task)
+            if normalized_host in task_hosts:
+                count += 1
+                continue
+            if target_group and any(self._download_host_group_marker(candidate_host) == target_group for candidate_host in task_hosts):
                 count += 1
         return max(count, 1)
 
