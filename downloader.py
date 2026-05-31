@@ -34,6 +34,11 @@ from functools import lru_cache
 from pathlib import Path
 
 try:
+    import msvcrt
+except Exception:
+    msvcrt = None
+
+try:
     from Crypto.Cipher import AES as CryptoAES
 except Exception:
     CryptoAES = None
@@ -62,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260531-3360"
+APP_BUILD = "20260531-3370"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -100,6 +105,8 @@ ERROR_LOG_DEDUPE_WINDOW_SECONDS = 2.0
 SINGLE_INSTANCE_ACQUIRE_TIMEOUT_SECONDS = 4.0
 SINGLE_INSTANCE_ACQUIRE_RETRY_INTERVAL_SECONDS = 0.2
 FORCED_SHUTDOWN_EXIT_DELAY_SECONDS = 8.0
+FINAL_SHUTDOWN_EXIT_DELAY_SECONDS = 0.35
+MEDIA_PROBE_CACHE_TTL_SECONDS = 2.5
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 FFMPEG_WINDOWS_FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 FFMPEG_WINDOWS_FFPROBE_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -636,6 +643,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "jisuzyv.com",
     "bfikuncdn.com",
     "baisiweiting.com",
+    "lz-cdn",
     "lz-cdn.com",
     "yuglf.com",
     "ffzy-play",
@@ -702,7 +710,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "nnyy": 24,
     "olevod": 24,
     "thanju": 24,
-    "xiaoyakankan": 32,
+    "xiaoyakankan": 48,
 }
 PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "xluuss": 12,
@@ -718,6 +726,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "vip.dytt-see.com": 24,
     "dytt-kan.com": 24,
     "vip.dytt-kan.com": 24,
+    "lz-cdn": 48,
     "gsuus.com": 24,
     "lz-cdn.com": 24,
     "olemovienews.com": 24,
@@ -753,6 +762,7 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "baisiweiting.com": 96,
     "cdnlz": 72,
     "gsuus.com": 72,
+    "lz-cdn": 144,
     "olemovienews.com": 72,
 }
 PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX = 120
@@ -776,6 +786,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "vip.dytt-see.com",
     "dytt-kan.com",
     "vip.dytt-kan.com",
+    "lz-cdn",
     "lz-cdn.com",
     "yuglf.com",
     "cdn-centaurus.com",
@@ -853,16 +864,16 @@ YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "twitter": 8,
     "youtube": 16,
 }
-YTDLP_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
+YTDLP_HTTP_CHUNK_SIZE = 16 * 1024 * 1024
 YTDLP_HTTP_CHUNK_SIZE_BY_SITE = {
     "bilibili": 16 * 1024 * 1024,
     "facebook": 8 * 1024 * 1024,
-    "gimy": 10 * 1024 * 1024,
+    "gimy": 16 * 1024 * 1024,
     "goodav17": 16 * 1024 * 1024,
     "instagram": 8 * 1024 * 1024,
-    "movieffm": 10 * 1024 * 1024,
-    "mixdrop": 10 * 1024 * 1024,
-    "missav": 10 * 1024 * 1024,
+    "movieffm": 16 * 1024 * 1024,
+    "mixdrop": 16 * 1024 * 1024,
+    "missav": 16 * 1024 * 1024,
     "threads": 8 * 1024 * 1024,
     "twitter": 8 * 1024 * 1024,
     "youtube": 16 * 1024 * 1024,
@@ -878,17 +889,27 @@ YTDLP_PROGRESS_DELTA_SECONDS = 0.5
 YTDLP_WINDOWS_TRIM_FILE_NAME = 180
 YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT = 720
 YTDLP_RETRY_PROFILE_BY_SITE = {
+    "777tv": {"fragment_retries": 40},
+    "18av": {"fragment_retries": 40},
     "av01": {"fragment_retries": 40},
+    "gimy": {"fragment_retries": 40},
+    "goodav17": {"fragment_retries": 40},
+    "hayav": {"fragment_retries": 40, "file_access_retries": 15},
+    "hohoj": {"fragment_retries": 40},
+    "ikanbot": {"fragment_retries": 40},
     "bilibili": {"extractor_retries": 8, "fragment_retries": 40},
     "youtube": {"extractor_retries": 8, "fragment_retries": 40},
     "missav": {"fragment_retries": 40, "file_access_retries": 15},
     "movieffm": {"fragment_retries": 40},
+    "nnyy": {"fragment_retries": 40},
+    "tktube": {"fragment_retries": 40},
     "xiaoyakankan": {"fragment_retries": 40},
 }
 HTTP_MULTIPART_TRIGGER_SECONDS = 0.15
 HTTP_MULTIPART_TRIGGER_SPEED_BPS = 6 * 1024 * 1024
 HTTP_MULTIPART_MIN_REMAINING_BYTES = 1 * 1024 * 1024
 HTTP_MULTIPART_PART_COUNT_DEFAULT = 20
+HTTP_MULTIPART_MEDIUM_FILE_MAX_PARTS = 16
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "18jav": 20,
     "anime1": 4,
@@ -910,9 +931,10 @@ HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
     "mxcontent.net": 16,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
-HTTP_STREAM_CHUNK_SIZE = 8 * 1024 * 1024
-HTTP_RANGE_CHUNK_SIZE = 8 * 1024 * 1024
-HTTP_FILE_COPY_CHUNK_SIZE = 8 * 1024 * 1024
+HTTP_MULTIPART_LARGE_FILE_IMMEDIATE_MIN_BYTES = 128 * 1024 * 1024
+HTTP_STREAM_CHUNK_SIZE = 16 * 1024 * 1024
+HTTP_RANGE_CHUNK_SIZE = 16 * 1024 * 1024
+HTTP_FILE_COPY_CHUNK_SIZE = 16 * 1024 * 1024
 HTTP_RANGE_PART_MAX_ATTEMPTS = 6
 HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS = 0.6
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
@@ -958,7 +980,7 @@ NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "jable": ("mushroomtrack", "hls.sb-cd.com", "cdn77.org"),
     "movieffm": ("xluuss", "lzcdn", "letvoss", "subokk", "bdzybf", "ukubf", "ijycnd", "qsstvw", "gsuus", "hhuus", "huyall", "bfllvip"),
     "nnyy": ("xluuss", "bfvvs", "huyall", "ijycnd", "qsstvw", "qqqrst", "ppqrrs", "hhuus", "subokk", "lz-cdn", "lzcdn", "gsuus", "surrit"),
-    "xiaoyakankan": ("huyall", "ijycnd", "jisuzyv", "bfvvs", "gsuus", "hhuus", "qsstvw", "subokk", "taopianplay1.com"),
+    "xiaoyakankan": ("huyall", "ijycnd", "jisuzyv", "bfvvs", "gsuus", "hhuus", "qsstvw", "subokk", "lz-cdn", "taopianplay1.com"),
 }
 NATIVE_HLS_GLOBAL_HOST_MARKERS = ("qqqrst.com", "ppqrrs.com", "surrit.com")
 M3U8_TOTAL_BYTES_PROBE_WORKERS = 4
@@ -1046,7 +1068,10 @@ ERROR_LOG_MAX_ENTRIES = 10
 TRACE_LOG_MAX_ENTRIES = 10
 TRACE_LOG_CONTEXTS = frozenset((
     "app start",
+    "app shutdown finalized",
+    "app shutdown started",
     "single instance lock denied",
+    "single instance lock file denied",
     "single instance lock recovered after retry",
     "m3u8 route selected",
     "preferred native hls route selected",
@@ -1241,6 +1266,7 @@ state_lock = threading.RLock()
 log_file_lock = threading.RLock()
 parallel_hls_thread_local = threading.local()
 single_instance_mutex = None
+single_instance_lock_file = None
 anime1_dl_lock = threading.BoundedSemaphore(MAX_DOWNLOADS_PER_SOURCE_SITE_BY_SITE.get("anime1", MAX_DOWNLOADS_PER_SOURCE_SITE))
 ytdl_init_lock = threading.Lock()
 
@@ -3281,6 +3307,7 @@ XIAOYAKANKAN_FAST_HLS_HOST_PRIORITY = (
     "hhuus.com",
     "bfvvs.com",
     "jisuzyv.com",
+    "lz-cdn",
     "lz-cdn.com",
     "bdzybf",
     "bfikuncdn.com",
@@ -5521,6 +5548,86 @@ ANIME1_CATALOG_SEARCH_URLS = (
 )
 
 VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
+    "哈拉瑪莉": [
+        {
+            "url": "https://www.movieffm.net/movies/theres-something-about-mary/",
+            "title": "哈拉瑪莉 There's Something About Mary MovieFFM",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://v.ikanbot.com/play/477795",
+            "title": "哈拉瑪莉 There's Something About Mary Ikanbot",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://nnyy.in/dianying/19987253.html",
+            "title": "哈拉瑪莉 There's Something About Mary 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
+    "哈拉玛莉": [
+        {
+            "url": "https://www.movieffm.net/movies/theres-something-about-mary/",
+            "title": "哈拉玛莉 哈拉瑪莉 There's Something About Mary MovieFFM",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://v.ikanbot.com/play/477795",
+            "title": "哈拉玛莉 哈拉瑪莉 There's Something About Mary Ikanbot",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://nnyy.in/dianying/19987253.html",
+            "title": "哈拉玛莉 哈拉瑪莉 There's Something About Mary 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
+    "There's Something About Mary": [
+        {
+            "url": "https://www.movieffm.net/movies/theres-something-about-mary/",
+            "title": "There's Something About Mary 哈拉瑪莉 MovieFFM",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://v.ikanbot.com/play/477795",
+            "title": "There's Something About Mary 哈拉瑪莉 Ikanbot",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://nnyy.in/dianying/19987253.html",
+            "title": "There's Something About Mary 哈拉瑪莉 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
+    "Theres Something About Mary": [
+        {
+            "url": "https://www.movieffm.net/movies/theres-something-about-mary/",
+            "title": "Theres Something About Mary 哈拉瑪莉 MovieFFM",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://v.ikanbot.com/play/477795",
+            "title": "Theres Something About Mary 哈拉瑪莉 Ikanbot",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://nnyy.in/dianying/19987253.html",
+            "title": "Theres Something About Mary 哈拉瑪莉 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
     "開麥拉驚魂": [
         {
             "url": "https://www.movieffm.net/movies/tropic-thunder/",
@@ -8385,9 +8492,41 @@ _FFMPEG_VERSION_SUMMARY_CACHE = {}
 
 
 def acquire_single_instance_lock():
-    global single_instance_mutex
+    global single_instance_mutex, single_instance_lock_file
     if platform.system() != "Windows":
         return True
+    lock_path = os.path.join(_APP_DIR, "downloader.lock")
+    file_handle = None
+    if msvcrt is not None:
+        try:
+            os.makedirs(_APP_DIR, exist_ok=True)
+            file_handle = open(lock_path, "a+b")
+            file_handle.seek(0)
+            msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            single_instance_lock_file = file_handle
+        except OSError:
+            try:
+                if file_handle is not None:
+                    file_handle.close()
+            except Exception:
+                pass
+            try:
+                write_error_log(
+                    "single instance lock file denied",
+                    Exception("single instance lock file denied"),
+                    lock_path=lock_path,
+                    app_dir=_APP_DIR,
+                )
+            except Exception:
+                pass
+            return False
+        except Exception:
+            try:
+                if file_handle is not None:
+                    file_handle.close()
+            except Exception:
+                pass
+            single_instance_lock_file = None
     try:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         mutex_name = "Global\\AiTestDownloaderSingleInstance"
@@ -8403,6 +8542,7 @@ def acquire_single_instance_lock():
         if already_exists:
             kernel32.CloseHandle(handle)
             single_instance_mutex = None
+            release_single_instance_lock()
             return False
         single_instance_mutex = handle
         return True
@@ -8411,7 +8551,20 @@ def acquire_single_instance_lock():
 
 
 def release_single_instance_lock():
-    global single_instance_mutex
+    global single_instance_mutex, single_instance_lock_file
+    file_handle = single_instance_lock_file
+    single_instance_lock_file = None
+    if file_handle is not None:
+        try:
+            file_handle.seek(0)
+            if msvcrt is not None:
+                msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+        try:
+            file_handle.close()
+        except Exception:
+            pass
     if platform.system() != "Windows" or not single_instance_mutex:
         single_instance_mutex = None
         return
@@ -8509,6 +8662,8 @@ class DownloadManagerApp:
         self._last_state_persist_signature = None
         self._resume_progress_cache = {}
         self._resume_progress_lock = threading.Lock()
+        self._media_probe_cache = {}
+        self._media_probe_cache_lock = threading.Lock()
         self._pending_status_styles = {}
         self._status_style_flush_scheduled = False
         self._summary_refresh_scheduled = False
@@ -8516,11 +8671,14 @@ class DownloadManagerApp:
         self._last_overview_text = None
         self._shutdown_started = False
         self._forced_exit_timer = None
+        self._final_exit_timer = None
         self._drop_target_widgets = []
         self._active_network_sessions = {}
         self._active_network_sessions_lock = threading.Lock()
         self._active_download_item_ids = set()
         self._active_download_item_ids_lock = threading.Lock()
+        self._background_threads = set()
+        self._background_threads_lock = threading.Lock()
         self._startup_resume_pending = False
         self._startup_resume_scheduled = False
         self._startup_started_at = time.time()
@@ -11382,6 +11540,8 @@ class DownloadManagerApp:
         url_entry.insert(0, value)
 
     def _start_daemon_thread(self, target, *args, **kwargs):
+        thread_ref = {"thread": None}
+
         def guarded_target():
             try:
                 target(*args, **kwargs)
@@ -11391,8 +11551,48 @@ class DownloadManagerApp:
                     exc,
                     target=getattr(target, "__name__", repr(target)),
                 )
+            finally:
+                thread = thread_ref.get("thread")
+                if thread is not None:
+                    try:
+                        with self._background_threads_lock:
+                            self._background_threads.discard(thread)
+                    except Exception:
+                        pass
 
-        threading.Thread(target=guarded_target, daemon=True).start()
+        thread = threading.Thread(target=guarded_target, daemon=True)
+        thread_ref["thread"] = thread
+        try:
+            with self._background_threads_lock:
+                self._background_threads.add(thread)
+        except Exception:
+            pass
+        thread.start()
+
+    def _wait_for_background_threads(self, timeout_seconds=1.2):
+        deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
+        while time.time() < deadline:
+            try:
+                with self._background_threads_lock:
+                    threads = [thread for thread in self._background_threads if thread.is_alive()]
+                    self._background_threads = set(threads)
+            except Exception:
+                threads = []
+            if not threads:
+                return 0
+            per_thread_timeout = max(min(deadline - time.time(), 0.05), 0.0)
+            if per_thread_timeout <= 0:
+                break
+            for thread in threads:
+                try:
+                    thread.join(timeout=per_thread_timeout)
+                except RuntimeError:
+                    continue
+        try:
+            with self._background_threads_lock:
+                return sum(1 for thread in self._background_threads if thread.is_alive())
+        except Exception:
+            return 0
 
     def _download_worker_active(self, item_id):
         if not item_id:
@@ -13709,7 +13909,7 @@ class DownloadManagerApp:
                 self._mark_task_error_state(item_id, exc)
                 self._set_task_named_column_text(item_id, "progress", "--")
                 return False
-            if self._is_incomplete_hls_video_artifact(task, output_path):
+            if self._is_incomplete_hls_video_artifact(task, output_path, media_info=media_info):
                 exc = Exception("download output appears incomplete")
                 write_error_log(
                     "finish rejected incomplete media",
@@ -14026,13 +14226,13 @@ class DownloadManagerApp:
             height = 0
         return 0 < height < YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT
 
-    def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None):
+    def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None, media_info=None):
         source_site = _task_source_site_name(task)
         if source_site not in STRICT_HLS_ARTIFACT_SITES:
             return False
         if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
             return False
-        info = self._probe_media_info(output_path)
+        info = media_info if isinstance(media_info, dict) and media_info else self._probe_media_info(output_path)
         if not info.get("exists") or not info.get("size"):
             return True
         if not info.get("valid"):
@@ -14992,12 +15192,38 @@ class DownloadManagerApp:
                 "valid": False,
                 "reason": "missing",
             }
+        cache_key = ""
+        mtime = 0.0
+        now = time.time()
+        try:
+            cache_key = os.path.normcase(os.path.abspath(str(path)))
+            mtime = os.path.getmtime(path)
+            cached = None
+            with self._media_probe_cache_lock:
+                cached = self._media_probe_cache.get(cache_key)
+            if cached:
+                cached_size = int(cached.get("size", -1) or -1)
+                cached_mtime = float(cached.get("_mtime", -1.0) or -1.0)
+                cached_at = float(cached.get("_cached_at", 0.0) or 0.0)
+                current_size = os.path.getsize(path)
+                if (
+                    cached_size == current_size
+                    and abs(cached_mtime - mtime) < 0.000001
+                    and now - cached_at <= MEDIA_PROBE_CACHE_TTL_SECONDS
+                ):
+                    result = dict(cached)
+                    result.pop("_mtime", None)
+                    result.pop("_cached_at", None)
+                    return result
+        except Exception:
+            cache_key = ""
+            mtime = 0.0
         ffprobe_path = os.path.join(_APP_DIR, "ffprobe.exe") if platform.system() == "Windows" else shutil.which("ffprobe") or "ffprobe"
         size = os.path.getsize(path)
         if not os.path.exists(ffprobe_path) and ffprobe_path == os.path.join(_APP_DIR, "ffprobe.exe"):
             duration = self._probe_media_duration_seconds(path)
             valid = size > 0 and duration > 0
-            return {
+            result = {
                 "exists": True,
                 "size": size,
                 "duration": duration,
@@ -15005,6 +15231,8 @@ class DownloadManagerApp:
                 "valid": valid,
                 "reason": "no-ffprobe" if valid else "ffprobe-missing",
             }
+            self._remember_media_probe_info(cache_key, mtime, result)
+            return result
         startupinfo = None
         creationflags = 0
         if platform.system() == "Windows":
@@ -15033,7 +15261,7 @@ class DownloadManagerApp:
                 timeout=30,
             )
             if result.returncode != 0 or not result.stdout.strip():
-                return {
+                probe_info = {
                     "exists": True,
                     "size": size,
                     "duration": 0.0,
@@ -15041,6 +15269,8 @@ class DownloadManagerApp:
                     "valid": False,
                     "reason": "ffprobe-error",
                 }
+                self._remember_media_probe_info(cache_key, mtime, probe_info)
+                return probe_info
             data = json.loads(result.stdout.strip() or "{}")
             format_info = data.get("format") or {}
             streams = data.get("streams") or []
@@ -15049,7 +15279,7 @@ class DownloadManagerApp:
             size = probed_size or size
             has_streams = any((stream.get("codec_type") in ("audio", "video")) for stream in streams)
             valid = has_streams and size > 0
-            return {
+            probe_info = {
                 "exists": True,
                 "size": size,
                 "duration": duration,
@@ -15059,8 +15289,10 @@ class DownloadManagerApp:
                 "valid": valid,
                 "reason": "ok" if valid else "no-streams",
             }
+            self._remember_media_probe_info(cache_key, mtime, probe_info)
+            return probe_info
         except Exception:
-            return {
+            probe_info = {
                 "exists": True,
                 "size": size,
                 "duration": 0.0,
@@ -15070,6 +15302,27 @@ class DownloadManagerApp:
                 "valid": False,
                 "reason": "ffprobe-error",
             }
+            self._remember_media_probe_info(cache_key, mtime, probe_info)
+            return probe_info
+
+    def _remember_media_probe_info(self, cache_key, mtime, info):
+        if not cache_key or not isinstance(info, dict):
+            return
+        try:
+            cached = dict(info)
+            cached["_mtime"] = float(mtime or 0.0)
+            cached["_cached_at"] = time.time()
+            with self._media_probe_cache_lock:
+                self._media_probe_cache[cache_key] = cached
+                if len(self._media_probe_cache) > 128:
+                    sorted_items = sorted(
+                        self._media_probe_cache.items(),
+                        key=lambda item: float((item[1] or {}).get("_cached_at", 0.0) or 0.0),
+                    )
+                    for old_key, _old_value in sorted_items[:32]:
+                        self._media_probe_cache.pop(old_key, None)
+        except Exception:
+            pass
 
     def _is_windows_friendly_mp4_info(self, info):
         if not info or not info.get("valid"):
@@ -17224,12 +17477,22 @@ class DownloadManagerApp:
                 current_total_bytes=total_size,
             )
             resume_bytes = 0
+        source_site = _task_source_site_name(task)
+        total_size_int = max(int(total_size or 0), 0)
         immediate_multipart = (
             range_supported
-            and total_size > 0
+            and total_size_int > 0
             and resume_bytes <= 0
-            and _task_source_site_name(task) in HTTP_MULTIPART_IMMEDIATE_SITES
-            and max(int(total_size or 0), 0) >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
+            and (
+                (
+                    source_site in HTTP_MULTIPART_IMMEDIATE_SITES
+                    and total_size_int >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
+                )
+                or (
+                    source_site != "anime1"
+                    and total_size_int >= HTTP_MULTIPART_LARGE_FILE_IMMEDIATE_MIN_BYTES
+                )
+            )
         )
         mode = "ab" if resume_bytes > 0 else "wb"
         dl_headers = _make_range_http_headers(headers, f"bytes={resume_bytes}-") if resume_bytes > 0 else dict(headers)
@@ -17974,6 +18237,8 @@ class DownloadManagerApp:
             part_count = min(part_count, 4)
         elif remaining and remaining < 64 * 1024 * 1024:
             part_count = min(part_count, 12)
+        elif remaining and remaining < 256 * 1024 * 1024:
+            part_count = min(part_count, HTTP_MULTIPART_MEDIUM_FILE_MAX_PARTS)
         host_marker = ""
         for marker, host_part_count in HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER.items():
             if marker in host:
@@ -27294,6 +27559,15 @@ class DownloadManagerApp:
         if self._shutdown_started:
             return
         try:
+            write_error_log(
+                "app shutdown started",
+                Exception("app shutdown started"),
+                active_downloads=self._count_active_downloads_for_close_warning(),
+                tracked_processes=len(list(self._iter_active_process_handles())),
+            )
+        except Exception:
+            pass
+        try:
             exit_timer = threading.Timer(FORCED_SHUTDOWN_EXIT_DELAY_SECONDS, os._exit, args=(0,))
             exit_timer.daemon = True
             exit_timer.start()
@@ -27316,9 +27590,19 @@ class DownloadManagerApp:
             self._force_kill_child_processes()
         except Exception:
             pass
+        remaining_threads = 0
+        try:
+            remaining_threads = self._wait_for_background_threads(timeout_seconds=1.2)
+        except Exception:
+            remaining_threads = 0
         try:
             with self._resume_progress_lock:
                 self._resume_progress_cache.clear()
+        except Exception:
+            pass
+        try:
+            with self._media_probe_cache_lock:
+                self._media_probe_cache.clear()
         except Exception:
             pass
         try:
@@ -27333,6 +27617,24 @@ class DownloadManagerApp:
             self.root.destroy()
         except Exception:
             pass
+        try:
+            write_error_log(
+                "app shutdown finalized",
+                Exception("app shutdown finalized"),
+                remaining_background_threads=remaining_threads,
+            )
+        except Exception:
+            pass
+        try:
+            final_exit_timer = threading.Timer(FINAL_SHUTDOWN_EXIT_DELAY_SECONDS, os._exit, args=(0,))
+            final_exit_timer.daemon = False
+            final_exit_timer.start()
+            self._final_exit_timer = final_exit_timer
+        except Exception:
+            try:
+                os._exit(0)
+            except Exception:
+                pass
 
 
 def main():
