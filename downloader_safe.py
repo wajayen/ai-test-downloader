@@ -62,7 +62,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260530-3350"
+APP_BUILD = "20260531-3360"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -134,16 +134,26 @@ FFMPEG_AUDIO_TRANSCODE_RETRY_MARKERS = (
     "bitstream filters to an output packet",
 )
 STRICT_HLS_ARTIFACT_SITES = frozenset((
+    "18av",
+    "777tv",
+    "99itv",
+    "av01",
     "avbebe",
+    "dramasq",
     "gimy",
     "goodav17",
+    "hayav",
     "hohoj",
+    "ikanbot",
     "movieffm",
     "missav",
     "njav",
     "njavtv",
+    "nnyy",
+    "olevod",
+    "thanju",
+    "tktube",
     "xiaoyakankan",
-    "99itv",
 ))
 STRICT_RESUMED_FFMPEG_ARTIFACT_SITES = frozenset(("avbebe", "gimy", "goodav17", "hohoj"))
 
@@ -606,7 +616,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "jable", "missav", "njav", "njavtv", "nnyy", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "thanju", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -625,9 +635,13 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "bfvvs.com",
     "jisuzyv.com",
     "bfikuncdn.com",
+    "baisiweiting.com",
     "lz-cdn.com",
     "yuglf.com",
     "ffzy-play",
+    "cdnlz",
+    "gsuus.com",
+    "olemovienews.com",
     "yzzy",
     "bdzybf",
     "dytt-see.com",
@@ -675,6 +689,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 32,
     "18av": 32,
     "avbebe": 24,
+    "dramasq": 24,
     "gimy": 24,
     "goodav17": 24,
     "hayav": 32,
@@ -685,7 +700,9 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "njav": 24,
     "njavtv": 24,
     "nnyy": 24,
-    "xiaoyakankan": 24,
+    "olevod": 24,
+    "thanju": 24,
+    "xiaoyakankan": 32,
 }
 PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "xluuss": 12,
@@ -695,11 +712,15 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "qqqrst.com": 32,
     "ppqrrs.com": 32,
     "bdzybf": 24,
+    "baisiweiting.com": 32,
+    "cdnlz": 24,
     "dytt-see.com": 24,
     "vip.dytt-see.com": 24,
     "dytt-kan.com": 24,
     "vip.dytt-kan.com": 24,
+    "gsuus.com": 24,
     "lz-cdn.com": 24,
+    "olemovienews.com": 24,
     "yuglf.com": 24,
     "cdn-centaurus.com": 32,
     "premilkyway.com": 32,
@@ -729,6 +750,10 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "surrit.com": 90,
     "streamfastpro": 96,
     "upload18.org": 72,
+    "baisiweiting.com": 96,
+    "cdnlz": 72,
+    "gsuus.com": 72,
+    "olemovienews.com": 72,
 }
 PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX = 120
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
@@ -1175,8 +1200,14 @@ FORCED_M3U8_SITE_RULES = {
         "origin": "https://3kor.com",
         "referer": "https://3kor.com/",
     },
+    "thanju": {
+        "hosts": ("thanju.com", "ppqrrs.com"),
+        "origin": "https://www.thanju.com",
+        "referer": "https://www.thanju.com/",
+    },
     "xiaoyakankan": {
         "hosts": (
+            "baisiweiting.com",
             "bfvvs.com",
             "ijycnd.com",
             "gsuus.com",
@@ -1617,6 +1648,11 @@ def _is_no_space_left_error(exc):
     return "no space left on device" in text or "errno 28" in text
 
 
+def _is_session_closed_error(exc):
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "sessionclosed" in text or "session is closed" in text
+
+
 def t(key, **kwargs):
     text = I18N_DICT.get(CURRENT_LANG, {}).get(key, I18N_DICT.get("zh_TW", {}).get(key, key))
     if kwargs:
@@ -2054,6 +2090,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "njavtv"
         if "nnyy.in" in host:
             return "nnyy"
+        if "thanju.com" in host:
+            return "thanju"
         if "anime1." in host:
             return "anime1"
         if "youtube.com" in host or "youtu.be" in host:
@@ -3232,6 +3270,7 @@ def _movieffm_stream_priority(url):
 
 XIAOYAKANKAN_FAST_HLS_HOST_PRIORITY = (
     "huyall.com",
+    "baisiweiting.com",
     "ijycnd.com",
     "high23-playback.com",
     "phimgood.com",
@@ -3246,6 +3285,9 @@ XIAOYAKANKAN_FAST_HLS_HOST_PRIORITY = (
     "bdzybf",
     "bfikuncdn.com",
     "ffzy-play",
+    "cdnlz",
+    "gsuus.com",
+    "olemovienews.com",
     "yzzy",
     "yuglf.com",
     "bfllvip.com",
@@ -3669,7 +3711,17 @@ def _extract_dramasq_search_results(page_text, base_url="https://dramasq.io/"):
         title = _clean_series_site_title(title_match.group(1) if title_match else "", fallback_title=default_short_name_for_url(url))
         seen.add(url)
         results.append({"url": url, "title": title, "snippet": "dramasq site search", "quality": _video_search_quality_score(title)})
-    return results
+    deduped = []
+    seen_urls = set()
+    for result in results:
+        url = _normalize_download_url((result or {}).get("url", ""))
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        item = dict(result or {})
+        item["url"] = url
+        deduped.append(item)
+    return deduped
 
 
 def _extract_dramasq_playback_candidates(api_text):
@@ -5309,6 +5361,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "ikanbot.com",
     "avhd101.com",
     "18av.mm-cg.com",
+    "777tv.ai",
     "99itv.net",
     "hanime1.me",
     "hanimeone.me",
@@ -5316,6 +5369,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "dramasq.io",
     "olevod.com",
     "olehdtv.com",
+    "thanju.com",
 )
 
 VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
@@ -5353,6 +5407,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "ikanbot.com",
     "avhd101.com",
     "18av.mm-cg.com",
+    "777tv.ai",
     "99itv.net",
     "hanime1.me",
     "hanimeone.me",
@@ -5360,6 +5415,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "dramasq.io",
     "olevod.com",
     "olehdtv.com",
+    "thanju.com",
 )
 
 VIDEO_SEARCH_SITE_PRIORITY = {
@@ -5386,6 +5442,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "dramasq.io": 17,
     "olevod.com": 18,
     "olehdtv.com": 18,
+    "thanju.com": 18,
     "avbebe.com": 18,
     "hayav.com": 18,
     "avjoy.me": 20,
@@ -5393,6 +5450,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "ikanbot.com": 26,
     "goodav17.com": 30,
     "avhd101.com": 35,
+    "777tv.ai": 35,
     "99itv.net": 36,
     "hanime1.me": 37,
     "hanimeone.me": 37,
@@ -5439,6 +5497,8 @@ VIDEO_SEARCH_PLAYLIST_DETAIL_SITE_MARKERS = (
     "dramasq.io",
     "olevod.com",
     "olehdtv.com",
+    "thanju.com",
+    "777tv.ai",
 )
 
 VIDEO_SEARCH_CHINESE_SUBTITLE_MARKERS = (
@@ -5461,6 +5521,94 @@ ANIME1_CATALOG_SEARCH_URLS = (
 )
 
 VIDEO_SEARCH_KNOWN_RESULT_SEEDS = {
+    "開麥拉驚魂": [
+        {
+            "url": "https://www.movieffm.net/movies/tropic-thunder/",
+            "title": "開麥拉驚魂 Tropic Thunder MovieFFM",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://nnyy.in/dianying/20087967.html",
+            "title": "開麥拉驚魂 Tropic Thunder 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://777tv.ai/vod/detail/id/21927.html",
+            "title": "開麥拉驚魂 Tropic Thunder 777TV",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
+    "开麦拉惊魂": [
+        {
+            "url": "https://www.movieffm.net/movies/tropic-thunder/",
+            "title": "开麦拉惊魂 開麥拉驚魂 Tropic Thunder MovieFFM",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://nnyy.in/dianying/20087967.html",
+            "title": "开麦拉惊魂 開麥拉驚魂 Tropic Thunder 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://777tv.ai/vod/detail/id/21927.html",
+            "title": "开麦拉惊魂 開麥拉驚魂 Tropic Thunder 777TV",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
+    "Tropic Thunder": [
+        {
+            "url": "https://www.movieffm.net/movies/tropic-thunder/",
+            "title": "Tropic Thunder 開麥拉驚魂 MovieFFM",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://nnyy.in/dianying/20087967.html",
+            "title": "Tropic Thunder 開麥拉驚魂 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://777tv.ai/vod/detail/id/21927.html",
+            "title": "Tropic Thunder 開麥拉驚魂 777TV",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
+    "非常殺手": [
+        {
+            "url": "https://nnyy.in/dianying/20221977.html",
+            "title": "非常殺手 非常杀手 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://www.thanju.com/play/1748/2-1.html",
+            "title": "非常殺手 非常杀手 韓劇網",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
+    "非常杀手": [
+        {
+            "url": "https://nnyy.in/dianying/20221977.html",
+            "title": "非常杀手 非常殺手 努努影院",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+        {
+            "url": "https://www.thanju.com/play/1748/2-1.html",
+            "title": "非常杀手 非常殺手 韓劇網",
+            "snippet": "known verified search seed",
+            "quality": 1080,
+        },
+    ],
     "霧尾粉絲後援會": [
         {
             "url": "https://anime1.me/category/2026%E5%B9%B4%E6%98%A5%E5%AD%A3/%E9%9C%A7%E5%B0%BE%E7%B2%89%E7%B5%B2%E5%BE%8C%E6%8F%B4%E6%9C%83",
@@ -6172,7 +6320,17 @@ def _known_video_search_seed_results(query_text):
             result["url"] = _normalize_download_url(result.get("url", ""))
             if result.get("url"):
                 results.append(result)
-    return results
+    deduped = []
+    seen_urls = set()
+    for result in results:
+        url = _normalize_download_url((result or {}).get("url", ""))
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        item = dict(result or {})
+        item["url"] = url
+        deduped.append(item)
+    return deduped
 
 
 def _extract_njav_video_id(page_text):
@@ -7053,6 +7211,60 @@ def _extract_javfilms_search_results(page_text, base_url="https://javfilms.com/z
         base_url,
         path_markers=("/video/", "/zh/video/"),
         snippet="javfilms site search",
+    )
+
+
+def _extract_thanju_search_results(page_text, base_url="https://www.thanju.com/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(
+        r'<a\b[^>]*href=["\']([^"\']*/detail/\d+\.html)["\'][^>]*class=["\'][^"\']*searchkey[^"\']*["\'][^>]*>(.*?)</a>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(match.group(1) or "")))
+        if not url or url in seen:
+            continue
+        title = re.sub(r"<[^>]+>", " ", html.unescape(match.group(2) or ""))
+        title = re.sub(r"\s+", " ", title).strip()
+        seen.add(url)
+        results.append({"url": url, "title": title, "snippet": "thanju site search", "quality": _video_search_quality_score(title)})
+    if results:
+        return results
+    return _extract_generic_site_search_results(
+        page_text,
+        base_url,
+        path_markers=("/detail/",),
+        snippet="thanju site search",
+    )
+
+
+def _extract_nnyy_search_results(page_text, base_url="https://nnyy.in/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(
+        r'<h2>\s*<a\b[^>]*href=["\']([^"\']*/(?:dianying|dianshiju|dongman|zongyi)/\d+\.html)["\'][^>]*>(.*?)</a>\s*</h2>',
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(match.group(1) or "")))
+        if not url or url in seen:
+            continue
+        title = re.sub(r"<[^>]+>", " ", html.unescape(match.group(2) or ""))
+        title = re.sub(r"\s+", " ", title).strip()
+        seen.add(url)
+        results.append({"url": url, "title": title, "snippet": "nnyy site search", "quality": _video_search_quality_score(title)})
+    return results
+
+
+def _extract_777tv_search_results(page_text, base_url="https://777tv.ai/"):
+    return _extract_generic_site_search_results(
+        page_text,
+        base_url,
+        path_markers=("/vod/detail/id/", "/vod/play/id/"),
+        snippet="777tv site search",
     )
 
 
@@ -8272,7 +8484,9 @@ class DownloadManagerApp:
         self.config = load_config()
         global CURRENT_LANG
         CURRENT_LANG = detect_default_language()
-        self.save_dir_var = tk.StringVar(value=self.config.get("save_dir", os.path.expanduser("~/Downloads")))
+        configured_save_dir = self.config.get("save_dir", os.path.expanduser("~/Downloads"))
+        self._save_dir_cached = self._normalize_save_dir_value(configured_save_dir)
+        self.save_dir_var = tk.StringVar(value=self._save_dir_cached)
         self.format_var = tk.StringVar(value=t("format_video") if "format_video" in I18N_DICT.get(CURRENT_LANG, {}) else "Video")
         self.tree = None
         self.ui_throttler = None
@@ -8432,6 +8646,8 @@ class DownloadManagerApp:
         if not default_dir:
             default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
             os.makedirs(default_dir, exist_ok=True)
+        default_dir = self._normalize_save_dir_value(default_dir)
+        self._save_dir_cached = default_dir
         self.save_dir_var.set(default_dir)
         self.save_dir_entry = tk.Entry(settings_frame, textvariable=self.save_dir_var, font=("Segoe UI", 9), relief="groove", bd=1)
         self.save_dir_entry.grid(row=0, column=1, sticky="ew", ipady=1)
@@ -8883,10 +9099,19 @@ class DownloadManagerApp:
         return "break"
 
     def browse_folder(self):
-        selected = filedialog.askdirectory(initialdir=self.save_dir_var.get() or _APP_DIR)
+        selected = filedialog.askdirectory(initialdir=self._safe_get_save_dir() or _APP_DIR)
         if selected:
             self.save_dir_var.set(selected)
             self.persist_save_dir()
+
+    def _normalize_save_dir_value(self, value):
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            raw_value = os.path.join(os.path.expanduser("~"), "Downloads")
+        try:
+            return os.path.abspath(os.path.expanduser(raw_value))
+        except Exception:
+            return raw_value or os.path.expanduser("~/Downloads") or _APP_DIR
 
     def persist_save_dir(self):
         raw_value = self.save_dir_var.get().strip()
@@ -8894,11 +9119,12 @@ class DownloadManagerApp:
             default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
             self.save_dir_var.set(default_dir)
             raw_value = default_dir
-        normalized = os.path.abspath(os.path.expanduser(raw_value))
+        normalized = self._normalize_save_dir_value(raw_value)
         try:
             os.makedirs(normalized, exist_ok=True)
         except Exception:
             return
+        self._save_dir_cached = normalized
         self.save_dir_var.set(normalized)
         save_config({"save_dir": normalized})
 
@@ -11834,6 +12060,26 @@ class DownloadManagerApp:
 
         def fetch_nnyy_results():
             collected = []
+            for variant in search_variants:
+                try:
+                    search_url = "https://nnyy.in/so?" + urllib.parse.urlencode({"q": variant})
+                    resp = c_req.get(
+                        search_url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer="https://nnyy.in/"),
+                    )
+                    append_unique_results(
+                        collected,
+                        _extract_nnyy_search_results(
+                            _response_text_utf8(resp),
+                            str(getattr(resp, "url", search_url)),
+                        ),
+                    )
+                except Exception:
+                    pass
+            if collected:
+                return collected
             for primary in primary_queries:
                 query = f"{primary} site:nnyy.in/dianying"
                 try:
@@ -12062,6 +12308,27 @@ class DownloadManagerApp:
                 ]
             )
 
+        def fetch_thanju_results():
+            collected = []
+            for variant in search_variants:
+                try:
+                    headers = _make_ytdlp_http_headers(referer="https://www.thanju.com/")
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+                    resp = c_req.post(
+                        "https://www.thanju.com/index.php?s=vod-search",
+                        data={"wd": variant},
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=headers,
+                    )
+                    append_unique_results(
+                        collected,
+                        _extract_thanju_search_results(_response_text_utf8(resp), str(getattr(resp, "url", "https://www.thanju.com/index.php?s=vod-search"))),
+                    )
+                except Exception:
+                    pass
+            return collected
+
         def fetch_ikanbot_results():
             return fetch_site_search_results(
                 [
@@ -12124,12 +12391,30 @@ class DownloadManagerApp:
                 ]
             )
 
+        def fetch_777tv_results():
+            return fetch_site_search_results(
+                [
+                    {
+                        "root_url": "https://777tv.ai",
+                        "url": lambda variant: "https://777tv.ai/vod/search.html?" + urllib.parse.urlencode({"wd": variant}),
+                        "extractor": _extract_777tv_search_results,
+                    },
+                    {
+                        "root_url": "https://777tv.ai",
+                        "url": lambda variant: "https://777tv.ai/index.php/vod/search.html?" + urllib.parse.urlencode({"wd": variant}),
+                        "extractor": _extract_777tv_search_results,
+                    },
+                ]
+            )
+
         def fetch_supported_site_engine_results():
             collected = []
             engine_targets = (
                 ("3kor.com", ("/detail/", "/list/")),
                 ("dramasq.io", ("/detail/", "/vodplay/")),
                 ("olevod.com", ("/index.php/vod/detail/", "/index.php/vod/play/")),
+                ("thanju.com", ("/detail/", "/play/")),
+                ("777tv.ai", ("/vod/detail/id/", "/vod/play/id/")),
                 ("av01.media", ("/tw/video/", "/video/")),
                 ("avhd101.com", ("/search", "/vodplay", "/video")),
                 ("ikanbot.com", ("/play/", "/voddetail/", "/vodsearch/")),
@@ -12220,6 +12505,7 @@ class DownloadManagerApp:
                 ("18jav", fetch_18jav_results),
                 ("javfilms", fetch_javfilms_results),
                 ("gimy", fetch_gimy_results),
+                ("777tv", fetch_777tv_results),
                 ("ikanbot", fetch_ikanbot_results),
                 ("yfsp", fetch_yfsp_results),
                 ("nnyy", fetch_nnyy_results),
@@ -12243,7 +12529,9 @@ class DownloadManagerApp:
                     ("njavtv", fetch_supported_site_engine_results),
                     ("movieffm", fetch_movieffm_results),
                     ("gimy", fetch_gimy_results),
+                    ("777tv", fetch_777tv_results),
                     ("ikanbot", fetch_ikanbot_results),
+                    ("thanju", fetch_thanju_results),
                     ("3kor", fetch_3kor_results),
                     ("xiaoyakankan.tv", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.tv")),
                     ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
@@ -12251,6 +12539,7 @@ class DownloadManagerApp:
                     ("iq", fetch_iq_results),
                     ("nnyy", fetch_nnyy_results),
                     ("yfsp", fetch_yfsp_results),
+                    ("thanju", fetch_thanju_results),
                     ("dramasq", fetch_dramasq_results),
                     ("olevod", fetch_olevod_results),
                 ] + google_jobs
@@ -12263,13 +12552,16 @@ class DownloadManagerApp:
                     ("xiaoyakankan.io", lambda: fetch_xiaoyakankan_results("https://tw.xiaoyakankan.io")),
                     ("gimy", fetch_gimy_results),
                     ("movieffm", fetch_movieffm_results),
+                    ("777tv", fetch_777tv_results),
                     ("ikanbot", fetch_ikanbot_results),
+                    ("thanju", fetch_thanju_results),
                 ]
                 slow_source_jobs = [
                     ("anime1", fetch_anime1_results),
                     ("iq", fetch_iq_results),
                     ("nnyy", fetch_nnyy_results),
                     ("yfsp", fetch_yfsp_results),
+                    ("thanju", fetch_thanju_results),
                     ("dramasq", fetch_dramasq_results),
                     ("olevod", fetch_olevod_results),
                     ("tktube", fetch_tktube_results),
@@ -12287,7 +12579,9 @@ class DownloadManagerApp:
             fast_source_jobs = common_fast_jobs + [
                 ("movieffm", fetch_movieffm_results),
                 ("gimy", fetch_gimy_results),
+                ("777tv", fetch_777tv_results),
                 ("ikanbot", fetch_ikanbot_results),
+                ("thanju", fetch_thanju_results),
                 ("3kor", fetch_3kor_results),
                 ("dramasq", fetch_dramasq_results),
                 ("olevod", fetch_olevod_results),
@@ -12309,6 +12603,7 @@ class DownloadManagerApp:
                 ("18jav", fetch_18jav_results),
                 ("javfilms", fetch_javfilms_results),
                 ("nnyy", fetch_nnyy_results),
+                ("thanju", fetch_thanju_results),
             ] + google_jobs
         results = collect_parallel(
             fast_source_jobs,
@@ -13414,6 +13709,22 @@ class DownloadManagerApp:
                 self._mark_task_error_state(item_id, exc)
                 self._set_task_named_column_text(item_id, "progress", "--")
                 return False
+            if self._is_incomplete_hls_video_artifact(task, output_path):
+                exc = Exception("download output appears incomplete")
+                write_error_log(
+                    "finish rejected incomplete media",
+                    exc,
+                    item_id=item_id,
+                    output=output_path,
+                    size=output_size,
+                    duration=media_info.get("duration"),
+                    reason=reason,
+                    source_site=_task_source_site_name(task) or None,
+                )
+                self._remove_rejected_finish_output(item_id, output_path, "incomplete media")
+                self._mark_task_error_state(item_id, exc)
+                self._set_task_named_column_text(item_id, "progress", "--")
+                return False
         self._set_task_output_file(task, item_id, output_path)
         self._set_task_named_column_text(item_id, "size", format_transfer_size(output_size))
         return True
@@ -13483,10 +13794,7 @@ class DownloadManagerApp:
     def _safe_get_save_dir(self):
         value = ""
         try:
-            if hasattr(self, "save_dir_var"):
-                value = str(self.save_dir_var.get() or "").strip()
-        except RuntimeError:
-            value = ""
+            value = str(getattr(self, "_save_dir_cached", "") or "").strip()
         except Exception:
             value = ""
         if not value:
@@ -13494,7 +13802,28 @@ class DownloadManagerApp:
                 value = str((getattr(self, "config", {}) or {}).get("save_dir", "") or "").strip()
             except Exception:
                 value = ""
-        return value or os.path.expanduser("~/Downloads") or _APP_DIR
+        if not value and threading.current_thread() is threading.main_thread():
+            try:
+                if hasattr(self, "save_dir_var"):
+                    value = str(self.save_dir_var.get() or "").strip()
+            except Exception:
+                value = ""
+        if value:
+            return self._normalize_save_dir_value(value)
+        return os.path.expanduser("~/Downloads") or _APP_DIR
+
+    def _refresh_save_dir_cache_from_config(self):
+        try:
+            value = str((getattr(self, "config", {}) or {}).get("save_dir", "") or "").strip()
+        except Exception:
+            value = ""
+        if not value:
+            try:
+                value = str(getattr(self, "_save_dir_cached", "") or "").strip()
+            except Exception:
+                value = ""
+        self._save_dir_cached = self._normalize_save_dir_value(value)
+        return self._save_dir_cached
 
     def _has_resume_artifact_state(self, task, save_dir=None, is_mp3=None):
         if not task:
@@ -17235,11 +17564,23 @@ class DownloadManagerApp:
             raise incomplete_exc
         elapsed_seconds = max(time.time() - start_time, 0.001)
         final_download_host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
-        final_task_filename = str(_task_field_value(task, "filename", "") or "").strip()
-        output_is_task_file = bool(
-            final_task_filename
-            and os.path.normcase(os.path.abspath(out_path)) == os.path.normcase(os.path.abspath(final_task_filename))
-        )
+        if mark_finished:
+            self._set_task_output_file(task, item_id, out_path)
+            self._set_task_named_column_text(item_id, "progress", "100%")
+            if not self._mark_task_finished(item_id):
+                raise Exception("HTTP media output failed final validation")
+            task = self.tasks.get(item_id, task)
+            out_path = self._task_output_path_or_default(task, out_path)
+            final_size = self._get_existing_file_size(out_path)
+        task_state_after_download = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
+        final_task_filename = str(_task_field_value(self.tasks.get(item_id, {}), "filename", "") or "").strip()
+        try:
+            output_is_task_file = bool(
+                final_task_filename
+                and os.path.normcase(os.path.abspath(out_path)) == os.path.normcase(os.path.abspath(final_task_filename))
+            )
+        except Exception:
+            output_is_task_file = False
         write_error_log(
             "http media download finished",
             Exception("http media download finished"),
@@ -17262,8 +17603,6 @@ class DownloadManagerApp:
             output_is_task_file=output_is_task_file,
             task_state=task_state_after_download or None,
         )
-        if mark_finished:
-            self._mark_task_finished(item_id)
 
     def _resolve_direct_media_output_path(self, media_url, save_dir, display_name, default_ext=".mp4"):
         ext = os.path.splitext(urllib.parse.urlparse(str(media_url or "")).path)[1] or default_ext
@@ -18052,6 +18391,82 @@ class DownloadManagerApp:
                 continue
         raise last_exc or Exception("parallel HLS segment fetch failed")
 
+    def _stream_parallel_hls_segment_payload_to_file(self, segment_url, request_headers, temp_part_path, prefer_curl=False):
+        def _content_length_from_headers(headers):
+            try:
+                value = (headers or {}).get("Content-Length") if hasattr(headers, "get") else None
+                return max(int(value or 0), 0)
+            except Exception:
+                return 0
+
+        def _validate_streamed_length(total, expected_length):
+            expected = max(int(expected_length or 0), 0)
+            actual = max(int(total or 0), 0)
+            if expected > 0 and actual != expected:
+                raise Exception(f"incomplete HLS segment stream: expected {expected}, got {actual}")
+            if actual <= 0:
+                raise Exception("empty HLS segment stream")
+
+        def _stream_with_curl():
+            session = self._parallel_hls_curl_session()
+            resp = session.get(
+                segment_url,
+                timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS,
+                headers=request_headers,
+                stream=True,
+            )
+            status_code = int(getattr(resp, "status_code", 0) or 0)
+            if status_code >= 400:
+                raise Exception(f"HTTP {status_code}")
+            resp_headers = getattr(resp, "headers", {}) or {}
+            content_type = str(resp_headers.get("Content-Type") or "").lower()
+            expected_length = _content_length_from_headers(resp_headers)
+            head = b""
+            total = 0
+            with open(temp_part_path, "wb") as out_f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    if len(head) < 512:
+                        head += bytes(chunk[: max(0, 512 - len(head))])
+                    out_f.write(chunk)
+                    total += len(chunk)
+            _validate_streamed_length(total, expected_length)
+            return total, head, content_type
+
+        def _stream_with_urllib():
+            with urllib.request.urlopen(urllib.request.Request(segment_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                content_type = str(resp.headers.get("Content-Type") or "").lower()
+                expected_length = _content_length_from_headers(resp.headers)
+                head = b""
+                total = 0
+                with open(temp_part_path, "wb") as out_f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        if len(head) < 512:
+                            head += chunk[: max(0, 512 - len(head))]
+                        out_f.write(chunk)
+                        total += len(chunk)
+                _validate_streamed_length(total, expected_length)
+                return total, head, content_type
+
+        stream_order = (_stream_with_curl, _stream_with_urllib) if prefer_curl else (_stream_with_urllib, _stream_with_curl)
+        last_exc = None
+        for streamer in stream_order:
+            try:
+                return streamer()
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    if os.path.exists(temp_part_path):
+                        os.remove(temp_part_path)
+                except OSError:
+                    pass
+                continue
+        raise last_exc or Exception("parallel HLS segment stream failed")
+
     def _parallel_hls_segment_error_is_rate_limited(self, exc):
         try:
             if int(getattr(exc, "code", 0) or 0) == 429:
@@ -18088,13 +18503,33 @@ class DownloadManagerApp:
             try:
                 if stop_event.is_set() or self._shutdown_started:
                     raise StopDownloadException("stop requested")
+                key_info = segment.get("key") or {}
+                segment_has_key = bool(key_info.get("uri"))
+                if not segment_has_key:
+                    part_size, head, content_type = self._stream_parallel_hls_segment_payload_to_file(
+                        segment_url,
+                        request_headers,
+                        temp_part_path,
+                        prefer_curl=bool(prefer_curl and not is_google_segment),
+                    )
+                    allow_mislabelled_media = (
+                        self._parallel_hls_allows_mislabelled_media(segment_host)
+                        and self._is_valid_parallel_hls_segment_media_bytes(head)
+                    )
+                    if not (allow_mislabelled_media or self._is_valid_parallel_hls_segment_data(head, content_type=content_type)):
+                        if is_google_segment and self._is_unsupported_parallel_hls_segment_payload(head, content_type):
+                            raise ParallelHlsUnsupportedSegmentContentException(
+                                f"Google-backed HLS returned non-video segment content: {content_type or 'unknown'}"
+                            )
+                        raise Exception(f"invalid HLS segment content: {content_type or 'unknown'}")
+                    os.replace(temp_part_path, part_path)
+                    return int(part_size or 0)
                 data, content_type = self._fetch_parallel_hls_segment_payload(
                     segment_url,
                     request_headers,
                     prefer_curl=bool(prefer_curl and not is_google_segment),
                 )
-                key_info = segment.get("key") or {}
-                if key_info.get("uri"):
+                if segment_has_key:
                     data = self._decrypt_parallel_hls_segment_data(data, segment, key_cache)
                 allow_mislabelled_media = (
                     self._parallel_hls_allows_mislabelled_media(segment_host)
@@ -18398,17 +18833,23 @@ class DownloadManagerApp:
         completed_lock = threading.Lock()
         source_site = _task_source_site_name(task)
         prefer_curl_segments = source_site in (
+            "99itv",
             "18av",
             "movieffm",
             "avbebe",
+            "dramasq",
+            "gimy",
             "goodav17",
             "hayav",
             "hohoj",
+            "ikanbot",
             "jable",
             "missav",
             "njav",
             "njavtv",
             "nnyy",
+            "olevod",
+            "thanju",
             "xiaoyakankan",
         )
         hls_host, representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
@@ -18495,6 +18936,9 @@ class DownloadManagerApp:
             if self._is_pause_requested_state(task_state) or self._is_delete_requested_state(task_state):
                 stop_event.set()
                 raise StopDownloadException("stop requested")
+            if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=self._disk_full_pause_note()):
+                stop_event.set()
+                raise StopDownloadException("disk space low")
             try:
                 part_size = self._download_parallel_hls_segment(
                     segment,
@@ -18511,6 +18955,9 @@ class DownloadManagerApp:
                     self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=self._disk_full_pause_note())
                     raise StopDownloadException("disk space low")
                 raise
+            if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=self._disk_full_pause_note()):
+                stop_event.set()
+                raise StopDownloadException("disk space low")
             with completed_lock:
                 completed_segment_indexes.add(int(segment["index"]))
                 completed_bytes += int(part_size or 0)
@@ -20670,6 +21117,12 @@ class DownloadManagerApp:
         deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
         while time.time() < deadline:
             active_found = False
+            try:
+                with self._active_download_item_ids_lock:
+                    if self._active_download_item_ids:
+                        active_found = True
+            except Exception:
+                active_found = True
             for task in self.tasks.values():
                 proc = _task_field_value(task, "_proc", None)
                 if proc is None:
@@ -23762,6 +24215,67 @@ class DownloadManagerApp:
             )
             return
 
+        if "thanju.com" in parsed_url.netloc and re.search(r"/(?:detail|play)/\d+(?:/\d+-\d+)?\.html$", parsed_url.path, re.IGNORECASE):
+            self._set_task_parse_ui(item_id, message="正在解析 韓劇網...")
+            c_req = get_curl_cffi_requests()
+            site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=_make_ytdlp_http_headers(referer=site_root + "/"),
+            )
+            page_text = _response_text_utf8(resp)
+            page_title = _clean_series_site_title(_extract_html_title(page_text, short_name or "韓劇網"), fallback_title=short_name or "韓劇網")
+            if "/detail/" in parsed_url.path.lower():
+                play_entries = []
+                for match in re.finditer(r'href=["\']([^"\']*/play/\d+/\d+-\d+\.html)["\'][^>]*>(.*?)</a>', page_text, re.IGNORECASE | re.DOTALL):
+                    play_url = _normalize_download_url(urllib.parse.urljoin(url, html.unescape(match.group(1) or "")))
+                    ep_name = re.sub(r"<[^>]+>", " ", html.unescape(match.group(2) or ""))
+                    ep_name = re.sub(r"\s+", " ", ep_name).strip()
+                    if play_url:
+                        play_entries.append((play_url, ep_name))
+                seen_play_urls = set()
+                deduped_entries = []
+                for play_url, ep_name in play_entries:
+                    if play_url in seen_play_urls:
+                        continue
+                    seen_play_urls.add(play_url)
+                    deduped_entries.append((play_url, ep_name))
+                if not deduped_entries:
+                    raise Exception("Thanju detail page did not expose episode links")
+                primary_url, primary_episode_name = deduped_entries[0]
+                display_name = page_title if len(deduped_entries) == 1 else f"{page_title} {primary_episode_name}".strip()
+                fallback_urls = [play_url for play_url, _ep_name in deduped_entries[1:]]
+                _set_task_identity(name=display_name, source_site="thanju", source_page=url, fallback_urls=fallback_urls)
+                self._download_task_internal(primary_url, item_id, save_dir, use_impersonate, is_mp3)
+                return
+            player_data = _safe_extract_player_js_object(page_text, "cms_player", "player_data", "player_aaaa", "player")
+            candidates = []
+            if isinstance(player_data, dict):
+                for key in ("url", "src", "play_url", "playUrl", "m3u8", "url_next"):
+                    candidate = _decode_maccms_player_url(player_data.get(key), player_data.get("encrypt", 0))
+                    if candidate:
+                        candidates.append(candidate)
+                for key in ("urls", "backup", "backup_urls", "m3u8_urls"):
+                    value = player_data.get(key)
+                    if isinstance(value, (list, tuple)):
+                        candidates.extend(value)
+            candidates.extend(_extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd")))
+            candidates = _dedupe_download_urls(candidates)
+            if not candidates:
+                raise Exception("Thanju stream URL missing")
+            fallback_urls = candidates[1:]
+            _set_task_identity(name=page_title, source_site="thanju", source_page=url, fallback_urls=fallback_urls)
+            self._log_m3u8_route_selected(task, item_id, candidates[0], source_site="thanju", fallback_urls=fallback_urls)
+            _download_manifest_with_site_strategy(
+                candidates[0],
+                referer=url,
+                origin=site_root,
+                default_route="ffmpeg",
+            )
+            return
+
         if "777tv.ai" in parsed_url.netloc and re.search(r"/vod/detail/id/\d+\.html$", parsed_url.path, re.IGNORECASE):
             self._set_task_parse_ui(item_id, message="正在解析 777TV...")
             c_req = get_curl_cffi_requests()
@@ -26622,6 +27136,9 @@ class DownloadManagerApp:
             except (StopDownloadException, KeyboardInterrupt):
                 raise
             except Exception as e:
+                if self._shutdown_started or str(_task_field_value(task, "state", "") or "") in ("PAUSE_REQUESTED", "DELETED", "DELETE_REQUESTED"):
+                    if _is_session_closed_error(e):
+                        raise StopDownloadException("application is shutting down")
                 write_error_log("anime1 custom parser fallback", e, page_url=page_url, item_id=item_id, use_impersonate=use_impersonate)
                 if not page_url or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", _normalize_download_url(page_url) or ""):
                     raise
