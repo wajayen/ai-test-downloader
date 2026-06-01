@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260601-3380"
+APP_BUILD = "20260601-3390"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -302,6 +302,18 @@ def _looks_like_garbled_text(value):
     return (bad_count / max(len(text), 1)) > 0.04
 
 
+def _contains_mojibake_noise(value):
+    text = str(value or "")
+    if not text:
+        return False
+    noisy_count = 0
+    for char in text:
+        codepoint = ord(char)
+        if char == "\ufffd" or codepoint == 0xFFFD or 0x80 <= codepoint <= 0x9F or 0xE000 <= codepoint <= 0xF8FF:
+            noisy_count += 1
+    return noisy_count > 0 or text.count("?") >= 2 or _looks_like_garbled_text(text)
+
+
 def _looks_like_code_only_title(value):
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     return bool(re.fullmatch(r"[A-Za-z]{2,10}[-_. ]?\d{2,6}", text))
@@ -318,10 +330,10 @@ def _output_title_is_suspicious_value(title):
         return True
     title_stem = os.path.splitext(os.path.basename(title_text))[0].strip()
     return (
-        _looks_like_garbled_text(title_text)
+        _contains_mojibake_noise(title_text)
         or _looks_like_code_only_title(title_text)
         or _looks_like_numeric_only_title(title_text)
-        or _looks_like_garbled_text(title_stem)
+        or _contains_mojibake_noise(title_stem)
         or _looks_like_code_only_title(title_stem)
         or _looks_like_numeric_only_title(title_stem)
     )
@@ -798,7 +810,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "surrit.com",
 )
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
-PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 30
+PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 6
 PARALLEL_HLS_SHUTDOWN_SEGMENT_TIMEOUT_SECONDS = 1.5
 PARALLEL_HLS_SEGMENT_RETRIES = 10
 PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES = 20
@@ -941,6 +953,7 @@ HTTP_RANGE_CHUNK_SIZE = 16 * 1024 * 1024
 HTTP_FILE_COPY_CHUNK_SIZE = 16 * 1024 * 1024
 HTTP_RANGE_PART_MAX_ATTEMPTS = 6
 HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS = 0.6
+HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS = 6
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
     "18jav",
     "777tv",
@@ -1012,7 +1025,7 @@ STARTUP_RESUME_DELAY_MS = 1200
 STARTUP_RESUME_BATCH_SIZE = 12
 STARTUP_RESUME_BATCH_DELAY_MS = 250
 STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS = 1200
-SHUTDOWN_ACTIVE_DOWNLOAD_WAIT_SECONDS = 4.0
+SHUTDOWN_ACTIVE_DOWNLOAD_WAIT_SECONDS = 7.5
 SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS = 0.8
 SHUTDOWN_PROCESS_TERMINATE_TIMEOUT_SECONDS = 0.8
 SHUTDOWN_PROCESS_KILL_TIMEOUT_SECONDS = 0.8
@@ -8323,9 +8336,9 @@ def _safe_output_stem(name, fallback="download", max_chars=150):
     cleaned = re.sub(r"_+", "_", cleaned)
     cleaned = cleaned.strip(" .-_")
     fallback_text = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", str(fallback or "download")).strip(" .-_") or "download"
-    if cleaned and _looks_like_garbled_text(cleaned):
+    if cleaned and _contains_mojibake_noise(cleaned):
         stable_code = _extract_jav_code(cleaned) or _extract_jav_code(fallback_text)
-        cleaned = stable_code or (fallback_text if not _looks_like_garbled_text(fallback_text) else "")
+        cleaned = stable_code or (fallback_text if not _contains_mojibake_noise(fallback_text) else "")
     if not cleaned:
         cleaned = fallback_text
     max_len = max(int(max_chars or 0), 32)
@@ -8694,6 +8707,10 @@ class DownloadManagerApp:
         self._active_network_sessions_lock = threading.Lock()
         self._active_download_item_ids = set()
         self._active_download_item_ids_lock = threading.Lock()
+        self._parallel_hls_stop_events = {}
+        self._parallel_hls_stop_events_lock = threading.Lock()
+        self._http_multipart_stop_events = {}
+        self._http_multipart_stop_events_lock = threading.Lock()
         self._background_threads = set()
         self._background_threads_lock = threading.Lock()
         self._startup_resume_pending = False
@@ -11577,7 +11594,10 @@ class DownloadManagerApp:
                     except Exception:
                         pass
 
-        thread = threading.Thread(target=guarded_target, daemon=True)
+        thread_name = getattr(target, "__name__", "background")
+        if len(args) >= 2 and thread_name == "_download_task_worker_entry":
+            thread_name = f"download-{args[1]}"
+        thread = threading.Thread(target=guarded_target, daemon=True, name=thread_name)
         thread_ref["thread"] = thread
         try:
             with self._background_threads_lock:
@@ -11611,6 +11631,21 @@ class DownloadManagerApp:
         except Exception:
             return 0
 
+    def _active_background_thread_names(self):
+        try:
+            with self._background_threads_lock:
+                threads = [thread for thread in self._background_threads if thread.is_alive()]
+                self._background_threads = set(threads)
+        except Exception:
+            threads = []
+        names = []
+        for thread in threads:
+            try:
+                names.append(str(getattr(thread, "name", "") or repr(thread)))
+            except Exception:
+                continue
+        return names
+
     def _download_worker_active(self, item_id):
         if not item_id:
             return False
@@ -11643,6 +11678,90 @@ class DownloadManagerApp:
             return
         with lock:
             active_ids.discard(item_id)
+
+    def _register_parallel_hls_stop_event(self, item_id, stop_event):
+        if not item_id or stop_event is None:
+            return
+        try:
+            with self._parallel_hls_stop_events_lock:
+                self._parallel_hls_stop_events[item_id] = stop_event
+        except Exception:
+            pass
+
+    def _unregister_parallel_hls_stop_event(self, item_id, stop_event=None):
+        if not item_id:
+            return
+        try:
+            with self._parallel_hls_stop_events_lock:
+                current = self._parallel_hls_stop_events.get(item_id)
+                if stop_event is None or current is stop_event:
+                    self._parallel_hls_stop_events.pop(item_id, None)
+        except Exception:
+            pass
+
+    def _signal_parallel_hls_stop_events(self, item_ids=None):
+        try:
+            with self._parallel_hls_stop_events_lock:
+                if item_ids is None:
+                    events = list(self._parallel_hls_stop_events.values())
+                else:
+                    wanted_ids = set(item_ids)
+                    events = [
+                        event
+                        for item_id, event in self._parallel_hls_stop_events.items()
+                        if item_id in wanted_ids
+                    ]
+        except Exception:
+            events = []
+        for event in events:
+            try:
+                event.set()
+            except Exception:
+                pass
+
+    def _register_http_multipart_stop_event(self, item_id, stop_event):
+        if not item_id or stop_event is None:
+            return
+        try:
+            with self._http_multipart_stop_events_lock:
+                self._http_multipart_stop_events[item_id] = stop_event
+        except Exception:
+            pass
+
+    def _unregister_http_multipart_stop_event(self, item_id, stop_event=None):
+        if not item_id:
+            return
+        try:
+            with self._http_multipart_stop_events_lock:
+                current = self._http_multipart_stop_events.get(item_id)
+                if stop_event is None or current is stop_event:
+                    self._http_multipart_stop_events.pop(item_id, None)
+        except Exception:
+            pass
+
+    def _signal_http_multipart_stop_events(self, item_ids=None):
+        try:
+            with self._http_multipart_stop_events_lock:
+                if item_ids is None:
+                    events = list(self._http_multipart_stop_events.values())
+                else:
+                    wanted_ids = set(item_ids)
+                    events = [
+                        event
+                        for item_id, event in self._http_multipart_stop_events.items()
+                        if item_id in wanted_ids
+                    ]
+        except Exception:
+            events = []
+        for event in events:
+            try:
+                event.set()
+            except Exception:
+                pass
+
+    def _signal_transfer_stop_events(self, item_ids=None):
+        self._signal_parallel_hls_stop_events(item_ids)
+        self._signal_http_multipart_stop_events(item_ids)
 
     def _download_task_worker_entry(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         try:
@@ -14335,7 +14454,7 @@ class DownloadManagerApp:
             page_url=self._get_task_source_page(task, fallback_url=_normalize_download_url(_task_field_value(task, "url", "")) or ""),
             fallback_title=str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip(),
         )
-        if _looks_like_garbled_text(clean_output_path) or _output_title_is_suspicious_value(output_stem) or repaired_output_title:
+        if _contains_mojibake_noise(clean_output_path) or _output_title_is_suspicious_value(output_stem) or repaired_output_title:
             stable_code = _extract_jav_code(output_stem) or _extract_jav_code(clean_output_path)
             fallback_title = self._task_output_title_fallback(
                 task,
@@ -14616,6 +14735,7 @@ class DownloadManagerApp:
         task = self.tasks.get(item_id)
         if not task:
             return
+        self._signal_transfer_stop_events([item_id])
         _set_task_aux_fields(task, state="DELETE_REQUESTED", _stop_reason=STOP_REASON_DELETE)
         write_error_log(
             "download task delete requested",
@@ -16641,7 +16761,7 @@ class DownloadManagerApp:
                             candidate_response = candidate_session.get(
                                 url,
                                 headers=req_headers,
-                                timeout=30,
+                                timeout=HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS,
                                 stream=True,
                                 verify=False,
                             )
@@ -16665,7 +16785,8 @@ class DownloadManagerApp:
                             last_exc = exc
                     if response is not None or stop_event.is_set() or self._shutdown_started:
                         break
-                    time.sleep(min(0.4 * (attempt + 1), 1.5))
+                    if stop_event.wait(min(0.4 * (attempt + 1), 1.5)) or self._shutdown_started:
+                        break
                 if response is None and last_exc is not None:
                     raise last_exc
                 with open(part_path, "ab" if append else "wb") as f:
@@ -16698,7 +16819,7 @@ class DownloadManagerApp:
                         pass
             return
         req = urllib.request.Request(url, headers=req_headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS) as resp:
             status = int(getattr(resp, "status", 0) or resp.getcode() or 0)
             if expected_size > 0 and status != 206:
                 raise Exception(f"HTTP range request returned {status or 'unknown'}")
@@ -17676,6 +17797,7 @@ class DownloadManagerApp:
             if switched_to_multipart:
                 progress_boxes = []
                 stop_event = threading.Event()
+                self._register_http_multipart_stop_event(item_id, stop_event)
                 part_paths = []
                 remaining_start = downloaded
                 remaining_end = total_size - 1
@@ -17786,9 +17908,10 @@ class DownloadManagerApp:
                             raise ResumeLowSpeedReanalysisException("resume transfer stayed below the low-speed threshold")
                         time.sleep(0.5)
                 finally:
+                    self._unregister_http_multipart_stop_event(item_id, stop_event)
                     if executor is not None:
                         try:
-                            executor.shutdown(wait=not self._shutdown_started, cancel_futures=True)
+                            executor.shutdown(wait=not (self._shutdown_started or stop_event.is_set()), cancel_futures=True)
                         except Exception:
                             pass
                 for part_path, part_start, part_end in part_specs:
@@ -19140,9 +19263,8 @@ class DownloadManagerApp:
         if not segments:
             raise ParallelHlsUnsupportedSegmentContentException("HLS playlist contains no usable resume segments")
         stop_event = threading.Event()
-        if any((segment.get("key") or {}).get("uri") for segment in segments) and CryptoAES is None:
-            return False
-        key_cache = self._fetch_parallel_hls_keys(segments, headers, stop_event=stop_event)
+        self._register_parallel_hls_stop_event(item_id, stop_event)
+        key_cache = {}
         transport_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ts"
         merged_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.mp4"
         concat_list_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ffconcat"
@@ -19152,6 +19274,9 @@ class DownloadManagerApp:
             for segment in segments
         )
         try:
+            if any((segment.get("key") or {}).get("uri") for segment in segments) and CryptoAES is None:
+                return False
+            key_cache = self._fetch_parallel_hls_keys(segments, headers, stop_event=stop_event)
             self._preflight_parallel_hls_segments(segments, headers, stop_event=stop_event)
         except ParallelHlsUnsupportedSegmentContentException as exc:
             write_error_log(
@@ -19357,11 +19482,14 @@ class DownloadManagerApp:
 
                 try:
                     for _ in range(min(in_flight_limit, len(pending_segments))):
+                        if stop_event.is_set() or self._shutdown_started:
+                            stop_requested = True
+                            raise StopDownloadException("stop requested")
                         if not _submit_next_segment():
                             break
                     while in_flight:
                         current_task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
-                        if self._is_pause_requested_state(current_task_state) or self._is_delete_requested_state(current_task_state) or self._shutdown_started:
+                        if stop_event.is_set() or self._is_pause_requested_state(current_task_state) or self._is_delete_requested_state(current_task_state) or self._shutdown_started:
                             stop_requested = True
                             stop_event.set()
                             for pending_future in in_flight:
@@ -19375,12 +19503,19 @@ class DownloadManagerApp:
                         if not done:
                             continue
                         for future in done:
+                            if stop_event.is_set() or self._shutdown_started:
+                                stop_requested = True
+                                raise StopDownloadException("stop requested")
                             future.result()
                         if stop_event.is_set() or self._shutdown_started:
                             stop_requested = True
                             raise StopDownloadException("stop requested")
-                        while len(in_flight) < in_flight_limit and _submit_next_segment():
-                            pass
+                        while len(in_flight) < in_flight_limit:
+                            if stop_event.is_set() or self._shutdown_started:
+                                stop_requested = True
+                                raise StopDownloadException("stop requested")
+                            if not _submit_next_segment():
+                                break
                 except BaseException:
                     stop_requested = True
                     stop_event.set()
@@ -19538,6 +19673,8 @@ class DownloadManagerApp:
             if has_google_segments:
                 raise ParallelHlsRetryLaterException(str(exc)[:240] or "Google-backed HLS segments are temporarily rate-limited")
             return False
+        finally:
+            self._unregister_parallel_hls_stop_event(item_id, stop_event)
 
     def _download_m3u8_with_ytdlp_native(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net"):
         yt_dlp_module = get_yt_dlp_module()
@@ -21314,7 +21451,9 @@ class DownloadManagerApp:
         raise Exception("FFmpeg download failed without candidates")
 
     def pause_selected(self):
-        for item_id in self._selected_task_ids():
+        selected_item_ids = list(self._selected_task_ids())
+        self._signal_transfer_stop_events(selected_item_ids)
+        for item_id in selected_item_ids:
             if item_id not in self.tasks:
                 continue
             state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
@@ -21517,6 +21656,10 @@ class DownloadManagerApp:
             now = time.time()
             if now - last_session_close_at >= 0.25:
                 try:
+                    self._signal_transfer_stop_events(active_item_ids_snapshot)
+                except Exception:
+                    pass
+                try:
                     self._close_active_network_sessions()
                 except Exception:
                     pass
@@ -21528,10 +21671,23 @@ class DownloadManagerApp:
                     "shutdown wait active downloads timeout",
                     RuntimeError("active download workers did not stop before shutdown wait timeout"),
                     active_item_ids=", ".join(active_item_ids_snapshot),
+                    background_threads=", ".join(self._active_background_thread_names()),
                     timeout_seconds=timeout_seconds,
                 )
             except Exception:
                 pass
+            for item_id in active_item_ids_snapshot:
+                task = self.tasks.get(item_id)
+                if not task:
+                    continue
+                try:
+                    _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, resume_requested=True, _manual_pause_requested=False)
+                    self._update_task_state_entry(task, state="PAUSED", resume_requested=True, _stop_reason=None)
+                    self._release_download_worker(item_id)
+                    self._unregister_parallel_hls_stop_event(item_id)
+                    self._unregister_http_multipart_stop_event(item_id)
+                except Exception:
+                    continue
 
     def _wait_for_shutdown_resume_artifacts(self, timeout_seconds=SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS, stable_polls=2):
         deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
@@ -21623,6 +21779,7 @@ class DownloadManagerApp:
                 active_worker_ids = set(self._active_download_item_ids)
         except Exception:
             active_worker_ids = set()
+        self._signal_transfer_stop_events(active_worker_ids)
         for item_id, task in self.tasks.items():
             state = str(_task_field_value(task, "state", "") or "")
             proc = _task_field_value(task, "_proc", None)
@@ -22378,6 +22535,21 @@ class DownloadManagerApp:
     def _resolve_task_output_name_and_path(self, task, item_id, source_url, save_dir, ext="mp4", fallback_name="Video"):
         self._refresh_task_title_before_output_name(task, item_id, source_url)
         name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or fallback_name or "").strip()
+        source_site = _task_source_site_name(task)
+        stable_code = (
+            _extract_jav_code(name)
+            or _extract_jav_code(_task_field_value(task, "source_page", ""))
+            or _extract_jav_code(_task_field_value(task, "url", ""))
+            or _extract_jav_code(source_url)
+        )
+        if stable_code and _contains_mojibake_noise(name):
+            name = self._set_task_display_name(
+                task,
+                item_id,
+                stable_code,
+                source_site=source_site or None,
+                source_page=self._get_task_source_page(task, fallback_url=source_url),
+            ) or stable_code
         if self._output_title_is_suspicious(name):
             fallback_title = self._task_output_title_fallback(task, source_url, fallback_name=fallback_name)
             if fallback_title:
@@ -22385,10 +22557,12 @@ class DownloadManagerApp:
                     task,
                     item_id,
                     fallback_title,
-                    source_site=_task_source_site_name(task) or None,
+                    source_site=source_site or None,
                     source_page=self._get_task_source_page(task, fallback_url=source_url),
                 ) or fallback_title
         safe_name = _safe_output_stem(name, fallback=fallback_name)
+        if stable_code and _contains_mojibake_noise(safe_name):
+            safe_name = _safe_output_stem(stable_code, fallback=fallback_name)
         if _looks_like_garbled_text(safe_name) or self._output_title_is_suspicious(safe_name):
             safe_name = _safe_output_stem(
                 self._task_output_title_fallback(task, source_url, fallback_name=fallback_name),
@@ -24413,6 +24587,8 @@ class DownloadManagerApp:
                 if source_site_for_name == "avjoy":
                     name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "downloaded_file" or "").strip()
                     name = _clean_avjoy_title(name, fallback_title=default_short_name_for_url(_task_field_value(task, "source_page") or _task_field_value(task, "url") or url))
+                    if self._output_title_is_suspicious(name):
+                        name = self._task_output_title_fallback(task, url, fallback_name="downloaded_file")
                     safe_name = _safe_output_stem(name, fallback="downloaded_file")
                     output_path = os.path.join(save_dir, f"{safe_name}{inferred_direct_media_ext}")
                 else:
@@ -27804,6 +27980,7 @@ class DownloadManagerApp:
                 "app shutdown finalized",
                 Exception("app shutdown finalized"),
                 remaining_background_threads=remaining_threads,
+                remaining_background_thread_names=", ".join(self._active_background_thread_names()),
             )
         except Exception:
             pass
