@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260601-3390"
+APP_BUILD = "20260601-3400"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -124,6 +124,7 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "18jav",
     "777tv",
     "99itv",
+    "bestjavporn",
     "hayav",
     "hohoj",
     "ikanbot",
@@ -147,6 +148,7 @@ STRICT_HLS_ARTIFACT_SITES = frozenset((
     "99itv",
     "av01",
     "avbebe",
+    "bestjavporn",
     "dramasq",
     "gimy",
     "goodav17",
@@ -390,6 +392,14 @@ def _is_avjoy_video_page_url(url):
     return "avjoy.me" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
 
 
+def _is_bestjavporn_video_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    return "bestjavporn.com" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
+
+
 def _is_avjoy_direct_media_url(url):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -553,6 +563,7 @@ JAV_DUPLICATE_SOURCE_SITES = frozenset((
     "18jav",
     "avbebe",
     "avjoy",
+    "bestjavporn",
     "goodav17",
     "jable",
     "javfilms",
@@ -565,6 +576,7 @@ JAV_DUPLICATE_HOST_MARKERS = {
     "18jav.tv": "18jav",
     "avbebe.com": "avbebe",
     "avjoy.me": "avjoy",
+    "bestjavporn.com": "bestjavporn",
     "goodav17.com": "goodav17",
     "jable.tv": "jable",
     "javfilms.com": "javfilms",
@@ -636,7 +648,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "thanju", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "thanju", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -710,6 +722,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 32,
     "18av": 32,
     "avbebe": 24,
+    "bestjavporn": 24,
     "dramasq": 24,
     "gimy": 24,
     "goodav17": 24,
@@ -943,7 +956,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "youtube": 20,
 }
 HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
-    "media-cdn": 12,
+    "media-cdn": 8,
     "mxcontent.net": 16,
 }
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
@@ -1036,7 +1049,7 @@ GIMY_SOURCE_PAGE_REFRESH_LIMIT = 12
 GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
-IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "tktube", "bilibili", "ikanbot")
+IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "avjoy", "bestjavporn", "tktube", "bilibili", "ikanbot")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
 CLOSE_WARNING_TASK_STATES = frozenset(("DOWNLOADING", "PAUSE_REQUESTED", "DELETE_REQUESTED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
@@ -2112,6 +2125,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "avbebe"
         if "avjoy.me" in host:
             return "avjoy"
+        if "bestjavporn.com" in host:
+            return "bestjavporn"
         if "av01.media" in host or "av01.tv" in host:
             return "av01"
         if "tktube.com" in host:
@@ -5011,6 +5026,107 @@ def _extract_html_title(page_text, fallback_name):
     return raw_title or fallback_name
 
 
+def _clean_bestjavporn_title(raw_title, page_url="", fallback_title="BestJavPorn"):
+    cleaned = html.unescape(str(raw_title or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*[-|]\s*BestJavPorn.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    code = _extract_jav_code(cleaned) or _extract_jav_code(page_url) or _extract_jav_code(fallback_title)
+    if cleaned and not _output_title_is_suspicious_value(cleaned):
+        return cleaned
+    return code or str(fallback_title or "BestJavPorn").strip() or "BestJavPorn"
+
+
+def _browser_api_text_encoder(value, encoding="utf-8"):
+    if isinstance(value, bytes):
+        return value
+    return str(value or "").encode(encoding or "utf-8", "ignore")
+
+
+def _browser_api_text_decoder(value, encoding="utf-8"):
+    if isinstance(value, str):
+        return value
+    return bytes(value or b"").decode(encoding or "utf-8", "ignore")
+
+
+def _browser_api_atob(value):
+    text = str(value or "").strip()
+    if not text:
+        return b""
+    text = text.replace("-", "+").replace("_", "/")
+    text += "=" * (-len(text) % 4)
+    return base64.b64decode(text)
+
+
+def _browser_api_btoa(value):
+    return base64.b64encode(_browser_api_text_encoder(value, "latin-1")).decode("ascii")
+
+
+def _browser_api_reverse_btoa_seed(seed):
+    return _browser_api_btoa(seed)[::-1]
+
+
+def _browser_api_rc4(data, key):
+    key_bytes = _browser_api_text_encoder(key, "latin-1")
+    if not key_bytes:
+        raise ValueError("RC4 key is empty")
+    state = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + state[i] + key_bytes[i % len(key_bytes)]) & 0xFF
+        state[i], state[j] = state[j], state[i]
+    out = bytearray()
+    i = j = 0
+    for byte in bytes(data or b""):
+        i = (i + 1) & 0xFF
+        j = (j + state[i]) & 0xFF
+        state[i], state[j] = state[j], state[i]
+        out.append(byte ^ state[(state[i] + state[j]) & 0xFF])
+    return bytes(out)
+
+
+def _browser_api_crypto_digest_hex(algorithm, value):
+    name = str(algorithm or "sha-256").lower().replace("-", "")
+    data = _browser_api_text_encoder(value)
+    if name in ("sha1",):
+        return hashlib.sha1(data).hexdigest()
+    if name in ("sha384",):
+        return hashlib.sha384(data).hexdigest()
+    if name in ("sha512",):
+        return hashlib.sha512(data).hexdigest()
+    return hashlib.sha256(data).hexdigest()
+
+
+def _bestjavporn_b64decode(value):
+    return _browser_api_atob(value)
+
+
+def _bestjavporn_rc4(data, key):
+    return _browser_api_rc4(data, key)
+
+
+def _bestjavporn_dex(video_id, encrypted):
+    key = _browser_api_reverse_btoa_seed(str(video_id or "") + "_0x58fe15")
+    decrypted = _bestjavporn_rc4(_bestjavporn_b64decode(encrypted), key)
+    return _bestjavporn_b64decode(decrypted.decode("latin-1", "ignore")).decode("utf-8", "ignore")
+
+
+def _bestjavporn_player_config_key(player_url):
+    parsed = urllib.parse.urlsplit(str(player_url or ""))
+    path_query = (parsed.path or "") + (("?" + parsed.query) if parsed.query else "")
+    key_seed = _browser_api_btoa(path_query)[4:20]
+    return _browser_api_reverse_btoa_seed(key_seed + "_0x59a0e4")
+
+
+def _bestjavporn_decode_player_config(data_config, player_url):
+    key = _bestjavporn_player_config_key(player_url)
+    decrypted = _bestjavporn_rc4(_bestjavporn_b64decode(data_config), key)
+    config_json = _bestjavporn_b64decode(decrypted.decode("latin-1", "ignore")).decode("utf-8", "ignore")
+    config = json.loads(config_json)
+    source_blob = config.get("src", "")
+    sources = json.loads(_bestjavporn_b64decode(source_blob).decode("utf-8", "ignore")) if source_blob else []
+    return config, sources if isinstance(sources, list) else []
+
+
 def _build_gimy_iframe_urls(page_url, player_data):
     player_data = player_data or {}
     play_url = str(player_data.get("url") or "").strip()
@@ -5202,6 +5318,122 @@ def _extract_tktube_video_page_urls(page_text, base_url="https://tktube.com/"):
     return urls
 
 
+def _is_eyny_host(host):
+    return bool(re.search(r"(^|\.)eyny\.com$", str(host or "").strip().lower()))
+
+
+def _is_eyny_watch_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlsplit(normalized)
+    if not _is_eyny_host(parsed.netloc):
+        return False
+    path = (parsed.path or "").lower()
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    return ("/cb/watch" in path and bool(query.get("v"))) or (path.endswith("/cb/video.php") and bool(query.get("v")))
+
+
+def _eyny_origin_for_url(url):
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return "https://www23.eyny.com"
+
+
+def _clean_eyny_title(raw_title, fallback_title="EYNY"):
+    cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
+    cleaned = re.sub(r"\s*-\s*(?:搜尋\s*)?伊莉影片區\s*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    cleaned = re.sub(r"\s*\|\s*伊莉影片區\s*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    return cleaned or str(fallback_title or "EYNY").strip() or "EYNY"
+
+
+def _extract_eyny_pow_challenge(page_text):
+    text = str(page_text or "")
+    challenge_match = re.search(r'challenge\s*=\s*"([^"]+)', text)
+    ts_match = re.search(r'ts\s*=\s*"([^"]+)', text)
+    diff_match = re.search(r'diff\s*=\s*(\d+)', text)
+    if not (challenge_match and ts_match and diff_match):
+        return None
+    try:
+        diff = int(diff_match.group(1))
+    except Exception:
+        return None
+    return challenge_match.group(1), ts_match.group(1), diff
+
+
+def _solve_eyny_pow_nonce(challenge, timestamp, difficulty, max_nonce=5000000):
+    prefix = "0" * max(int(difficulty or 0), 0)
+    for nonce in range(int(max_nonce or 0)):
+        digest = hashlib.sha256(f"{challenge}|{timestamp}|{nonce}".encode("utf-8")).hexdigest()
+        if digest.startswith(prefix):
+            return nonce
+    return None
+
+
+def _extract_eyny_media_candidates(page_text):
+    text = str(page_text or "")
+    candidates = []
+    def is_preview_media(url):
+        lowered = str(url or "").lower()
+        return "/relite/mp4/gif/" in lowered or "/gif/" in lowered
+
+    for match in re.finditer(
+        r"(?P<quality>\d{3,4})\s*:\s*\{[^{}]*?url\s*:\s*['\"](?P<url>https?://[^'\"]+)['\"][^{}]*?(?:codec\s*:\s*['\"](?P<codec>[^'\"]+)['\"])?",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        url = _normalize_download_url(html.unescape(match.group("url")).replace("\\/", "/"))
+        if not url or is_preview_media(url):
+            continue
+        try:
+            quality = int(match.group("quality") or 0)
+        except Exception:
+            quality = 0
+        candidates.append({"url": url, "quality": quality, "codec": (match.group("codec") or "").strip().lower()})
+    for index, candidate in enumerate(_extract_candidate_media_urls(text, allowed_exts=(".mp4", ".m3u8", ".mpd"))):
+        normalized = _normalize_download_url(candidate)
+        if not normalized or is_preview_media(normalized) or any(item["url"] == normalized for item in candidates):
+            continue
+        candidates.append({"url": normalized, "quality": _media_candidate_quality_score(normalized, source_site="eyny"), "codec": "", "index": index})
+    indexed_candidates = list(enumerate(candidates))
+    indexed_candidates.sort(key=lambda item: (-int(item[1].get("quality") or 0), item[0]))
+    return [item for _index, item in indexed_candidates]
+
+
+def _extract_eyny_search_results(page_text, base_url="https://www23.eyny.com/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'<a[^>]+href=["\']([^"\']*/cb/watch\?[^"\']+)["\'][^>]*>', text, re.IGNORECASE | re.DOTALL):
+        raw_url = html.unescape(match.group(1)).replace("&amp;", "&")
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen or not _is_eyny_watch_url(url):
+            continue
+        window = text[max(0, match.start() - 1200):match.end() + 2600]
+        title_match = re.search(r'title=["\']([^"\']+)["\']', match.group(0), re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'<a[^>]+href=["\']' + re.escape(match.group(1)) + r'["\'][^>]*>(.*?)</a>', window, re.IGNORECASE | re.DOTALL)
+        title = _clean_eyny_title(re.sub(r"<[^>]+>", " ", str(title_match.group(1) if title_match else "")), fallback_title="EYNY")
+        if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", title):
+            long_title_match = re.search(r'title=["\']([^"\']{8,})["\']', window, re.IGNORECASE | re.DOTALL)
+            if long_title_match:
+                title = _clean_eyny_title(long_title_match.group(1), fallback_title=title)
+        quality = _video_search_quality_score(window)
+        views = ""
+        view_match = re.search(r"(\d+(?:,\d{3})*)\s*(?:次觀看|views?)", window, re.IGNORECASE)
+        if view_match:
+            views = view_match.group(1)
+        seen.add(url)
+        results.append({
+            "url": url,
+            "title": title,
+            "snippet": f"eyny site search {views}".strip(),
+            "quality": quality,
+        })
+    return results
+
+
 def _clean_tktube_title(raw_title, page_url="", fallback_title="TKTube"):
     cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
     cleaned = re.sub(r"\s*[-|]\s*TKTube.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
@@ -5377,6 +5609,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "movieffm",
     "missav",
     "avjoy",
+    "bestjavporn.com",
     "hanime1.me",
     "hanimeone.me",
     "anime1",
@@ -5446,6 +5679,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "gimy.tube",
     "avbebe.com",
     "avjoy.me",
+    "bestjavporn.com",
     "bilibili.com",
     "goodav17.com",
     "njavtv.com",
@@ -5497,6 +5731,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "thanju.com": 18,
     "avbebe.com": 18,
     "hayav.com": 18,
+    "bestjavporn.com": 19,
     "avjoy.me": 20,
     "av01.media": 25,
     "ikanbot.com": 26,
@@ -6439,6 +6674,12 @@ def _known_video_search_seed_results(query_text):
                     "snippet": "jav code pattern seed",
                     "quality": 720,
                 },
+                {
+                    "url": f"https://www.bestjavporn.com/zh/video/{code_slug}c/",
+                    "title": f"{jav_code} BestJavPorn 中文字幕",
+                    "snippet": "bestjavporn jav code pattern seed",
+                    "quality": 1080,
+                },
             ]
         )
     for key, seeds in VIDEO_SEARCH_KNOWN_RESULT_SEEDS.items():
@@ -7036,6 +7277,7 @@ def _video_search_result_is_downloadable(result):
         "avbebe.com",
         "avjoy.me",
         "avhd101.com",
+        "bestjavporn.com",
         "bilibili.com",
         "dailymotion.com",
         "goodav17.com",
@@ -7128,6 +7370,31 @@ def _extract_avjoy_video_results(page_text, base_url="https://avjoy.me/"):
             continue
         seen.add(url)
         results.append({"url": url, "title": _avjoy_title_from_url_slug(url), "snippet": "avjoy site search"})
+    return results
+
+
+def _extract_bestjavporn_video_results(page_text, base_url="https://www.bestjavporn.com/zh/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'<a\b[^>]+href=["\']([^"\']*/(?:zh/)?video/[^"\']+)["\'][^>]*>', text, re.IGNORECASE | re.DOTALL):
+        raw_url = html.unescape(match.group(1))
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        link_html = match.group(0)
+        window = text[match.start():match.start() + 2200]
+        title = ""
+        title_match = re.search(r'\btitle=["\']([^"\']+)["\']', link_html, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'\balt=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r"<span[^>]*>(.*?)</span>", window, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title = re.sub(r"<[^>]+>", " ", title_match.group(1))
+        title = _clean_bestjavporn_title(title, url, _extract_jav_code(url) or "BestJavPorn")
+        results.append({"url": url, "title": title, "snippet": "bestjavporn site search", "quality": 1080})
     return results
 
 
@@ -11229,10 +11496,11 @@ class DownloadManagerApp:
                 pass
             if key != "temp_filename":
                 continue
-            sidecars = [filename + ".resume", filename + ".merged", filename + ".progress.json"]
+            sidecars = [filename + ".resume", filename + ".merged"]
+            sidecars.extend(self._resume_progress_candidate_paths_for_base(filename))
             root, ext = os.path.splitext(filename)
             if ext:
-                sidecars.extend([f"{root}.resume{ext}", f"{root}.merged{ext}", f"{filename}.progress.json.bak"])
+                sidecars.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
             for sidecar in sidecars:
                 try:
                     if os.path.isfile(sidecar):
@@ -11260,6 +11528,9 @@ class DownloadManagerApp:
                 self._set_task_named_column_text(item_id, "size", format_transfer_size(os.path.getsize(filename)))
             except OSError:
                 pass
+        for cleanup_target in (primary_value, secondary_value):
+            if cleanup_target:
+                self._remove_output_progress_sidecars(cleanup_target)
         _set_task_aux_fields(task, state="FINISHED")
         self._set_task_status_mode_ui(item_id, t("status_done") if "status_done" in I18N_DICT.get(CURRENT_LANG, {}) else "完成", complete_progress=True)
         remove_from_state(_normalize_download_url(_task_field_value(task, "url", "")) or "")
@@ -11863,6 +12134,7 @@ class DownloadManagerApp:
             "anime1.pw": "anime1",
             "avbebe.com": "avbebe",
             "avjoy.me": "avjoy",
+            "bestjavporn.com": "bestjavporn",
             "bilibili.com": "bilibili",
             "goodav17.com": "goodav17",
             "njavtv.com": "njavtv",
@@ -12322,6 +12594,31 @@ class DownloadManagerApp:
                 )
             return collected
 
+        def fetch_bestjavporn_results():
+            collected = []
+            for variant in search_variants:
+                search_slug = urllib.parse.quote(str(variant or "").strip())
+                if not search_slug:
+                    continue
+                try:
+                    search_url = f"https://www.bestjavporn.com/zh/search/{search_slug}/"
+                    resp = c_req.get(
+                        search_url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer="https://www.bestjavporn.com/zh/"),
+                    )
+                    append_unique_results(
+                        collected,
+                        _extract_bestjavporn_video_results(
+                            _response_text_utf8(resp),
+                            base_url=str(getattr(resp, "url", search_url)),
+                        ),
+                    )
+                except Exception:
+                    pass
+            return collected
+
         def fetch_hohoj_results():
             collected = []
             for variant in search_variants:
@@ -12753,6 +13050,7 @@ class DownloadManagerApp:
                 ("777tv.ai", ("/vod/detail/id/", "/vod/play/id/")),
                 ("av01.media", ("/tw/video/", "/video/")),
                 ("avhd101.com", ("/search", "/vodplay", "/video")),
+                ("bestjavporn.com", ("/zh/video/", "/video/")),
                 ("ikanbot.com", ("/play/", "/voddetail/", "/vodsearch/")),
                 ("njavtv.com", ("/",)),
                 ("18av.mm-cg.com", ("/zh/",)),
@@ -12828,6 +13126,7 @@ class DownloadManagerApp:
             fast_source_jobs = common_fast_jobs + [
                 ("hayav", fetch_hayav_results),
                 ("missav", fetch_missav_results),
+                ("bestjavporn", fetch_bestjavporn_results),
                 ("njav", fetch_njav_results),
                 ("avjoy", fetch_avjoy_results),
                 ("tktube", fetch_tktube_results),
@@ -12850,8 +13149,9 @@ class DownloadManagerApp:
         elif cjk_query:
             if actress_name_search:
                 fast_source_jobs = common_fast_jobs + [
-                    ("avjoy", fetch_avjoy_results),
-                    ("missav", fetch_missav_results),
+                ("avjoy", fetch_avjoy_results),
+                    ("bestjavporn", fetch_bestjavporn_results),
+                ("missav", fetch_missav_results),
                     ("hayav", fetch_hayav_results),
                     ("njav", fetch_njav_results),
                     ("tktube", fetch_tktube_results),
@@ -12970,6 +13270,8 @@ class DownloadManagerApp:
                 for query in (
                     f'"{primary}" "avjoy.me/video"',
                     f'"{primary}" site:avjoy.me/video',
+                    f'"{primary}" "bestjavporn.com/zh/video"',
+                    f'"{primary}" site:bestjavporn.com/zh/video',
                     f'"{primary}" "avbebe.com/archives"',
                     f'"{primary}" "tktube.com"',
                     f'"{primary}" "njav.com/xvideos"',
@@ -12994,6 +13296,8 @@ class DownloadManagerApp:
                 for query in (
                     f'"{primary}" "avjoy.me/video"',
                     f'"{primary}" site:avjoy.me/video',
+                    f'"{primary}" "bestjavporn.com/zh/video"',
+                    f'"{primary}" site:bestjavporn.com/zh/video',
                     f'"{primary}" "missav"',
                     f'"{primary}" "hayav.com/video"',
                     f'"{primary}" "njav.com/xvideos"',
@@ -15142,14 +15446,59 @@ class DownloadManagerApp:
         except Exception:
             return str(progress_path or "")
 
+    def _legacy_resume_progress_path_for_base(self, base_path):
+        return str(base_path or "") + ".progress.json"
+
+    def _resume_progress_path_for_base(self, base_path):
+        clean_base = str(base_path or "").strip()
+        if not clean_base:
+            return ""
+        legacy_path = self._legacy_resume_progress_path_for_base(clean_base)
+        try:
+            absolute_base = os.path.abspath(clean_base)
+            temp_root = os.path.abspath(tempfile.gettempdir())
+            base_in_temp = os.path.commonpath([absolute_base, temp_root]) == temp_root
+        except Exception:
+            absolute_base = clean_base
+            base_in_temp = False
+        # Internal temp artifacts are already outside the user's download folder.
+        if base_in_temp and os.path.basename(absolute_base).lower().startswith("downloader_resume_"):
+            return legacy_path
+        try:
+            ext = os.path.splitext(absolute_base)[1].lstrip(".").lower() or "media"
+            digest = hashlib.sha1(os.path.normcase(absolute_base).encode("utf-8", errors="ignore")).hexdigest()
+            state_dir = os.path.join(_APP_DIR, "resume_state")
+            return os.path.join(state_dir, f"{digest}.{ext}.progress.json")
+        except Exception:
+            return legacy_path
+
+    def _resume_progress_candidate_paths_for_base(self, base_path):
+        candidates = []
+        for candidate in (
+            self._resume_progress_path_for_base(base_path),
+            self._legacy_resume_progress_path_for_base(base_path),
+        ):
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
+
+    def _existing_resume_progress_path_for_base(self, base_path):
+        for candidate in self._resume_progress_candidate_paths_for_base(base_path):
+            try:
+                if os.path.exists(candidate):
+                    return candidate
+            except OSError:
+                continue
+        return self._resume_progress_path_for_base(base_path)
+
     def _has_resume_artifact_family(self, base_path):
         if not base_path:
             return False
         root, ext = os.path.splitext(base_path)
         candidate_paths = [
             base_path,
-            base_path + ".progress.json",
         ]
+        candidate_paths.extend(self._resume_progress_candidate_paths_for_base(base_path))
         if ext:
             candidate_paths.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
         return (
@@ -15201,7 +15550,7 @@ class DownloadManagerApp:
             media_candidates.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
         if not any(self._has_nonempty_file(candidate_path) for candidate_path in media_candidates) and not self._has_parallel_hls_segment_artifacts(base_path):
             return False
-        progress_path = str(base_path or "") + ".progress.json"
+        progress_path = self._existing_resume_progress_path_for_base(base_path)
         if not os.path.exists(progress_path):
             return not os.path.basename(str(base_path or "")).lower().startswith("downloader_resume_")
         progress_info = self._load_resume_progress_info(progress_path)
@@ -15221,7 +15570,7 @@ class DownloadManagerApp:
             media_candidates.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
         if not any(self._has_nonempty_file(candidate_path) for candidate_path in media_candidates) and not self._has_parallel_hls_segment_artifacts(base_path):
             return False
-        progress_path = str(base_path or "") + ".progress.json"
+        progress_path = self._existing_resume_progress_path_for_base(base_path)
         if not os.path.exists(progress_path):
             return False
         progress_info = self._load_resume_progress_info(progress_path)
@@ -15262,7 +15611,7 @@ class DownloadManagerApp:
         )
         explicit_temp_path = str(_task_field_value(task, "temp_filename", "") or "").strip()
         if explicit_temp_path and self._explicit_resume_artifact_is_usable(explicit_temp_path, resume_keys):
-            explicit_progress = self._load_resume_progress_info(str(explicit_temp_path) + ".progress.json")
+            explicit_progress = self._load_resume_progress_info(self._existing_resume_progress_path_for_base(explicit_temp_path))
             explicit_source = str(explicit_progress.get("source_url", "") or "").strip()
             if explicit_source and explicit_source not in resume_keys:
                 resume_keys.append(explicit_source)
@@ -15916,10 +16265,8 @@ class DownloadManagerApp:
                 return False
 
         root, ext = os.path.splitext(clean_base)
-        artifact_paths = [
-            clean_base + ".progress.json",
-            self._parallel_hls_segment_dir_for_base(clean_base),
-        ]
+        artifact_paths = self._resume_progress_candidate_paths_for_base(clean_base)
+        artifact_paths.append(self._parallel_hls_segment_dir_for_base(clean_base))
         if remove_base_file and not should_preserve(clean_base):
             artifact_paths.append(clean_base)
         if ext:
@@ -15933,7 +16280,7 @@ class DownloadManagerApp:
         clean_output_path = str(output_path or "").strip()
         if not clean_output_path:
             return
-        self._remove_artifact_paths(f"{clean_output_path}.progress.json")
+        self._remove_artifact_paths(*self._resume_progress_candidate_paths_for_base(clean_output_path))
 
     def _near_complete_resume_threshold_seconds(self, total_duration):
         try:
@@ -16505,6 +16852,7 @@ class DownloadManagerApp:
                 for browser in ("chrome110", "chrome120"):
                     try:
                         candidate_session = c_req.Session(impersonate=browser)
+                        self._track_network_session(candidate_session)
                         candidate_sessions.append(candidate_session)
                         transient_sessions.append(candidate_session)
                     except Exception:
@@ -16544,10 +16892,7 @@ class DownloadManagerApp:
                 pass
             finally:
                 for transient_session in transient_sessions:
-                    try:
-                        transient_session.close()
-                    except Exception:
-                        pass
+                    self._close_network_session(transient_session)
         try:
             req = urllib.request.Request(url, headers=_make_range_http_headers(headers))
             with urllib.request.urlopen(req, timeout=20) as resp:
@@ -16583,6 +16928,7 @@ class DownloadManagerApp:
                     for browser in ("chrome110", "chrome120"):
                         try:
                             candidate_session = c_req.Session(impersonate=browser)
+                            self._track_network_session(candidate_session)
                             candidate_sessions.append(candidate_session)
                             transient_sessions.append(candidate_session)
                         except Exception:
@@ -16617,10 +16963,7 @@ class DownloadManagerApp:
                     pass
                 finally:
                     for transient_session in transient_sessions:
-                        try:
-                            transient_session.close()
-                        except Exception:
-                            pass
+                        self._close_network_session(transient_session)
             return {"total_size": total_size, "range_supported": range_supported, "content_type": content_type}
 
     def _http_multipart_part_path(self, out_path, index, start_byte=None, end_byte=None):
@@ -16749,6 +17092,7 @@ class DownloadManagerApp:
             for browser in ("chrome120", "chrome110"):
                 try:
                     candidate_session = c_req.Session(impersonate=browser)
+                    self._track_network_session(candidate_session)
                     candidate_sessions.append(candidate_session)
                     owned_sessions.append(candidate_session)
                 except Exception:
@@ -16813,10 +17157,7 @@ class DownloadManagerApp:
                 except Exception:
                     pass
                 for candidate_session in owned_sessions:
-                    try:
-                        candidate_session.close()
-                    except Exception:
-                        pass
+                    self._close_network_session(candidate_session)
             return
         req = urllib.request.Request(url, headers=req_headers)
         with urllib.request.urlopen(req, timeout=HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS) as resp:
@@ -17638,6 +17979,7 @@ class DownloadManagerApp:
         stream_iter = None
         stream_response = None
         owned_sessions = []
+        skip_session_close_on_stop = False
         try:
             if immediate_multipart:
                 raise RuntimeError("prefer immediate multipart")
@@ -17657,6 +17999,7 @@ class DownloadManagerApp:
                 for browser in ("chrome110", "chrome120"):
                     try:
                         candidate_session = c_req.Session(impersonate=browser)
+                        self._track_network_session(candidate_session)
                         candidate_sessions.append(candidate_session)
                         owned_sessions.append(candidate_session)
                     except Exception:
@@ -17802,6 +18145,7 @@ class DownloadManagerApp:
                 remaining_start = downloaded
                 remaining_end = total_size - 1
                 remaining_size = max(total_size - downloaded, 0)
+                multipart_resume_part_bytes = self._http_multipart_existing_part_bytes(out_path)
                 source_site = _task_source_site_name(task)
                 download_host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
                 part_count, http_host_active_downloads, http_host_worker_budget, http_host_marker = self._http_multipart_part_count_for_transfer(
@@ -17825,6 +18169,7 @@ class DownloadManagerApp:
                     host_active_downloads=http_host_active_downloads,
                     host_worker_budget=http_host_worker_budget,
                     remaining_size=remaining_size,
+                    multipart_resume_part_bytes=multipart_resume_part_bytes,
                     part_size=part_size,
                     resume_bytes=resume_bytes,
                     total_size=total_size,
@@ -17850,7 +18195,8 @@ class DownloadManagerApp:
                             stop_event.set()
                             for future in futures:
                                 future.cancel()
-                            return
+                            skip_session_close_on_stop = True
+                            raise StopDownloadException("application is shutting down")
                         current_task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                         if current_task_state in {"PAUSE_REQUESTED", "DELETE_REQUESTED"}:
                             stop_event.set()
@@ -17859,7 +18205,9 @@ class DownloadManagerApp:
                             if current_task_state == "PAUSE_REQUESTED":
                                 _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
                                 self._set_task_named_column_text(item_id, "status", self._paused_status_text())
-                                return
+                                skip_session_close_on_stop = True
+                                raise StopDownloadException("pause requested")
+                            skip_session_close_on_stop = True
                             raise KeyboardInterrupt()
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         required_bytes = max(total_size - multi_downloaded, 0) if total_size > 0 else None
@@ -17867,7 +18215,8 @@ class DownloadManagerApp:
                             stop_event.set()
                             for future in futures:
                                 future.cancel()
-                            return
+                            skip_session_close_on_stop = True
+                            raise StopDownloadException("disk space low")
                         done, futures = concurrent.futures.wait(futures, timeout=0.5, return_when=concurrent.futures.FIRST_COMPLETED)
                         for done_future in done:
                             part_error = done_future.exception()
@@ -17875,6 +18224,18 @@ class DownloadManagerApp:
                                 stop_event.set()
                                 for future in futures:
                                     future.cancel()
+                                stop_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
+                                if self._shutdown_started:
+                                    skip_session_close_on_stop = True
+                                    raise StopDownloadException("application is shutting down")
+                                if stop_state == "PAUSE_REQUESTED":
+                                    _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
+                                    self._set_task_named_column_text(item_id, "status", self._paused_status_text())
+                                    skip_session_close_on_stop = True
+                                    raise StopDownloadException("pause requested")
+                                if stop_state in {"DELETE_REQUESTED", "DELETED"}:
+                                    skip_session_close_on_stop = True
+                                    raise KeyboardInterrupt()
                                 raise part_error
                         now = time.time()
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
@@ -17938,10 +18299,16 @@ class DownloadManagerApp:
         except Exception:
             raise
         finally:
-            for owned_session in owned_sessions:
-                self._close_network_session(owned_session)
-            if session is not None:
-                self._close_network_session(session)
+            if skip_session_close_on_stop:
+                for owned_session in owned_sessions:
+                    self._untrack_network_session(owned_session)
+                if session is not None:
+                    self._untrack_network_session(session)
+            else:
+                for owned_session in owned_sessions:
+                    self._close_network_session(owned_session)
+                if session is not None:
+                    self._close_network_session(session)
         task = self._ensure_task_can_continue(item_id)
         final_size = self._get_existing_file_size(out_path)
         task_state_after_download = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
@@ -18081,6 +18448,69 @@ class DownloadManagerApp:
             raise last_exc
         return fallback_name, []
 
+    def _fetch_bestjavporn_media_candidates(self, page_url, fallback_name="BestJavPorn"):
+        parsed = urllib.parse.urlsplit(str(page_url or ""))
+        origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'www.bestjavporn.com'}"
+        c_req = get_curl_cffi_requests()
+        last_exc = None
+        for browser in ("chrome120", "chrome110", "edge101"):
+            session = None
+            try:
+                session = self._track_network_session(c_req.Session(impersonate=browser))
+                page_headers = _make_browser_page_headers(referer=origin + "/zh/", origin=origin)
+                resp = session.get(page_url, timeout=25, headers=page_headers)
+                page_text = _response_text_utf8(resp)
+                final_page_url = str(getattr(resp, "url", page_url) or page_url)
+                video_id_match = re.search(r'\bvideo-id=["\']([^"\']+)["\']', page_text, re.IGNORECASE)
+                video_ver_match = re.search(r'\bvideo_ver=["\']([^"\']+)["\']', page_text, re.IGNORECASE)
+                data_mpu_match = re.search(r'id=["\']video-player["\'][^>]+data-mpu=["\']([^"\']+)', page_text, re.IGNORECASE | re.DOTALL)
+                if not video_id_match or not data_mpu_match:
+                    raise Exception("BestJavPorn player data missing")
+                video_id = html.unescape(video_id_match.group(1)).strip()
+                video_ver = html.unescape(video_ver_match.group(1)).strip() if video_ver_match else "2"
+                sources = _bestjavporn_dex(video_id, html.unescape(data_mpu_match.group(1)))
+                api_headers = _make_ajax_http_headers(referer=final_page_url, origin=origin)
+                api_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+                api_resp = session.post(
+                    origin.rstrip("/") + "/api/play/",
+                    data={"sources": sources, "ver": video_ver or "2"},
+                    timeout=25,
+                    headers=api_headers,
+                )
+                payload = api_resp.json() or {}
+                if not payload.get("status") or not payload.get("data"):
+                    raise Exception("BestJavPorn API returned no playable source")
+                player_path = _bestjavporn_dex(video_id, payload.get("data", ""))
+                player_url = urllib.parse.urljoin(origin + "/", player_path)
+                player_headers = _make_browser_page_headers(referer=final_page_url, origin=origin)
+                player_resp = session.get(player_url, timeout=25, headers=player_headers)
+                player_text = _response_text_utf8(player_resp)
+                config_match = re.search(r'\bdata-config=["\']([^"\']+)["\']', player_text, re.IGNORECASE | re.DOTALL)
+                if not config_match:
+                    raise Exception("BestJavPorn player config missing")
+                _config, source_entries = _bestjavporn_decode_player_config(html.unescape(config_match.group(1)), player_url)
+                candidates = []
+                for entry in source_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    candidate = _normalize_download_url(entry.get("file") or entry.get("src") or entry.get("url"))
+                    if candidate:
+                        candidates.append(candidate)
+                candidates.extend(_extract_candidate_media_urls(player_text, allowed_exts=(".m3u8", ".mp4", ".mpd")))
+                candidates = _dedupe_download_urls(candidates)
+                title = _clean_bestjavporn_title(_extract_html_title(page_text, fallback_name), final_page_url, fallback_name)
+                if candidates:
+                    return title, candidates, player_url
+                raise Exception("BestJavPorn media URL missing")
+            except Exception as exc:
+                last_exc = exc
+            finally:
+                if session is not None:
+                    self._close_network_session(session)
+        if last_exc is not None:
+            raise last_exc
+        return fallback_name, [], ""
+
     def _select_avjoy_media_candidate(self, candidates, failed_urls=None):
         failed_set = set(_dedupe_download_urls(failed_urls or []))
         ordered = [candidate for candidate in _dedupe_download_urls(candidates) if candidate not in failed_set]
@@ -18090,6 +18520,48 @@ class DownloadManagerApp:
         media_url, fallback_urls = _pick_primary_with_fallbacks(direct_candidates, source_site="avjoy")
         if not media_url:
             media_url, fallback_urls = _pick_primary_with_fallbacks(manifest_candidates, source_site="avjoy")
+        if not media_url:
+            return "", []
+        remaining = [candidate for candidate in ordered if candidate != media_url and candidate not in fallback_urls]
+        return media_url, _dedupe_download_urls(fallback_urls + remaining)
+
+    def _fetch_eyny_page_text(self, session, page_url, referer=None, timeout=20):
+        origin = _eyny_origin_for_url(page_url)
+        headers = _make_browser_page_headers(referer=referer or origin + "/", origin=origin)
+        resp = session.get(page_url, timeout=timeout, headers=headers)
+        page_text = _response_text_utf8(resp)
+        challenge = _extract_eyny_pow_challenge(page_text)
+        if not challenge:
+            return page_text, str(getattr(resp, "url", page_url))
+        challenge_value, timestamp, difficulty = challenge
+        nonce = _solve_eyny_pow_nonce(challenge_value, timestamp, difficulty)
+        if nonce is None:
+            return page_text, str(getattr(resp, "url", page_url))
+        cookie_values = {
+            "181882d_n": str(nonce),
+            "181882d_ts": str(timestamp),
+            "181882d_ch": str(challenge_value),
+        }
+        for name, value in cookie_values.items():
+            try:
+                session.cookies.set(name, value, domain=".eyny.com", path="/")
+            except Exception:
+                pass
+        retry_headers = dict(headers)
+        retry_headers["Cookie"] = "; ".join(f"{name}={value}" for name, value in cookie_values.items())
+        resp = session.get(page_url, timeout=timeout, headers=retry_headers)
+        return _response_text_utf8(resp), str(getattr(resp, "url", page_url))
+
+    def _select_eyny_media_candidate(self, candidates, failed_urls=None):
+        failed_set = set(_dedupe_download_urls(failed_urls or []))
+        ordered = []
+        for item in candidates or []:
+            url = _normalize_download_url(item.get("url", "") if isinstance(item, dict) else item)
+            if url and url not in failed_set and url not in ordered:
+                ordered.append(url)
+        if not ordered:
+            return "", []
+        media_url, fallback_urls = _pick_primary_with_fallbacks(ordered, source_site="eyny")
         if not media_url:
             return "", []
         remaining = [candidate for candidate in ordered if candidate != media_url and candidate not in fallback_urls]
@@ -18165,6 +18637,13 @@ class DownloadManagerApp:
                 raise
             except Exception as exc:
                 last_error = exc
+                stop_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
+                if self._shutdown_started:
+                    raise StopDownloadException("application is shutting down")
+                if stop_state == "PAUSE_REQUESTED":
+                    raise StopDownloadException("pause requested")
+                if stop_state in {"DELETE_REQUESTED", "DELETED"}:
+                    raise KeyboardInterrupt()
                 if index >= len(direct_candidates) - 1 or not self._is_retryable_media_download_error(exc):
                     raise
                 write_error_log(
@@ -19706,7 +20185,7 @@ class DownloadManagerApp:
         temp_root, temp_ext = os.path.splitext(temp_out_path)
         resume_out_path = f"{temp_root}.resume{temp_ext}"
         merged_out_path = f"{temp_root}.merged{temp_ext}"
-        progress_path = temp_out_path + ".progress.json"
+        progress_path = self._resume_progress_path_for_base(temp_out_path)
         self._set_task_resume_temp_file(task, item_id, temp_out_path)
         self._cache_task_resolved_link(
             task,
@@ -19914,7 +20393,7 @@ class DownloadManagerApp:
         temp_root, temp_ext = os.path.splitext(temp_out_path)
         resume_out_path = f"{temp_root}.resume{temp_ext}"
         merged_out_path = f"{temp_root}.merged{temp_ext}"
-        progress_path = temp_out_path + ".progress.json"
+        progress_path = self._resume_progress_path_for_base(temp_out_path)
         self._set_task_resume_temp_file(task, item_id, temp_out_path)
 
         ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
@@ -20293,7 +20772,7 @@ class DownloadManagerApp:
         parallel_unsupported_segment_url = ""
         parallel_unsupported_segment_error = None
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("18av", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("18av", "bestjavporn", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -20309,7 +20788,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("18av", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("18av", "bestjavporn", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -21584,8 +22063,9 @@ class DownloadManagerApp:
                 temp_path = ""
         if not temp_path:
             return
-        progress_path = temp_path + ".progress.json"
-        persisted = self._load_resume_progress_info(progress_path)
+        existing_progress_path = self._existing_resume_progress_path_for_base(temp_path)
+        progress_path = self._resume_progress_path_for_base(temp_path)
+        persisted = self._load_resume_progress_info(existing_progress_path)
         resume_keys = []
         for candidate in (
             _normalize_download_url(_task_field_value(task, "url", "")) or "",
@@ -21608,6 +22088,8 @@ class DownloadManagerApp:
             best_bytes = multipart_bytes
         if best_seconds > 0.0 or best_bytes > 0:
             self._save_resume_progress(progress_path, best_seconds, source_url=source_url, bytes_done=best_bytes)
+            if existing_progress_path and existing_progress_path != progress_path:
+                self._remove_artifact_paths(existing_progress_path)
 
     def _prepare_shutdown_resume_state(self):
         self._request_shutdown_stop_for_active_tasks()
@@ -27210,6 +27692,48 @@ class DownloadManagerApp:
                 has_nuxt_data="__NUXT_DATA__" in (resp.text or ""),
             )
             raise Exception("PikPak protected share requires browser verification")
+
+        if _is_eyny_watch_url(url):
+            message = "EYNY does not expose a complete downloadable video without login; only preview clips were found"
+            _set_task_identity(name=short_name or "EYNY", source_site="unsupported", source_page=url, fallback_urls=[])
+            self._set_task_parse_ui(item_id, error=message)
+            write_error_log(
+                "eyny support disabled",
+                Exception(message),
+                item_id=item_id,
+                url=url,
+                source_site="eyny",
+                reason="full media source unavailable; preview mp4 candidates are not valid downloads",
+            )
+            raise DownloadSourceUnavailableException(message)
+            self._set_task_parse_ui(item_id, fallback="正在解析 EYNY 影片...")
+
+        if _is_bestjavporn_video_page_url(url):
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 BestJavPorn 影片...")
+            page_title, candidates, player_url = self._fetch_bestjavporn_media_candidates(url, fallback_name=short_name or "BestJavPorn")
+            media_url, fallback_urls = _pick_primary_with_fallbacks(candidates, source_site="bestjavporn")
+            if not media_url:
+                raise Exception("BestJavPorn media URL missing")
+            _set_task_identity(name=page_title, source_site="bestjavporn", source_page=url, fallback_urls=fallback_urls)
+            media_referer = player_url or url
+            media_origin_parts = urllib.parse.urlsplit(media_referer)
+            media_origin = f"{media_origin_parts.scheme}://{media_origin_parts.netloc}" if media_origin_parts.scheme and media_origin_parts.netloc else f"{parsed_url.scheme}://{parsed_url.netloc}"
+            self._download_routed_media_url(
+                task,
+                item_id,
+                media_url,
+                save_dir,
+                page_title,
+                is_mp3=is_mp3,
+                source_site="bestjavporn",
+                fallback_urls=fallback_urls,
+                referer=media_referer,
+                origin=media_origin,
+                manifest_downloader=_download_manifest_with_site_strategy,
+                headers=_make_hls_http_headers(referer=media_referer, origin=media_origin),
+                default_ext=".mp4",
+            )
+            return
 
         if "avjoy.me" in parsed_url.netloc and "/video/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
