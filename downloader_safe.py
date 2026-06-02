@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260601-3410"
+APP_BUILD = "20260602-3420"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -134,6 +134,7 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "movieffm",
     "njavtv",
     "nnyy",
+    "supjav",
     "tinyavideo",
     "xiaoyakankan",
 ))
@@ -162,6 +163,7 @@ STRICT_HLS_ARTIFACT_SITES = frozenset((
     "njavtv",
     "nnyy",
     "olevod",
+    "supjav",
     "thanju",
     "tktube",
     "tinyavideo",
@@ -408,6 +410,48 @@ def _is_tinyavideo_video_page_url(url):
         return False
     parsed = urllib.parse.urlparse(normalized)
     return "tinyavideo.com" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
+
+
+def _is_supjav_video_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    return "supjav.com" in parsed.netloc.lower() and re.search(r"/(?:zh/|en/|ja/)?\d+\.html$", parsed.path or "", re.IGNORECASE) is not None
+
+
+def _tinyavideo_video_page_variants(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return []
+    try:
+        parsed = urllib.parse.urlsplit(normalized)
+    except Exception:
+        return [normalized]
+    variants = []
+
+    def _add(candidate):
+        candidate = str(candidate or "").strip()
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+
+    _add(urllib.parse.urlunsplit(parsed))
+    path = parsed.path or ""
+    if "/video/" not in path.lower():
+        return variants
+    prefix, slug = path.rsplit("/", 1)
+    slug = urllib.parse.unquote(slug or "").strip("/")
+    if not slug:
+        return variants
+    if not slug.lower().endswith("-uncensored"):
+        alt_path = prefix.rstrip("/") + "/" + urllib.parse.quote(slug + "-uncensored", safe="-_.~")
+        _add(urllib.parse.urlunsplit((parsed.scheme or "https", parsed.netloc, alt_path, "", "")))
+    compact = re.sub(r"[^A-Za-z0-9]+", "-", slug).strip("-").lower()
+    if compact and compact != slug.lower():
+        _add(urllib.parse.urlunsplit((parsed.scheme or "https", parsed.netloc, prefix.rstrip("/") + "/" + compact, "", "")))
+        if not compact.endswith("-uncensored"):
+            _add(urllib.parse.urlunsplit((parsed.scheme or "https", parsed.netloc, prefix.rstrip("/") + "/" + compact + "-uncensored", "", "")))
+    return variants
 
 
 def _is_avjoy_direct_media_url(url):
@@ -658,7 +702,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "thanju", "tinyavideo", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "supjav", "thanju", "tinyavideo", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -703,7 +747,10 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "phimgood.com",
     "ckzy3.com",
     "bfllvip.com",
+    "cdn2020.com",
+    "huabf.com",
     "streamhls.click",
+    "ts2ff6yms.com",
 )
 PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com",)
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
@@ -746,8 +793,9 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "njavtv": 24,
     "nnyy": 24,
     "olevod": 24,
+    "supjav": 32,
     "thanju": 24,
-    "tinyavideo": 24,
+    "tinyavideo": 48,
     "xiaoyakankan": 48,
 }
 PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
@@ -784,18 +832,27 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "phimgood.com": 24,
     "ckzy3.com": 24,
     "bfllvip.com": 24,
+    "cdn2020.com": 48,
+    "huabf.com": 48,
     "googleusercontent.com": 1,
+    "tiktokcdn.com": 24,
+    "ts2ff6yms.com": 48,
     "upload18.org": 24,
 }
 PARALLEL_HLS_HOST_WORKER_BUDGET = 72
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "cdn-centaurus.com": 96,
+    "financialbenchmark.cfd": 96,
     "premilkyway.com": 96,
     "ggjav.com": 120,
     "media-cdn": 48,
     "mxcontent.net": 96,
+    "cdn2020.com": 144,
+    "huabf.com": 144,
     "surrit.com": 90,
     "streamfastpro": 96,
+    "tiktokcdn.com": 72,
+    "ts2ff6yms.com": 144,
     "upload18.org": 72,
     "baisiweiting.com": 96,
     "cdnlz": 72,
@@ -1064,7 +1121,7 @@ GIMY_SOURCE_PAGE_REFRESH_LIMIT = 12
 GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
-IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "avjoy", "bestjavporn", "tktube", "bilibili", "ikanbot")
+IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "avjoy", "bestjavporn", "supjav", "tktube", "bilibili", "ikanbot")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
 CLOSE_WARNING_TASK_STATES = frozenset(("DOWNLOADING", "PAUSE_REQUESTED", "DELETE_REQUESTED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
@@ -2142,6 +2199,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "avjoy"
         if "bestjavporn.com" in host:
             return "bestjavporn"
+        if "supjav.com" in host:
+            return "supjav"
         if "tinyavideo.com" in host:
             return "tinyavideo"
         if "av01.media" in host or "av01.tv" in host:
@@ -5063,6 +5122,151 @@ def _clean_tinyavideo_title(raw_title, page_url="", fallback_title="TinyAVideo")
     return code or str(fallback_title or "TinyAVideo").strip() or "TinyAVideo"
 
 
+def _clean_supjav_title(raw_title, page_url="", fallback_title="SupJav"):
+    cleaned = html.unescape(str(raw_title or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*[-|]\s*SupJav.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    code = _extract_jav_code(cleaned) or _extract_jav_code(page_url) or _extract_jav_code(fallback_title)
+    if cleaned and not _output_title_is_suspicious_value(cleaned):
+        return cleaned
+    return code or str(fallback_title or "SupJav").strip() or "SupJav"
+
+
+def _extract_supjav_external_file_links(page_text, base_url="https://supjav.com/zh/"):
+    links = []
+    text = str(page_text or "")
+    for match in re.findall(r"https?://[^\"'<> ]+?dl=[^\"'<> ]+", text):
+        normalized = _normalize_download_url(html.unescape(match).rstrip(");,"))
+        if normalized and "supjav.com" in urllib.parse.urlsplit(normalized).netloc.lower() and normalized not in links:
+            links.append(normalized)
+    for match in re.findall(r'href=["\']([^"\']*[\?&]dl=[^"\']+)["\']', text, re.IGNORECASE):
+        normalized = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(match).rstrip(");,")))
+        if normalized and "supjav.com" in urllib.parse.urlsplit(normalized).netloc.lower() and normalized not in links:
+            links.append(normalized)
+    return links
+
+
+def _extract_supjav_playback_servers(page_text, page_url="https://supjav.com/zh/"):
+    text = str(page_text or "")
+    bg_match = re.search(r"<div[^>]+id=[\"']dz_video[\"'][^>]*\bbg=[\"']([^\"']*)", text, re.IGNORECASE)
+    bg = html.unescape(bg_match.group(1)).strip() if bg_match else ""
+    servers = []
+    seen = set()
+    for match in re.finditer(r'<a\b[^>]*\bclass=["\'][^"\']*\bbtn-server\b[^"\']*["\'][^>]*\bdata-link=["\']([^"\']+)["\'][^>]*>(.*?)</a>', text, re.IGNORECASE | re.DOTALL):
+        token = html.unescape(match.group(1)).strip()
+        label = re.sub(r"<[^>]+>", " ", match.group(2))
+        label = re.sub(r"\s+", " ", html.unescape(label)).strip() or "SUPJAV"
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        player_url = "https://lk1.supremejav.com/supjav.php?" + urllib.parse.urlencode({"l": token, "bg": bg})
+        child_url = "https://lk1.supremejav.com/supjav.php?" + urllib.parse.urlencode({"c": token[::-1]})
+        servers.append({"label": label, "token": token, "player_url": player_url, "child_url": child_url})
+    return servers
+
+
+def _supjav_stream_priority(candidate_url, server_label=""):
+    value = str(candidate_url or "").lower()
+    label = str(server_label or "").lower()
+    score = 1000
+    if ".m3u8" in value:
+        score -= 500
+    if label == "fst":
+        score -= 260
+    if "premilkyway.com" in value:
+        score -= 260
+    if "financialbenchmark.cfd" in value:
+        score -= 180
+    if "fc2stream.tv/stream/" in value:
+        score -= 80
+    if "turboviplay.com" in value or "turbovidhls.com" in value:
+        score += 160
+    if label == "tv":
+        score += 120
+    if "streamtape.com/e/" in value or "voe.sx/e/" in value or "/e/" in value:
+        score += 300
+    return score
+
+
+def _url_origin(url):
+    try:
+        parsed = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or ""))
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_supjav_playback_media(page_text, page_url, c_req=None):
+    c_req = c_req or get_curl_cffi_requests()
+    page_url = _normalize_download_url(page_url) or "https://supjav.com/zh/"
+    servers = _extract_supjav_playback_servers(page_text, page_url=page_url)
+    candidates = []
+    probes = []
+    for server in servers:
+        label = server.get("label") or "SUPJAV"
+        player_url = server.get("player_url") or ""
+        child_url = server.get("child_url") or ""
+        try:
+            player_resp = c_req.get(
+                player_url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=_make_browser_page_headers(referer=page_url, origin="https://lk1.supremejav.com"),
+            )
+            player_final = str(getattr(player_resp, "url", player_url) or player_url)
+            player_text = _response_text_utf8(player_resp)
+            child_match = re.search(r'src=["\'](\?c=[^"\']+)["\']', player_text, re.IGNORECASE)
+            if child_match:
+                child_url = urllib.parse.urljoin(player_final, html.unescape(child_match.group(1)))
+            child_resp = c_req.get(
+                child_url,
+                impersonate="chrome120",
+                timeout=25,
+                headers=_make_browser_page_headers(referer=player_final, origin="https://lk1.supremejav.com"),
+            )
+            child_final = str(getattr(child_resp, "url", child_url) or child_url)
+            child_text = _response_text_utf8(child_resp)
+            media_candidates = [
+                candidate
+                for candidate in _extract_candidate_media_urls(child_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+                if candidate and not re.search(r"/e/[^/?#]+.*\.mp4", candidate, re.IGNORECASE)
+            ]
+            if "fc2stream.tv" in urllib.parse.urlsplit(child_final).netloc.lower():
+                decoded_sources = [child_text]
+                decoded_sources.extend(_unpack_javascript_packer_blocks(child_text))
+                for decoded_source in decoded_sources:
+                    for _key, raw_value in re.findall(r'"(hls\d+)"\s*:\s*"([^"]+)"', str(decoded_source or "")):
+                        stream_url = html.unescape(raw_value).replace("\\/", "/")
+                        normalized_stream_url = _normalize_download_url(urllib.parse.urljoin(child_final, stream_url))
+                        if normalized_stream_url:
+                            media_candidates.append(normalized_stream_url)
+            media_candidates = _dedupe_download_urls(media_candidates)
+            probes.append({"server": label, "player_url": player_final, "child_url": child_final, "candidate_count": len(media_candidates)})
+            for candidate in media_candidates:
+                candidates.append(
+                    {
+                        "url": candidate,
+                        "server": label,
+                        "referer": child_final,
+                        "origin": _url_origin(child_final) or _url_origin(candidate),
+                    }
+                )
+        except Exception as exc:
+            probes.append({"server": label, "error": _summarize_log_exception(exc), "player_url": player_url, "child_url": child_url})
+    candidates = sorted(candidates, key=lambda item: _supjav_stream_priority(item.get("url"), item.get("server")))
+    deduped = []
+    seen = set()
+    for item in candidates:
+        normalized = _normalize_download_url(item.get("url"))
+        if normalized and normalized not in seen:
+            item["url"] = normalized
+            deduped.append(item)
+            seen.add(normalized)
+    return deduped, probes
+
+
 def _browser_api_text_encoder(value, encoding="utf-8"):
     if isinstance(value, bytes):
         return value
@@ -5637,6 +5841,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "missav",
     "avjoy",
     "bestjavporn.com",
+    "supjav.com",
     "hanime1.me",
     "hanimeone.me",
     "anime1",
@@ -5708,6 +5913,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "avbebe.com",
     "avjoy.me",
     "bestjavporn.com",
+    "supjav.com",
     "tinyavideo.com",
     "bilibili.com",
     "goodav17.com",
@@ -5763,6 +5969,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "bestjavporn.com": 19,
     "tinyavideo.com": 19,
     "avjoy.me": 20,
+    "supjav.com": 22,
     "av01.media": 25,
     "ikanbot.com": 26,
     "goodav17.com": 30,
@@ -7314,6 +7521,7 @@ def _video_search_result_is_downloadable(result):
         "avjoy.me",
         "avhd101.com",
         "bestjavporn.com",
+        "supjav.com",
         "tinyavideo.com",
         "bilibili.com",
         "dailymotion.com",
@@ -7454,6 +7662,28 @@ def _extract_tinyavideo_video_results(page_text, base_url="https://tinyavideo.co
         title = re.sub(r"<[^>]+>", " ", title_match.group(1)) if title_match else ""
         title = _clean_tinyavideo_title(title, url, _extract_jav_code(url) or "TinyAVideo")
         results.append({"url": url, "title": title, "snippet": "tinyavideo site search", "quality": 720})
+    return results
+
+
+def _extract_supjav_video_results(page_text, base_url="https://supjav.com/zh/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'<a\b[^>]+href=["\']([^"\']*/(?:zh/|en/|ja/)?\d+\.html)["\'][^>]*>', text, re.IGNORECASE | re.DOTALL):
+        raw_url = html.unescape(match.group(1))
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen or not _is_supjav_video_page_url(url):
+            continue
+        seen.add(url)
+        window = text[max(0, match.start() - 1000):match.end() + 2200]
+        title_match = re.search(r'\btitle=["\']([^"\']+)["\']', match.group(0), re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'\balt=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", window, re.IGNORECASE | re.DOTALL)
+        title = re.sub(r"<[^>]+>", " ", title_match.group(1)) if title_match else ""
+        title = _clean_supjav_title(title, url, _extract_jav_code(url) or "SupJav")
+        results.append({"url": url, "title": title, "snippet": "supjav site search", "quality": 1080})
     return results
 
 
@@ -9043,6 +9273,7 @@ class DownloadManagerApp:
         self._queue_process_scheduled = False
         self._last_overview_text = None
         self._shutdown_started = False
+        self._shutdown_finalized = False
         self._forced_exit_timer = None
         self._final_exit_timer = None
         self._drop_target_widgets = []
@@ -11922,7 +12153,7 @@ class DownloadManagerApp:
         self._clear_url_entry()
         url_entry.insert(0, value)
 
-    def _start_daemon_thread(self, target, *args, **kwargs):
+    def _start_daemon_thread(self, target, *args, track=True, **kwargs):
         thread_ref = {"thread": None}
 
         def guarded_target():
@@ -11936,7 +12167,7 @@ class DownloadManagerApp:
                 )
             finally:
                 thread = thread_ref.get("thread")
-                if thread is not None:
+                if track and thread is not None:
                     try:
                         with self._background_threads_lock:
                             self._background_threads.discard(thread)
@@ -11948,11 +12179,12 @@ class DownloadManagerApp:
             thread_name = f"download-{args[1]}"
         thread = threading.Thread(target=guarded_target, daemon=True, name=thread_name)
         thread_ref["thread"] = thread
-        try:
-            with self._background_threads_lock:
-                self._background_threads.add(thread)
-        except Exception:
-            pass
+        if track:
+            try:
+                with self._background_threads_lock:
+                    self._background_threads.add(thread)
+            except Exception:
+                pass
         thread.start()
 
     def _wait_for_background_threads(self, timeout_seconds=1.2):
@@ -12213,6 +12445,7 @@ class DownloadManagerApp:
             "avbebe.com": "avbebe",
             "avjoy.me": "avjoy",
             "bestjavporn.com": "bestjavporn",
+            "supjav.com": "supjav",
             "tinyavideo.com": "tinyavideo",
             "bilibili.com": "bilibili",
             "goodav17.com": "goodav17",
@@ -12739,6 +12972,34 @@ class DownloadManagerApp:
                         pass
             return collected
 
+        def fetch_supjav_results():
+            collected = []
+            for variant in search_variants:
+                query = str(variant or "").strip()
+                if not query:
+                    continue
+                for search_url in (
+                    "https://supjav.com/zh/?" + urllib.parse.urlencode({"s": query}),
+                    "https://supjav.com/en/?" + urllib.parse.urlencode({"s": query}),
+                ):
+                    try:
+                        resp = c_req.get(
+                            search_url,
+                            impersonate="chrome120",
+                            timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                            headers=_make_ytdlp_http_headers(referer="https://supjav.com/zh/"),
+                        )
+                        append_unique_results(
+                            collected,
+                            _extract_supjav_video_results(
+                                _response_text_utf8(resp),
+                                base_url=str(getattr(resp, "url", search_url)),
+                            ),
+                        )
+                    except Exception:
+                        pass
+            return collected
+
         def fetch_hohoj_results():
             collected = []
             for variant in search_variants:
@@ -13171,6 +13432,7 @@ class DownloadManagerApp:
                 ("av01.media", ("/tw/video/", "/video/")),
                 ("avhd101.com", ("/search", "/vodplay", "/video")),
                 ("bestjavporn.com", ("/zh/video/", "/video/")),
+                ("supjav.com", ("/zh/", "/en/", "/ja/")),
                 ("tinyavideo.com", ("/video/",)),
                 ("ikanbot.com", ("/play/", "/voddetail/", "/vodsearch/")),
                 ("njavtv.com", ("/",)),
@@ -13248,6 +13510,7 @@ class DownloadManagerApp:
                 ("hayav", fetch_hayav_results),
                 ("missav", fetch_missav_results),
                 ("bestjavporn", fetch_bestjavporn_results),
+                ("supjav", fetch_supjav_results),
                 ("tinyavideo", fetch_tinyavideo_results),
                 ("njav", fetch_njav_results),
                 ("avjoy", fetch_avjoy_results),
@@ -13271,8 +13534,9 @@ class DownloadManagerApp:
         elif cjk_query:
             if actress_name_search:
                 fast_source_jobs = common_fast_jobs + [
-                ("avjoy", fetch_avjoy_results),
+                    ("avjoy", fetch_avjoy_results),
                     ("bestjavporn", fetch_bestjavporn_results),
+                    ("supjav", fetch_supjav_results),
                     ("tinyavideo", fetch_tinyavideo_results),
                 ("missav", fetch_missav_results),
                     ("hayav", fetch_hayav_results),
@@ -13355,6 +13619,7 @@ class DownloadManagerApp:
                 ("avjoy", fetch_avjoy_results),
                 ("hohoj", fetch_hohoj_results),
                 ("hayav", fetch_hayav_results),
+                ("supjav", fetch_supjav_results),
                 ("tinyavideo", fetch_tinyavideo_results),
                 ("missav", fetch_missav_results),
                 ("njav", fetch_njav_results),
@@ -13396,6 +13661,8 @@ class DownloadManagerApp:
                     f'"{primary}" site:avjoy.me/video',
                     f'"{primary}" "bestjavporn.com/zh/video"',
                     f'"{primary}" site:bestjavporn.com/zh/video',
+                    f'"{primary}" "supjav.com/zh"',
+                    f'"{primary}" site:supjav.com/zh',
                     f'"{primary}" "avbebe.com/archives"',
                     f'"{primary}" "tktube.com"',
                     f'"{primary}" "njav.com/xvideos"',
@@ -13422,6 +13689,8 @@ class DownloadManagerApp:
                     f'"{primary}" site:avjoy.me/video',
                     f'"{primary}" "bestjavporn.com/zh/video"',
                     f'"{primary}" site:bestjavporn.com/zh/video',
+                    f'"{primary}" "supjav.com/zh"',
+                    f'"{primary}" site:supjav.com/zh',
                     f'"{primary}" "missav"',
                     f'"{primary}" "hayav.com/video"',
                     f'"{primary}" "njav.com/xvideos"',
@@ -14117,6 +14386,7 @@ class DownloadManagerApp:
                 task,
                 resolved_url=normalized_resolved_url,
                 resolved_url_saved_at=resolved_url_saved_at,
+                fallback_urls=fallback_urls,
                 page_refresh_candidates=page_refresh_candidates,
             )
             updates["resolved_url"] = normalized_resolved_url
@@ -14684,13 +14954,10 @@ class DownloadManagerApp:
             and _should_prefer_native_hls(target_url, task)
         ):
             return "native"
+        if not is_mp3 and self._should_try_parallel_hls_segments(target_url, task):
+            return "parallel"
         resume_active = self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
         if resume_active:
-            parsed = urllib.parse.urlparse(str(target_url or ""))
-            host = str(parsed.netloc or "").strip().lower()
-            if not (source_site == "18av" and "streamfastpro" in host):
-                return "ffmpeg"
-        if not is_mp3 and self._should_try_parallel_hls_segments(target_url, task):
             return "ffmpeg"
         if _should_prefer_native_hls(target_url, task):
             return "native"
@@ -15378,6 +15645,81 @@ class DownloadManagerApp:
             "playlist_url": playlist_url,
             "segment_count": len(segment_urls),
             "image_hits": image_hits,
+            "samples": samples,
+        }
+
+    def _hls_manifest_has_unavailable_segments(self, url, headers=None, sample_size=3):
+        c_req = get_curl_cffi_requests()
+        headers = {
+            "Referer": (headers or {}).get("Referer"),
+            "Origin": (headers or {}).get("Origin"),
+            "User-Agent": (headers or {}).get("User-Agent") or DEFAULT_USER_AGENT,
+        }
+        resp = c_req.get(url, impersonate="chrome110", timeout=15, headers=headers)
+        status_code = int(getattr(resp, "status_code", 0) or 0)
+        if status_code >= 400:
+            return True, {"status": status_code, "playlist_url": url, "reason": "playlist_http_error"}
+        text = _response_text_utf8(resp)
+        playlist_url = str(getattr(resp, "url", url) or url)
+        if "#EXTM3U" not in text:
+            return True, {"status": status_code, "playlist_url": playlist_url, "reason": "playlist_not_hls"}
+        if "#EXT-X-STREAM-INF" in text:
+            variant, _variant_attrs = _select_highest_hls_variant_url(playlist_url, text)
+            if variant:
+                resp = c_req.get(variant, impersonate="chrome110", timeout=15, headers=headers)
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                if status_code >= 400:
+                    return True, {"status": status_code, "playlist_url": variant, "reason": "variant_http_error"}
+                text = _response_text_utf8(resp)
+                playlist_url = str(getattr(resp, "url", variant) or variant)
+                if "#EXTM3U" not in text:
+                    return True, {"status": status_code, "playlist_url": playlist_url, "reason": "variant_not_hls"}
+        segment_urls = []
+        for line in str(text or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            segment_urls.append(urllib.parse.urljoin(playlist_url, line))
+            if len(segment_urls) >= max(1, int(sample_size or 1)):
+                break
+        if not segment_urls:
+            return True, {"playlist_url": playlist_url, "segment_count": 0, "reason": "no_segments"}
+        bad_hits = 0
+        samples = []
+        probe_headers = dict(headers)
+        probe_headers["Range"] = "bytes=0-2047"
+        for segment_url in segment_urls:
+            try:
+                segment_resp = c_req.get(segment_url, impersonate="chrome110", timeout=15, headers=probe_headers)
+                segment_status = int(getattr(segment_resp, "status_code", 0) or 0)
+                content_type = str((getattr(segment_resp, "headers", {}) or {}).get("content-type", "") or "").lower()
+                segment_body = bytes(getattr(segment_resp, "content", b"") or b"")
+                body_head = bytes(segment_body[:64] or b"")
+                body_text = body_head.decode("utf-8", "ignore").lower()
+                looks_like_error_page = (
+                    segment_status >= 400
+                    or "text/html" in content_type
+                    or "application/json" in content_type
+                    or body_text.lstrip().startswith(("<!doctype", "<html", "<?xml"))
+                    or any(marker in body_text for marker in ("bad gateway", "not found", "forbidden", "source unavailable"))
+                )
+                if looks_like_error_page:
+                    bad_hits += 1
+                samples.append(
+                    {
+                        "url": segment_url[:240],
+                        "status": segment_status,
+                        "content_type": content_type,
+                        "signature": body_head[:16].hex(),
+                    }
+                )
+            except Exception as exc:
+                bad_hits += 1
+                samples.append({"url": segment_url[:240], "error": _summarize_log_exception(exc)})
+        return bad_hits >= len(samples), {
+            "playlist_url": playlist_url,
+            "segment_count": len(segment_urls),
+            "bad_hits": bad_hits,
             "samples": samples,
         }
 
@@ -18628,6 +18970,43 @@ class DownloadManagerApp:
         text = str(exc or "").lower()
         return any(marker in text for marker in MEDIA_DOWNLOAD_RETRY_MARKERS)
 
+    def _fetch_tinyavideo_page_text(self, page_url, origin=None, timeout=14):
+        variants = _tinyavideo_video_page_variants(page_url)
+        if not variants:
+            raise Exception("TinyAVideo page URL missing")
+        c_req = get_curl_cffi_requests()
+        last_exc = None
+        for candidate_url in variants:
+            try:
+                parsed = urllib.parse.urlsplit(candidate_url)
+                candidate_origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'tinyavideo.com'}"
+            except Exception:
+                candidate_origin = origin or "https://tinyavideo.com"
+            page_headers = _make_browser_page_headers(
+                referer=(origin or candidate_origin).rstrip("/") + "/",
+                origin=candidate_origin,
+            )
+            for browser in ("chrome120", "chrome110", "edge101"):
+                session = None
+                try:
+                    session = self._track_network_session(c_req.Session(impersonate=browser))
+                    resp = session.get(candidate_url, timeout=timeout, headers=page_headers)
+                    status_code = int(getattr(resp, "status_code", 0) or 0)
+                    page_text = _response_text_utf8(resp)
+                    if status_code >= 400:
+                        raise Exception(f"TinyAVideo page HTTP {status_code}")
+                    if page_text and ("<html" in page_text.lower() or "m3u8" in page_text.lower() or "video" in page_text.lower()):
+                        return page_text, str(getattr(resp, "url", candidate_url) or candidate_url), candidate_origin
+                    raise Exception("TinyAVideo empty page response")
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+                finally:
+                    self._close_network_session(session)
+        if last_exc is not None:
+            raise last_exc
+        raise Exception("TinyAVideo page fetch failed")
+
     def _fetch_avjoy_media_candidates(self, page_url, fallback_name="AVJOY"):
         parsed = urllib.parse.urlsplit(str(page_url or ""))
         site_root = f"{parsed.scheme or 'https'}://{parsed.netloc or 'avjoy.me'}/"
@@ -20103,6 +20482,7 @@ class DownloadManagerApp:
             "18av",
             "movieffm",
             "avbebe",
+            "bestjavporn",
             "dramasq",
             "gimy",
             "goodav17",
@@ -20116,6 +20496,7 @@ class DownloadManagerApp:
             "nnyy",
             "olevod",
             "thanju",
+            "tinyavideo",
             "xiaoyakankan",
         )
         hls_host, representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
@@ -20690,8 +21071,6 @@ class DownloadManagerApp:
 
     def _download_m3u8_with_ffmpeg(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net", _unexpected_retry_count=0, _native_fallback_done=False, _audio_transcode_retry=False):
         task = self.tasks.get(item_id, {})
-        task = self._ensure_task_active_transfer_state(item_id, task, reason="ffmpeg_hls")
-        self._set_task_active_media_url(task, url)
         source_site = _task_source_site_name(task) or _infer_source_site_from_task_urls(
             url,
             _task_field_value(task, "url", ""),
@@ -20699,6 +21078,9 @@ class DownloadManagerApp:
             _task_field_value(task, "resolved_url", ""),
         )
         probe_task = self._parallel_hls_probe_task(task, source_site)
+        active_reason = "parallel_hls" if (not is_mp3 and self._should_try_parallel_hls_segments(url, probe_task)) else "ffmpeg_hls"
+        task = self._ensure_task_active_transfer_state(item_id, task, reason=active_reason)
+        self._set_task_active_media_url(task, url)
         ext = "mp3" if is_mp3 else "mp4"
         name, safe_name, out_path = self._resolve_task_output_name_and_path(
             task,
@@ -21127,7 +21509,7 @@ class DownloadManagerApp:
         headers = _format_ffmpeg_header_lines(manifest_headers)
         total_duration = 0.0
         if not self._shutdown_started:
-            self._start_daemon_thread(probe_metadata)
+            self._start_daemon_thread(probe_metadata, track=False)
 
         ggjav_hls_source_sites = ("goodav17", "hohoj")
         all_manifest_candidates_are_ggjav = bool(candidate_urls) and all(
@@ -21138,7 +21520,7 @@ class DownloadManagerApp:
         parallel_unsupported_segment_url = ""
         parallel_unsupported_segment_error = None
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("18av", "bestjavporn", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("18av", "bestjavporn", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -21154,7 +21536,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("18av", "bestjavporn", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("18av", "bestjavporn", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -22532,8 +22914,6 @@ class DownloadManagerApp:
                     _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, resume_requested=True, _manual_pause_requested=False)
                     self._update_task_state_entry(task, state="PAUSED", resume_requested=True, _stop_reason=None)
                     self._release_download_worker(item_id)
-                    self._unregister_parallel_hls_stop_event(item_id)
-                    self._unregister_http_multipart_stop_event(item_id)
                 except Exception:
                     continue
 
@@ -24423,7 +24803,7 @@ class DownloadManagerApp:
                 default_route=default_route,
                 force_ffmpeg=force_ffmpeg,
             )
-            if selected_route == "ffmpeg":
+            if selected_route in ("ffmpeg", "parallel"):
                 _download_manifest_with_ffmpeg_or_page_fallback(target_url, referer=referer, origin=origin)
                 return
             if selected_route == "native":
@@ -28079,15 +28459,7 @@ class DownloadManagerApp:
         if _is_tinyavideo_video_page_url(url):
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 TinyAVideo 影片...")
             tiny_origin = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'tinyavideo.com'}"
-            c_req = get_curl_cffi_requests()
-            resp = c_req.get(
-                url,
-                impersonate="chrome120",
-                timeout=25,
-                headers=_make_browser_page_headers(referer=tiny_origin + "/", origin=tiny_origin),
-            )
-            page_text = _response_text_utf8(resp)
-            source_page = str(getattr(resp, "url", url) or url)
+            page_text, source_page, tiny_origin = self._fetch_tinyavideo_page_text(url, origin=tiny_origin)
             page_title = _clean_tinyavideo_title(
                 _extract_html_title(page_text, short_name or "TinyAVideo"),
                 page_url=source_page,
@@ -28098,8 +28470,38 @@ class DownloadManagerApp:
             )
             media_url, fallback_urls = _pick_primary_with_fallbacks(candidates, source_site="tinyavideo")
             if not media_url:
-                raise Exception("TinyAVideo media URL missing")
+                raise DownloadSourceUnavailableException("TinyAVideo media URL missing")
             _set_task_identity(name=page_title, source_site="tinyavideo", source_page=source_page, fallback_urls=fallback_urls)
+            hls_headers = _make_hls_http_headers(referer=source_page, origin=tiny_origin)
+            if _looks_like_manifest_url(media_url):
+                try:
+                    source_unavailable, unavailable_details = self._hls_manifest_has_unavailable_segments(
+                        media_url,
+                        headers=hls_headers,
+                    )
+                except Exception as unavailable_probe_exc:
+                    source_unavailable = False
+                    unavailable_details = {"error": _summarize_log_exception(unavailable_probe_exc)}
+                if source_unavailable:
+                    self._set_cached_resolved_link_state(
+                        task,
+                        resolved_url="",
+                        resolved_url_saved_at=0.0,
+                        fallback_urls=[],
+                        page_refresh_candidates=[],
+                        clear_source_refresh_history=True,
+                    )
+                    self._set_task_parse_ui(item_id, error="TinyAVideo source unavailable")
+                    write_error_log(
+                        "tinyavideo unavailable hls source rejected",
+                        DownloadSourceUnavailableException("TinyAVideo HLS segments are unavailable"),
+                        item_id=item_id,
+                        url=media_url,
+                        source_page=source_page,
+                        source_site="tinyavideo",
+                        details=unavailable_details,
+                    )
+                    raise DownloadSourceUnavailableException("TinyAVideo HLS segments are unavailable")
             self._download_routed_media_url(
                 task,
                 item_id,
@@ -28113,10 +28515,152 @@ class DownloadManagerApp:
                 origin=tiny_origin,
                 manifest_downloader=_download_manifest_with_site_strategy,
                 manifest_default_route="ffmpeg",
-                headers=_make_hls_http_headers(referer=source_page, origin=tiny_origin),
+                headers=hls_headers,
                 default_ext=".mp4",
             )
             return
+
+        if _is_supjav_video_page_url(url):
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 SupJav 影片...")
+            supjav_origin = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'supjav.com'}"
+            c_req = get_curl_cffi_requests()
+            resp = c_req.get(
+                url,
+                impersonate="chrome120",
+                timeout=25,
+                headers=_make_browser_page_headers(referer=supjav_origin + "/", origin=supjav_origin),
+            )
+            page_text = _response_text_utf8(resp)
+            source_page = str(getattr(resp, "url", url) or url)
+            page_title = _clean_supjav_title(
+                _extract_html_title(page_text, short_name or "SupJav"),
+                page_url=source_page,
+                fallback_title=short_name or "SupJav",
+            )
+            playback_candidates, playback_probes = _resolve_supjav_playback_media(page_text, source_page, c_req=c_req)
+            if playback_candidates:
+                valid_playback_candidates = []
+                rejected_playback_candidates = []
+                for playback_candidate in playback_candidates:
+                    playback_url = playback_candidate.get("url") or ""
+                    if _looks_like_manifest_url(playback_url):
+                        try:
+                            placeholder_segments, placeholder_details = self._hls_manifest_uses_image_placeholder_segments(
+                                playback_url,
+                                headers=_make_hls_http_headers(
+                                    referer=playback_candidate.get("referer") or source_page,
+                                    origin=playback_candidate.get("origin") or supjav_origin,
+                                ),
+                            )
+                        except Exception as placeholder_exc:
+                            placeholder_segments = False
+                            placeholder_details = {"error": _summarize_log_exception(placeholder_exc)}
+                        if placeholder_segments:
+                            rejected_playback_candidates.append(
+                                {
+                                    "url": playback_url,
+                                    "server": playback_candidate.get("server"),
+                                    "reason": "image_placeholder_segments",
+                                    "details": placeholder_details,
+                                }
+                            )
+                            continue
+                    valid_playback_candidates.append(playback_candidate)
+                if not valid_playback_candidates:
+                    self._set_cached_resolved_link_state(
+                        task,
+                        resolved_url="",
+                        resolved_url_saved_at=0.0,
+                        fallback_urls=[],
+                        page_refresh_candidates=[],
+                        clear_source_refresh_history=True,
+                    )
+                    self._set_task_parse_ui(item_id, error="SupJav 播放鏈目前只回傳受保護圖片片段，無法直接下載")
+                    write_error_log(
+                        "supjav playback streams rejected",
+                        DownloadSourceUnavailableException("SupJav playback streams contain protected image segments"),
+                        item_id=item_id,
+                        url=url,
+                        source_page=source_page,
+                        source_site="supjav",
+                        playback_probes=playback_probes,
+                        rejected_candidates=rejected_playback_candidates,
+                    )
+                    raise DownloadSourceUnavailableException("SupJav playback streams contain protected image segments")
+                primary_playback = valid_playback_candidates[0]
+                media_url = primary_playback.get("url") or ""
+                fallback_urls = [
+                    candidate.get("url")
+                    for candidate in valid_playback_candidates[1:]
+                    if candidate.get("url")
+                ]
+                _set_task_identity(name=page_title, source_site="supjav", source_page=source_page, fallback_urls=fallback_urls)
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    media_url,
+                    save_dir,
+                    page_title,
+                    is_mp3=is_mp3,
+                    source_site="supjav",
+                    fallback_urls=fallback_urls,
+                    referer=primary_playback.get("referer") or source_page,
+                    origin=primary_playback.get("origin") or supjav_origin,
+                    manifest_downloader=_download_manifest_with_site_strategy,
+                    manifest_default_route="ffmpeg",
+                    headers=_make_hls_http_headers(
+                        referer=primary_playback.get("referer") or source_page,
+                        origin=primary_playback.get("origin") or supjav_origin,
+                    ),
+                    default_ext=".mp4",
+                )
+                return
+            candidates = _dedupe_download_urls(
+                _extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            )
+            media_url, fallback_urls = _pick_primary_with_fallbacks(candidates, source_site="supjav")
+            _set_task_identity(name=page_title, source_site="supjav", source_page=source_page, fallback_urls=fallback_urls)
+            if media_url:
+                supjav_headers = _make_hls_http_headers(referer=source_page, origin=supjav_origin)
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    media_url,
+                    save_dir,
+                    page_title,
+                    is_mp3=is_mp3,
+                    source_site="supjav",
+                    fallback_urls=fallback_urls,
+                    referer=source_page,
+                    origin=supjav_origin,
+                    manifest_downloader=_download_manifest_with_site_strategy,
+                    manifest_default_route="ffmpeg",
+                    headers=supjav_headers,
+                    default_ext=".mp4",
+                )
+                return
+            external_links = _extract_supjav_external_file_links(page_text, base_url=source_page)
+            message = "SupJav only exposes external file-host pages; direct video download is not available"
+            self._set_cached_resolved_link_state(
+                task,
+                resolved_url="",
+                resolved_url_saved_at=0.0,
+                fallback_urls=[],
+                page_refresh_candidates=[],
+                clear_source_refresh_history=True,
+            )
+            self._set_task_parse_ui(item_id, error="SupJav 僅提供外部免空頁，尚無直接影片下載點")
+            write_error_log(
+                "supjav external file hosts only",
+                DownloadSourceUnavailableException(message),
+                item_id=item_id,
+                url=url,
+                source_page=source_page,
+                source_site="supjav",
+                external_links=external_links[:6],
+                playback_probes=playback_probes,
+            )
+            raise DownloadSourceUnavailableException(message)
 
         if _is_bestjavporn_video_page_url(url):
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 BestJavPorn 影片...")
@@ -28831,6 +29375,8 @@ class DownloadManagerApp:
         if current_downloading > 0:
             if self._ask_close_downloads_confirmation(t("msg_close_warn", count=current_downloading), active_count=current_downloading, parent=self.root):
                 try:
+                    self._shutdown_started = True
+                    self._signal_transfer_stop_events()
                     self._prepare_shutdown_resume_state()
                     self._wait_for_shutdown_downloads()
                     self._wait_for_shutdown_resume_artifacts()
@@ -28849,8 +29395,10 @@ class DownloadManagerApp:
         self._finalize_process_shutdown()
 
     def _finalize_process_shutdown(self):
-        if self._shutdown_started:
+        if getattr(self, "_shutdown_finalized", False):
             return
+        self._shutdown_started = True
+        self._shutdown_finalized = True
         try:
             write_error_log(
                 "app shutdown started",
@@ -28869,6 +29417,10 @@ class DownloadManagerApp:
             self._forced_exit_timer = None
         try:
             self._prepare_ui_for_shutdown()
+        except Exception:
+            pass
+        try:
+            self._signal_transfer_stop_events()
         except Exception:
             pass
         try:
