@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260602-3420"
+APP_BUILD = "20260603-3430"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -793,7 +793,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "njavtv": 24,
     "nnyy": 24,
     "olevod": 24,
-    "supjav": 32,
+    "supjav": 48,
     "thanju": 24,
     "tinyavideo": 48,
     "xiaoyakankan": 48,
@@ -818,10 +818,11 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "olemovienews.com": 24,
     "yuglf.com": 24,
     "cdn-centaurus.com": 32,
-    "premilkyway.com": 32,
+    "premilkyway.com": 48,
     "taopianplay1.com": 24,
     "turbosplayer.com": 8,
-    "turboviplay.com": 8,
+    "turboviplay.com": 48,
+    "turbovidhls.com": 48,
     "ggjav.com": 60,
     "surrit.com": 30,
     "streamfastpro": 32,
@@ -843,7 +844,9 @@ PARALLEL_HLS_HOST_WORKER_BUDGET = 72
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "cdn-centaurus.com": 96,
     "financialbenchmark.cfd": 96,
-    "premilkyway.com": 96,
+    "premilkyway.com": 144,
+    "turboviplay.com": 144,
+    "turbovidhls.com": 144,
     "ggjav.com": 120,
     "media-cdn": 48,
     "mxcontent.net": 96,
@@ -5102,6 +5105,31 @@ def _extract_html_title(page_text, fallback_name):
     return raw_title or fallback_name
 
 
+def _is_cloudflare_challenge_page(page_text, status_code=None):
+    normalized_page = str(page_text or "").lower()
+    return (
+        int(status_code or 0) in (403, 429, 503)
+        and any(
+            marker in normalized_page
+            for marker in (
+                "cf-challenge",
+                "__cf_chl_",
+                "cf-browser-verification",
+                "checking your browser before accessing",
+                "cloudflare",
+            )
+        )
+    ) or any(
+        marker in normalized_page
+        for marker in (
+            "cf-challenge",
+            "__cf_chl_",
+            "cf-browser-verification",
+            "checking your browser before accessing",
+        )
+    )
+
+
 def _clean_bestjavporn_title(raw_title, page_url="", fallback_title="BestJavPorn"):
     cleaned = html.unescape(str(raw_title or "")).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -5171,18 +5199,20 @@ def _supjav_stream_priority(candidate_url, server_label=""):
     score = 1000
     if ".m3u8" in value:
         score -= 500
+    if label == "tv":
+        score -= 320
+    if "turboviplay.com" in value or "turbovidhls.com" in value:
+        score -= 320
+    if "fc2stream.tv/stream/" in value:
+        score -= 120
     if label == "fst":
-        score -= 260
+        score -= 80
     if "premilkyway.com" in value:
-        score -= 260
+        score += 180
+    if ".sbs/" in value or ".txt" in value:
+        score += 220
     if "financialbenchmark.cfd" in value:
         score -= 180
-    if "fc2stream.tv/stream/" in value:
-        score -= 80
-    if "turboviplay.com" in value or "turbovidhls.com" in value:
-        score += 160
-    if label == "tv":
-        score += 120
     if "streamtape.com/e/" in value or "voe.sx/e/" in value or "/e/" in value:
         score += 300
     return score
@@ -20495,6 +20525,7 @@ class DownloadManagerApp:
             "njavtv",
             "nnyy",
             "olevod",
+            "supjav",
             "thanju",
             "tinyavideo",
             "xiaoyakankan",
@@ -20613,6 +20644,7 @@ class DownloadManagerApp:
                 now = time.time()
                 elapsed = max(now - started_at, 0.001)
                 speed_bps = completed_bytes / elapsed
+                _set_task_aux_fields(task, _last_speed_bps=max(float(speed_bps or 0.0), 0.0))
                 eta = elapsed / completed_segments * (total_segments - completed_segments) if completed_segments and total_segments > completed_segments else None
                 is_complete = completed_segments >= total_segments
                 should_refresh_progress_ui = (
@@ -20771,6 +20803,8 @@ class DownloadManagerApp:
             logged_output_path = self._task_output_path_or_default(task, out_path)
             logged_output_size = self._get_existing_file_size(logged_output_path)
             elapsed_seconds = max(time.time() - started_at, 0.001)
+            average_speed_bps = int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0
+            _set_task_aux_fields(task, _last_speed_bps=max(float(average_speed_bps or 0), 0.0))
             self._log_ffmpeg_event(
                 "parallel hls download finished",
                 Exception("parallel hls finished"),
@@ -20786,7 +20820,7 @@ class DownloadManagerApp:
                 hls_host_worker_budget=hls_host_worker_budget,
                 remux_strategy=remux_strategy,
                 elapsed_seconds=round(elapsed_seconds, 3),
-                average_speed_bps=int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0,
+                average_speed_bps=average_speed_bps,
             )
             return True
         except StopDownloadException:
@@ -28524,13 +28558,48 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 SupJav 影片...")
             supjav_origin = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'supjav.com'}"
             c_req = get_curl_cffi_requests()
-            resp = c_req.get(
-                url,
-                impersonate="chrome120",
-                timeout=25,
-                headers=_make_browser_page_headers(referer=supjav_origin + "/", origin=supjav_origin),
-            )
-            page_text = _response_text_utf8(resp)
+            resp = None
+            page_text = ""
+            supjav_fetch_attempts = []
+            for impersonate_name in ("chrome124", "chrome120", "chrome110", "edge101"):
+                try:
+                    candidate_resp = c_req.get(
+                        url,
+                        impersonate=impersonate_name,
+                        timeout=25,
+                        headers=_make_browser_page_headers(referer=supjav_origin + "/", origin=supjav_origin),
+                    )
+                    candidate_text = _response_text_utf8(candidate_resp)
+                    status_code = int(getattr(candidate_resp, "status_code", 0) or 0)
+                    blocked = _is_cloudflare_challenge_page(candidate_text, status_code=status_code)
+                    supjav_fetch_attempts.append(
+                        {
+                            "impersonate": impersonate_name,
+                            "status": status_code,
+                            "bytes": len(candidate_text),
+                            "cloudflare": blocked,
+                        }
+                    )
+                    resp = candidate_resp
+                    page_text = candidate_text
+                    if status_code < 400 and not blocked:
+                        break
+                except Exception as fetch_exc:
+                    supjav_fetch_attempts.append({"impersonate": impersonate_name, "error": _summarize_log_exception(fetch_exc)})
+            if resp is None:
+                raise DownloadSourceUnavailableException("SupJav page fetch failed before parsing playback servers")
+            if _is_cloudflare_challenge_page(page_text, status_code=getattr(resp, "status_code", 0)):
+                cf_exc = DownloadSourceUnavailableException("SupJav Cloudflare browser verification blocked page parsing")
+                self._set_task_parse_ui(item_id, error="SupJav 需要瀏覽器驗證，無法取得播放頁")
+                write_error_log(
+                    "supjav cloudflare challenge",
+                    cf_exc,
+                    item_id=item_id,
+                    url=url,
+                    source_site="supjav",
+                    fetch_attempts=supjav_fetch_attempts,
+                )
+                raise cf_exc
             source_page = str(getattr(resp, "url", url) or url)
             page_title = _clean_supjav_title(
                 _extract_html_title(page_text, short_name or "SupJav"),
