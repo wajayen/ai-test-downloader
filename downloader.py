@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260604-3440"
+APP_BUILD = "20260604-3450"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -124,6 +124,7 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "18jav",
     "777tv",
     "99itv",
+    "av01",
     "bestjavporn",
     "hayav",
     "hohoj",
@@ -1206,6 +1207,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg download started",
     "ffmpeg download finished",
     "ffmpeg resume segment preserved",
+    "ffmpeg resume segment accepted as complete output",
     "parallel hls download started",
     "parallel hls download finished",
     "parallel hls download interrupted",
@@ -1263,11 +1265,15 @@ TRACE_LOG_CONTEXTS = frozenset((
     "yt-dlp native hls fallback started",
     "yt-dlp native hls fallback finished",
     "native hls artifact rejected",
+    "native hls artifact remuxed",
+    "native hls remux repair failed",
     "existing output quarantined",
     "native hls handoff to ffmpeg",
     "gimy native hls handoff to ffmpeg",
     "native hls failed output removed",
     "ffmpeg near complete resume accepted",
+    "ffmpeg preserved resume segment finalized",
+    "ffmpeg preserved resume segment finalize failed",
     "resume invalid partial reset",
     "resume implausible near-complete reset",
     "resume low speed reanalysis requested",
@@ -1915,6 +1921,27 @@ def _normalize_state_entry(entry):
     if not normalized.get("source_page") and source_site == "hayav":
         if _is_hayav_video_page_url(normalized.get("url", "")):
             normalized["source_page"] = _normalize_download_url(normalized.get("url", ""))
+    if source_site == "av01":
+        av01_page_url = normalized.get("source_page", "") or normalized.get("url", "")
+        av01_code = (
+            _extract_jav_code(normalized.get("name", ""))
+            or _extract_jav_code(normalized.get("short_name", ""))
+            or _extract_jav_code(normalized.get("filename", ""))
+            or _extract_jav_code(av01_page_url)
+            or _extract_jav_code(normalized.get("resolved_url", ""))
+        )
+        if av01_code and (
+            _contains_mojibake_noise(normalized.get("name", ""))
+            or _output_title_is_suspicious_value(normalized.get("name", ""))
+        ):
+            normalized["name"] = av01_code
+            name = av01_code
+        if av01_code and (
+            "short_name" not in normalized
+            or _contains_mojibake_noise(normalized.get("short_name", ""))
+            or _output_title_is_suspicious_value(normalized.get("short_name", ""))
+        ):
+            normalized["short_name"] = av01_code
     if source_site == "avjoy":
         avjoy_source_page = normalized.get("source_page", "")
         if not avjoy_source_page and _is_avjoy_video_page_url(normalized.get("url", "")):
@@ -2020,6 +2047,14 @@ def _normalize_state_entry(entry):
     elif state in ("DOWNLOADING", "DELETE_REQUESTED", "DELETED", "FINISHED"):
         state = "QUEUED"
     elif state not in ("QUEUED", "PAUSED", "ERROR"):
+        state = "QUEUED"
+    if (
+        state == "ERROR"
+        and resume_requested
+        and "ffmpeg resume segment completed but could not be merged yet" in (
+            str(normalized.get("_last_error_status", "") or "") + " " + str(normalized.get("_last_error_message", "") or "")
+        ).lower()
+    ):
         state = "QUEUED"
     normalized["state"] = state
     normalized["_manual_pause_requested"] = bool(normalized.get("_manual_pause_requested", False))
@@ -7232,6 +7267,36 @@ def _av01_title_from_api(video_data, fallback="AV01"):
     if code and title and code.lower() not in title.lower():
         return f"{code} {title}"
     return title or code or str(fallback or "AV01").strip() or "AV01"
+
+
+def _av01_video_data_from_response(response):
+    best_data = {}
+    for loader in (
+        lambda: response.json(),
+        lambda: json.loads(_response_text_utf8(response) or "{}"),
+    ):
+        try:
+            data = loader()
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        title = _av01_title_from_api(data, fallback="")
+        if title and not _looks_like_garbled_text(title):
+            return data
+        if not best_data:
+            best_data = data
+    return best_data
+
+
+def _clean_av01_title(video_data, page_url="", fallback="AV01"):
+    title = _av01_title_from_api(video_data, fallback=fallback)
+    if title and not _looks_like_garbled_text(title) and not _output_title_is_suspicious_value(title):
+        return title
+    repaired = _repair_mixed_garbled_jav_title(title, page_url=page_url, fallback_title=fallback)
+    if repaired and not _looks_like_garbled_text(repaired):
+        return repaired
+    return _extract_jav_code(title) or _extract_jav_code(fallback) or _extract_jav_code(page_url) or str(fallback or "AV01").strip() or "AV01"
 
 
 def _av01_manifest_url(video_id, storage_base=""):
@@ -15100,7 +15165,10 @@ class DownloadManagerApp:
         if source_site == "bestjavporn" and not is_mp3:
             return "ffmpeg"
         if source_site == "av01" and not is_mp3 and _is_av01_authorized_manifest_url(target_url):
-            return "native"
+            return "ffmpeg"
+        resume_active = self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
+        if resume_active:
+            return "ffmpeg"
         if (
             not is_mp3
             and _should_force_native_hls_before_parallel(target_url, task)
@@ -15109,13 +15177,8 @@ class DownloadManagerApp:
             return "native"
         if not is_mp3 and self._should_try_parallel_hls_segments(target_url, task):
             return "parallel"
-        resume_active = self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
-        if resume_active:
-            return "ffmpeg"
         if _should_prefer_native_hls(target_url, task):
             return "native"
-        if resume_active:
-            return "generic"
         if default_route == "ffmpeg":
             return "ffmpeg"
         if default_route == "native":
@@ -17059,6 +17122,194 @@ class DownloadManagerApp:
         )
         return True
 
+    def _finalize_single_resume_artifact_if_complete(
+        self,
+        task,
+        item_id,
+        media_url,
+        artifact_path,
+        out_path,
+        temp_out_path,
+        resume_out_path,
+        merged_out_path,
+        progress_path,
+        total_duration,
+        artifact_duration=0.0,
+        artifact_bytes=0,
+    ):
+        if not artifact_path or not out_path or not self._has_nonempty_file(artifact_path):
+            return False
+        try:
+            duration_value = max(float(total_duration or 0.0), 0.0)
+            artifact_duration_value = max(float(artifact_duration or 0.0), 0.0)
+            artifact_size = max(int(artifact_bytes or 0), 0)
+        except (TypeError, ValueError):
+            return False
+        if duration_value <= 0.0:
+            return False
+        if artifact_duration_value <= 0.0 or artifact_size <= 0:
+            artifact_info = self._probe_media_info(artifact_path)
+            if not artifact_info.get("valid"):
+                return False
+            artifact_duration_value = max(float(artifact_info.get("duration", 0.0) or 0.0), 0.0)
+            artifact_size = max(int(artifact_info.get("size", 0) or 0), artifact_size)
+        threshold_seconds = self._near_complete_resume_threshold_seconds(duration_value)
+        if artifact_duration_value + threshold_seconds < duration_value:
+            return False
+        if artifact_size < 5 * 1024 * 1024:
+            return False
+        try:
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with self._resume_artifact_lock_for(artifact_path, out_path):
+                if os.path.abspath(artifact_path) != os.path.abspath(out_path):
+                    if os.path.exists(out_path):
+                        try:
+                            os.remove(out_path)
+                        except OSError:
+                            pass
+                    self._move_file_with_retry(artifact_path, out_path, attempts=48, delay_seconds=0.5)
+            self._remove_artifact_paths(
+                *(path for path in (temp_out_path, resume_out_path, merged_out_path, progress_path) if path and os.path.abspath(path) != os.path.abspath(out_path))
+            )
+            self._set_task_output_file(task, item_id, out_path)
+            self._set_task_named_column_text(item_id, "progress", "100%")
+            if not self._mark_task_finished(item_id):
+                raise Exception("completed resume artifact failed final validation")
+            self._log_ffmpeg_event(
+                "ffmpeg resume segment accepted as complete output",
+                Exception("resume segment accepted as complete output"),
+                task,
+                item_id,
+                media_url,
+                output=out_path,
+                artifact_duration=artifact_duration_value,
+                total_duration=duration_value,
+                remaining_seconds=max(duration_value - artifact_duration_value, 0.0),
+                threshold_seconds=threshold_seconds,
+                bytes=self._get_existing_file_size(out_path),
+            )
+            return True
+        except Exception as exc:
+            write_error_log(
+                "ffmpeg preserved resume segment finalize failed",
+                exc,
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                artifact_output=artifact_path,
+                final_output=out_path,
+                total_duration=duration_value,
+                artifact_duration=artifact_duration_value,
+            )
+            return False
+
+    def _finalize_preserved_resume_segment_if_complete(
+        self,
+        task,
+        item_id,
+        media_url,
+        temp_out_path,
+        out_path,
+        resume_out_path,
+        merged_out_path,
+        progress_path,
+        total_duration,
+        stored_seconds,
+        stored_bytes,
+    ):
+        if not temp_out_path or not resume_out_path or not out_path:
+            return False
+        if not self._has_nonempty_file(temp_out_path) or not self._has_nonempty_file(resume_out_path):
+            return False
+        try:
+            duration_value = max(float(total_duration or 0.0), 0.0)
+            stored_value = max(float(stored_seconds or 0.0), 0.0)
+        except (TypeError, ValueError):
+            return False
+        if duration_value <= 0.0 or stored_value <= 0.0:
+            return False
+        threshold_seconds = self._near_complete_resume_threshold_seconds(duration_value)
+        if max(duration_value - stored_value, 0.0) > threshold_seconds:
+            return False
+        base_info = self._probe_media_info(temp_out_path)
+        segment_info = self._probe_media_info(resume_out_path)
+        if not base_info.get("valid") or not segment_info.get("valid"):
+            return False
+        if base_info.get("duration", 0.0) <= 0.0 or segment_info.get("duration", 0.0) <= 0.0:
+            return False
+        if self._finalize_single_resume_artifact_if_complete(
+            task,
+            item_id,
+            media_url,
+            resume_out_path,
+            out_path,
+            temp_out_path,
+            resume_out_path,
+            merged_out_path,
+            progress_path,
+            duration_value,
+            artifact_duration=segment_info.get("duration", 0.0),
+            artifact_bytes=segment_info.get("size", 0),
+        ):
+            return True
+        try:
+            self._concat_media_files((temp_out_path, resume_out_path), merged_out_path)
+            merged_info = self._probe_media_info(merged_out_path)
+            merged_duration = max(float(merged_info.get("duration", 0.0) or 0.0), 0.0)
+            merged_size = max(int(merged_info.get("size", 0) or 0), 0)
+            if (
+                not merged_info.get("valid")
+                or merged_duration <= 0.0
+                or merged_duration + threshold_seconds < duration_value
+                or merged_size < max(5 * 1024 * 1024, int(stored_bytes or 0) * 0.80)
+            ):
+                raise Exception(
+                    f"merged resume artifact incomplete: duration={merged_duration:.3f} expected={duration_value:.3f} size={merged_size}"
+                )
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with self._resume_artifact_lock_for(merged_out_path, out_path):
+                if os.path.exists(out_path):
+                    try:
+                        os.remove(out_path)
+                    except OSError:
+                        pass
+                self._move_file_with_retry(merged_out_path, out_path, attempts=48, delay_seconds=0.5)
+            self._remove_artifact_paths(
+                *(path for path in (temp_out_path, resume_out_path, progress_path) if path != out_path)
+            )
+            self._set_task_output_file(task, item_id, out_path)
+            self._set_task_named_column_text(item_id, "progress", "100%")
+            if not self._mark_task_finished(item_id):
+                raise Exception("finalized preserved resume segment failed final validation")
+            self._log_ffmpeg_event(
+                "ffmpeg preserved resume segment finalized",
+                Exception("preserved resume segment finalized"),
+                task,
+                item_id,
+                media_url,
+                output=out_path,
+                merged_duration=merged_duration,
+                total_duration=duration_value,
+                bytes=self._get_existing_file_size(out_path),
+                stored_seconds=stored_value,
+            )
+            return True
+        except Exception as exc:
+            write_error_log(
+                "ffmpeg preserved resume segment finalize failed",
+                exc,
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                temp_output=temp_out_path,
+                resume_output=resume_out_path,
+                merged_output=merged_out_path,
+                total_duration=duration_value,
+                stored_seconds=stored_value,
+            )
+            self._remove_artifact_paths(merged_out_path)
+            return False
+
     def _remove_yt_dlp_fragment_artifacts(self, output_root):
         root = str(output_root or "").strip()
         if not root:
@@ -17262,6 +17513,18 @@ class DownloadManagerApp:
                 for key in normalized_keys
             )
         return False
+
+    def _resume_progress_id_matches(self, stored_info, progress_path):
+        stored_info = stored_info or {}
+        current_resume_id = self._normalize_resume_state_id(progress_path)
+        stored_resume_id = str(stored_info.get("resume_id", "") or "")
+        if not current_resume_id or not stored_resume_id or current_resume_id != stored_resume_id:
+            return False
+        try:
+            base_name = os.path.basename(str(progress_path or "")[: -len(".progress.json")])
+        except Exception:
+            base_name = ""
+        return base_name.lower().startswith("downloader_resume_")
 
     def _load_resume_progress(self, progress_path):
         return self._load_resume_progress_info(progress_path).get("seconds", 0)
@@ -21049,6 +21312,88 @@ class DownloadManagerApp:
         finally:
             self._unregister_parallel_hls_stop_event(item_id, stop_event)
 
+    def _try_repair_native_hls_artifact_with_ffmpeg(self, item_id, media_url, artifact_path, expected_duration=0.0):
+        clean_path = str(artifact_path or "").strip()
+        if not clean_path or not clean_path.lower().endswith(".mp4") or not self._has_nonempty_file(clean_path):
+            return False
+        ffmpeg_path = os.path.join(_APP_DIR, "ffmpeg.exe") if platform.system() == "Windows" else shutil.which("ffmpeg") or "ffmpeg"
+        if not os.path.exists(ffmpeg_path) and ffmpeg_path == os.path.join(_APP_DIR, "ffmpeg.exe"):
+            return False
+        task = self.tasks.get(item_id, {})
+        root, ext = os.path.splitext(clean_path)
+        repaired_path = f"{root}.native_remux.tmp{ext or '.mp4'}"
+        try:
+            if os.path.exists(repaired_path):
+                os.remove(repaired_path)
+        except OSError:
+            pass
+        base_cmd = [
+            ffmpeg_path,
+            "-y",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "+genpts",
+            "-i",
+            clean_path,
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-dn",
+            "-sn",
+        ]
+        attempts = [
+            ("copy-faststart", base_cmd + ["-c", "copy", "-movflags", "+faststart", repaired_path]),
+            ("copy-plain", base_cmd + ["-c", "copy", repaired_path]),
+            ("audio-transcode", base_cmd + ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", repaired_path]),
+        ]
+        errors = []
+        for label, cmd in attempts:
+            try:
+                if os.path.exists(repaired_path):
+                    os.remove(repaired_path)
+                self._run_mp4_compat_ffmpeg(cmd, timeout_seconds=1800)
+                repaired_info = self._probe_media_info(repaired_path)
+                repaired_duration = float(repaired_info.get("duration", 0.0) or 0.0)
+                if not repaired_info.get("valid") or int(repaired_info.get("size", 0) or 0) <= 0:
+                    raise Exception("remux produced invalid media")
+                if expected_duration > 300.0 and repaired_duration + max(60.0, expected_duration * 0.02) < expected_duration:
+                    raise Exception(f"remux duration mismatch: duration={repaired_duration:.3f} expected={expected_duration:.3f}")
+                if self._is_incomplete_hls_video_artifact(task, repaired_path, expected_duration=expected_duration):
+                    raise Exception("remux output appears incomplete")
+                self._replace_file_with_retry(repaired_path, clean_path)
+                write_error_log(
+                    "native hls artifact remuxed",
+                    Exception("native HLS artifact repaired by ffmpeg remux"),
+                    item_id=item_id,
+                    url=media_url,
+                    output=clean_path,
+                    source_site=_task_source_site_name(task) or None,
+                    strategy=label,
+                    duration=repaired_duration,
+                    expected_duration=expected_duration,
+                    bytes=self._get_existing_file_size(clean_path),
+                )
+                return True
+            except Exception as exc:
+                errors.append(f"{label}: {_summarize_log_exception(exc)}")
+                if label == "copy-faststart" and not _ffmpeg_should_retry_with_audio_transcode(str(exc)):
+                    continue
+        write_error_log(
+            "native hls remux repair failed",
+            Exception("; ".join(errors)[:500] or "native HLS remux repair failed"),
+            item_id=item_id,
+            url=media_url,
+            output=clean_path,
+            source_site=_task_source_site_name(task) or None,
+            expected_duration=expected_duration,
+        )
+        self._remove_artifact_paths(repaired_path)
+        return False
+
     def _download_m3u8_with_ytdlp_native(self, item_id, url, save_dir, is_mp3=False, referer="https://www.movieffm.net/", origin="https://www.movieffm.net"):
         yt_dlp_module = get_yt_dlp_module()
         if yt_dlp_module is None:
@@ -21219,6 +21564,15 @@ class DownloadManagerApp:
                     )
             except Exception:
                 expected_duration = 0.0
+            if (
+                final_duration <= 0.0
+                and expected_duration > 0.0
+                and _task_source_site_name(task) == "av01"
+                and self._try_repair_native_hls_artifact_with_ffmpeg(item_id, url, final_output_path, expected_duration=expected_duration)
+            ):
+                final_info = self._probe_media_info(final_output_path)
+                final_size = int(final_info.get("size", 0) or 0)
+                final_duration = float(final_info.get("duration", 0.0) or 0.0)
             if self._is_incomplete_hls_video_artifact(task, final_output_path, expected_duration=expected_duration):
                 artifact_exc = Exception(
                     f"{_task_source_site_name(task) or 'hls'} native hls artifact rejected: size={final_size} duration={final_duration:.3f} expected={expected_duration:.3f}"
@@ -22057,7 +22411,10 @@ class DownloadManagerApp:
             stored_seconds = float(stored_info.get("seconds", 0.0) or 0.0)
             stored_source_url = _normalize_download_url(stored_info.get("source_url", ""))
             current_resume_key = _normalize_download_url(resume_key)
-            same_resume_target = self._resume_progress_matches(stored_info, resume_keys, progress_path)
+            same_resume_target = (
+                self._resume_progress_matches(stored_info, resume_keys, progress_path)
+                or self._resume_progress_id_matches(stored_info, progress_path)
+            )
             partial_reason = partial_info.get("reason")
             partial_valid = bool(partial_info.get("valid"))
             size_consistent = partial_size > 0 and stored_bytes > 0 and abs(partial_size - stored_bytes) <= max(1024 * 1024, int(max(partial_size, stored_bytes) * 0.35))
@@ -22134,6 +22491,26 @@ class DownloadManagerApp:
                     total_duration = self._get_m3u8_duration(candidate_url, headers=manifest_headers)
                 except Exception:
                     total_duration = 0.0
+            if (
+                not is_mp3
+                and same_resume_target
+                and stored_seconds > 0
+                and total_duration > 0
+                and self._finalize_preserved_resume_segment_if_complete(
+                    task,
+                    item_id,
+                    candidate_url,
+                    temp_out_path,
+                    out_path,
+                    resume_out_path,
+                    merged_out_path,
+                    progress_path,
+                    total_duration,
+                    stored_seconds,
+                    stored_bytes,
+                )
+            ):
+                return
             total_bytes = total_bytes_box.get("value")
             stored_total_bytes = int(stored_info.get("total_bytes", 0) or 0)
             if (
@@ -22349,6 +22726,9 @@ class DownloadManagerApp:
             invalidated_total_bytes = False
             near_complete_since = None
             active_total_bytes = total_bytes_box.get("value") or total_bytes
+            last_speed_sample_time = time.time()
+            last_speed_sample_bytes = 0
+            last_observed_instant_bps = 0.0
 
             def poll_active_output_bytes(now=None, force=False):
                 nonlocal last_io_poll, cached_active_output_bytes, active_total_bytes
@@ -22505,9 +22885,18 @@ class DownloadManagerApp:
                             if should_refresh_progress_ui:
                                 row_updates["size"] = format_transfer_size(current_bytes)
                         if now - last_ui_update >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS:
-                            instant_bps = 0.0
-                            if active_output_bytes > 0 and out_ms > 0:
-                                instant_bps = active_output_bytes / max(out_ms / 1_000_000.0, 0.001)
+                            sample_elapsed = max(now - last_speed_sample_time, 0.001)
+                            if active_output_bytes < last_speed_sample_bytes:
+                                last_speed_sample_bytes = active_output_bytes
+                                last_speed_sample_time = now
+                                sample_elapsed = 0.001
+                            sample_delta = max(active_output_bytes - last_speed_sample_bytes, 0)
+                            instant_bps = last_observed_instant_bps
+                            if sample_elapsed >= 0.25:
+                                instant_bps = max(sample_delta / sample_elapsed, 0.0)
+                                last_speed_sample_time = now
+                                last_speed_sample_bytes = active_output_bytes
+                                last_observed_instant_bps = instant_bps
                             try:
                                 value = max(float(instant_bps or 0.0), 0.0)
                             except Exception:
@@ -22646,6 +23035,21 @@ class DownloadManagerApp:
                             total_duration,
                         )
                     if resumed_segment_only and final_info.get("valid") and final_duration > 0.0 and final_size >= 1024 * 1024:
+                        if self._finalize_single_resume_artifact_if_complete(
+                            task,
+                            item_id,
+                            candidate_url,
+                            final_source,
+                            out_path,
+                            temp_out_path,
+                            resume_out_path,
+                            merged_out_path,
+                            progress_path,
+                            total_duration,
+                            artifact_duration=final_duration,
+                            artifact_bytes=final_size,
+                        ):
+                            return
                         checkpoint_seconds = self._sanitize_resume_seconds(
                             max(float(resume_anchor_seconds or 0.0), 0.0) + max(float(final_duration or 0.0), 0.0),
                             total_duration,
@@ -22674,7 +23078,20 @@ class DownloadManagerApp:
                             checkpoint_bytes=checkpoint_bytes,
                             total_duration=total_duration,
                         )
-                        continue
+                        self._set_task_status_mode_ui(
+                            item_id,
+                            self._paused_status_text(),
+                            "續傳片段已保留，將於下次繼續收尾",
+                        )
+                        _set_task_aux_fields(
+                            task,
+                            state="PAUSED",
+                            resume_requested=True,
+                            _last_error_status="",
+                            _last_error_message="",
+                        )
+                        self.persist_unfinished_state(force=True)
+                        return
                     if looks_truncated or looks_invalid:
                         last_error = Exception(
                             f"FFmpeg produced an incomplete output artifact: size={final_size} duration={final_duration:.3f}"
@@ -25425,8 +25842,8 @@ class DownloadManagerApp:
                 timeout=20,
                 headers=_make_ytdlp_http_headers(referer=url, origin="https://www.av01.media"),
             )
-            video_data = api_resp.json()
-            page_title = _av01_title_from_api(video_data, fallback=short_name or "AV01")
+            video_data = _av01_video_data_from_response(api_resp)
+            page_title = _clean_av01_title(video_data, page_url=url, fallback=short_name or "AV01")
             manifest_url = _av01_authorized_manifest_url(video_id, video_data.get("storage_base", ""), referer=url)
             if not manifest_url:
                 manifest_url = _av01_manifest_url(video_id, video_data.get("storage_base", ""))
@@ -25441,7 +25858,7 @@ class DownloadManagerApp:
                     fallback_urls=[],
                     referer=url,
                     origin="https://www.av01.media",
-                    default_route="native",
+                    default_route="ffmpeg",
                 )
                 return
             jav_code = _extract_jav_code(page_title) or _extract_jav_code(url)
