@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260604-3460"
+APP_BUILD = "20260604-3470"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -121,6 +121,7 @@ FFMPEG_HLS_RECONNECT_OPTIONS = (
 )
 FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS = "15000000"
 FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
+    "85xvideo",
     "18jav",
     "777tv",
     "99itv",
@@ -129,6 +130,7 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "hayav",
     "hohoj",
     "ikanbot",
+    "javdock",
     "jable",
     "missav",
     "njav",
@@ -146,6 +148,7 @@ FFMPEG_AUDIO_TRANSCODE_RETRY_MARKERS = (
     "bitstream filters to an output packet",
 )
 STRICT_HLS_ARTIFACT_SITES = frozenset((
+    "85xvideo",
     "18av",
     "777tv",
     "99itv",
@@ -158,6 +161,7 @@ STRICT_HLS_ARTIFACT_SITES = frozenset((
     "hayav",
     "hohoj",
     "ikanbot",
+    "javdock",
     "movieffm",
     "missav",
     "njav",
@@ -423,6 +427,35 @@ def _is_bestjavporn_video_page_url(url):
     return "bestjavporn.com" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
 
 
+def _is_javdock_video_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    return "javdock.com" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
+
+
+def _is_85xvideo_video_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    host = parsed.netloc.lower()
+    if "85xvideo.com" not in host:
+        return False
+    path = urllib.parse.unquote(parsed.path or "").strip("/")
+    if not path:
+        return False
+    lowered = "/" + path.lower().strip("/") + "/"
+    if any(marker in lowered for marker in ("/category/", "/tag/", "/author/", "/page/", "/feed/", "/wp-")):
+        return False
+    if lowered in ("/search/", "/?s=") or any(marker in lowered for marker in ("/聯絡", "/联系", "/contact", "/about", "/privacy", "/dmca")):
+        return False
+    if _extract_jav_code(path):
+        return True
+    return bool(re.search(r"\d", path))
+
+
 def _is_tinyavideo_video_page_url(url):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -632,6 +665,7 @@ def _normalize_jav_code_for_compare(value):
 
 
 JAV_DUPLICATE_SOURCE_SITES = frozenset((
+    "85xvideo",
     "18av",
     "18jav",
     "avbebe",
@@ -639,12 +673,14 @@ JAV_DUPLICATE_SOURCE_SITES = frozenset((
     "bestjavporn",
     "goodav17",
     "jable",
+    "javdock",
     "javfilms",
     "missav",
     "njav",
     "njavtv",
 ))
 JAV_DUPLICATE_HOST_MARKERS = {
+    "85xvideo.com": "85xvideo",
     "18av.mm-cg.com": "18av",
     "18jav.tv": "18jav",
     "avbebe.com": "avbebe",
@@ -652,6 +688,7 @@ JAV_DUPLICATE_HOST_MARKERS = {
     "bestjavporn.com": "bestjavporn",
     "goodav17.com": "goodav17",
     "jable.tv": "jable",
+    "javdock.com": "javdock",
     "javfilms.com": "javfilms",
     "missav": "missav",
     "njav.com": "njav",
@@ -721,7 +758,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "supjav", "thanju", "tinyavideo", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("85xvideo", "18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "javdock", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "supjav", "thanju", "tinyavideo", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -797,6 +834,7 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
 )
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
+    "85xvideo": 48,
     "movieffm": 32,
     "18av": 32,
     "avbebe": 24,
@@ -807,6 +845,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "hayav": 32,
     "hohoj": 60,
     "ikanbot": 24,
+    "javdock": 48,
     "jable": 24,
     "missav": 30,
     "njav": 36,
@@ -927,6 +966,7 @@ PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "bestjavporn": 5.0,
+    "javdock": 5.0,
     "gimy": 15.0,
     "goodav17": 15.0,
     "99itv": 15.0,
@@ -947,6 +987,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "18jav": 24,
     "av01": 24,
     "bestjavporn": 24,
+    "javdock": 24,
     "gimy": 32,
     "goodav17": 24,
     "hohoj": 32,
@@ -963,6 +1004,7 @@ YTDLP_HLS_NATIVE_USE_MPEGTS_BY_SITE = {
     "18jav": False,
     "av01": False,
     "bestjavporn": False,
+    "javdock": False,
     "gimy": True,
     "goodav17": False,
     "hohoj": False,
@@ -1155,7 +1197,7 @@ GIMY_SOURCE_PAGE_REFRESH_LIMIT = 12
 GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
-IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "avjoy", "bestjavporn", "supjav", "tktube", "bilibili", "ikanbot")
+IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "avjoy", "bestjavporn", "javdock", "supjav", "tktube", "bilibili", "ikanbot")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
 CLOSE_WARNING_TASK_STATES = frozenset(("DOWNLOADING", "PAUSE_REQUESTED", "DELETE_REQUESTED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
@@ -1854,6 +1896,7 @@ def _normalize_state_entry(entry):
         or (stripped_name.count("?") / max(len(stripped_name), 1)) > 0.4
         or stripped_name in {"???", "??????"}
         or _looks_like_garbled_text(stripped_name)
+        or _contains_mojibake_noise(stripped_name)
         or _looks_like_code_only_title(stripped_name)
         or _looks_like_numeric_only_title(stripped_name)
     )
@@ -1931,6 +1974,27 @@ def _normalize_state_entry(entry):
     if not normalized.get("source_page") and source_site == "hayav":
         if _is_hayav_video_page_url(normalized.get("url", "")):
             normalized["source_page"] = _normalize_download_url(normalized.get("url", ""))
+    if source_site in ("goodav17", "hohoj"):
+        ggjav_code = (
+            _extract_jav_code(normalized.get("name", ""))
+            or _extract_jav_code(normalized.get("short_name", ""))
+            or _extract_jav_code(normalized.get("filename", ""))
+            or _extract_jav_code(normalized.get("source_page", ""))
+            or _extract_jav_code(normalized.get("url", ""))
+            or _extract_jav_code(normalized.get("resolved_url", ""))
+        )
+        if ggjav_code and (
+            _contains_mojibake_noise(normalized.get("name", ""))
+            or _output_title_is_suspicious_value(normalized.get("name", ""))
+        ):
+            normalized["name"] = ggjav_code
+            name = ggjav_code
+        if ggjav_code and (
+            "short_name" not in normalized
+            or _contains_mojibake_noise(normalized.get("short_name", ""))
+            or _output_title_is_suspicious_value(normalized.get("short_name", ""))
+        ):
+            normalized["short_name"] = ggjav_code
     if source_site == "av01":
         av01_page_url = normalized.get("source_page", "") or normalized.get("url", "")
         av01_code = (
@@ -1973,6 +2037,45 @@ def _normalize_state_entry(entry):
             or _output_title_is_suspicious_value(normalized.get("short_name", ""))
         ):
             normalized["short_name"] = njav_code
+    if source_site == "missav":
+        missav_page_url = normalized.get("source_page", "") or normalized.get("url", "")
+        missav_code = (
+            _extract_jav_code(normalized.get("name", ""))
+            or _extract_jav_code(normalized.get("short_name", ""))
+            or _extract_jav_code(normalized.get("filename", ""))
+            or _extract_jav_code(normalized.get("temp_filename", ""))
+            or _extract_jav_code(missav_page_url)
+            or _extract_jav_code(normalized.get("resolved_url", ""))
+        )
+        missav_url_text = " ".join(
+            str(part or "").lower()
+            for part in (
+                missav_page_url,
+                normalized.get("url", ""),
+                normalized.get("source_page", ""),
+                normalized.get("resolved_url", ""),
+                " ".join(normalized.get("fallback_urls", [])),
+            )
+        )
+        missav_has_chinese = "chinese-subtitle" in missav_url_text or "中文字幕" in str(normalized.get("name", ""))
+        if missav_code:
+            missav_title = f"{missav_code} 中文字幕" if missav_has_chinese else missav_code
+            if (
+                _contains_mojibake_noise(normalized.get("name", ""))
+                or _looks_like_garbled_text(normalized.get("name", ""))
+                or _output_title_is_suspicious_value(normalized.get("name", ""))
+                or "-chinese-subtitle" in str(normalized.get("name", "")).lower()
+            ):
+                normalized["name"] = missav_title
+                name = missav_title
+            if (
+                "short_name" not in normalized
+                or _contains_mojibake_noise(normalized.get("short_name", ""))
+                or _looks_like_garbled_text(normalized.get("short_name", ""))
+                or _output_title_is_suspicious_value(normalized.get("short_name", ""))
+                or "-chinese-subtitle" in str(normalized.get("short_name", "")).lower()
+            ):
+                normalized["short_name"] = missav_title
     if source_site == "tktube":
         tktube_page_url = normalized.get("source_page", "") or normalized.get("url", "")
         tktube_code = (
@@ -2126,9 +2229,17 @@ def _normalize_state_entry(entry):
             page_url=normalized.get("source_page", "") or normalized.get("url", ""),
             fallback_title=normalized.get("name", ""),
         )
+        filename_jav_code = _extract_jav_code(filename_stem) or _extract_jav_code(normalized.get("name", ""))
+        if source_site in ("goodav17", "hohoj") and filename_jav_code and (
+            _contains_mojibake_noise(filename_stem)
+            or _contains_mojibake_noise(normalized["filename"])
+        ):
+            repaired_filename_title = filename_jav_code
         if (
             _looks_like_garbled_text(normalized["filename"])
             or _looks_like_garbled_text(filename_stem)
+            or _contains_mojibake_noise(normalized["filename"])
+            or _contains_mojibake_noise(filename_stem)
             or _looks_like_numeric_only_title(filename_stem)
             or repaired_filename_title
         ):
@@ -2312,8 +2423,12 @@ def _infer_source_site_from_task_urls(*urls):
             return "avbebe"
         if "avjoy.me" in host:
             return "avjoy"
+        if "85xvideo.com" in host:
+            return "85xvideo"
         if "bestjavporn.com" in host:
             return "bestjavporn"
+        if "javdock.com" in host or "video1.javdock.com" in host:
+            return "javdock"
         if "supjav.com" in host:
             return "supjav"
         if "tinyavideo.com" in host:
@@ -5252,6 +5367,36 @@ def _clean_bestjavporn_title(raw_title, page_url="", fallback_title="BestJavPorn
     return code or str(fallback_title or "BestJavPorn").strip() or "BestJavPorn"
 
 
+def _clean_javdock_title(raw_title, page_url="", fallback_title="JavDock"):
+    cleaned = html.unescape(str(raw_title or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*[-|]\s*JAVDOCK.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    code = _extract_jav_code(cleaned) or _extract_jav_code(page_url) or _extract_jav_code(fallback_title)
+    if cleaned and not _output_title_is_suspicious_value(cleaned) and not _looks_like_garbled_text(cleaned) and not _contains_mojibake_noise(cleaned):
+        return cleaned
+    return code or str(fallback_title or "JavDock").strip() or "JavDock"
+
+
+def _clean_85xvideo_title(raw_title, page_url="", fallback_title="85xvideo"):
+    cleaned = html.unescape(str(raw_title or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*[-|]\s*85xvideo.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    slug_title = ""
+    normalized_page = _normalize_download_url(page_url)
+    if normalized_page:
+        try:
+            slug = urllib.parse.unquote(urllib.parse.urlsplit(normalized_page).path.strip("/").split("/")[-1])
+            slug_title = re.sub(r"[-_]+", " ", slug).strip()
+        except Exception:
+            slug_title = ""
+    if slug_title and (not cleaned or len(slug_title) > len(cleaned) + 4 or re.search(r"[\u3040-\u30ff]", slug_title)):
+        cleaned = slug_title
+    code = _extract_jav_code(cleaned) or _extract_jav_code(page_url) or _extract_jav_code(fallback_title)
+    if cleaned and not _output_title_is_suspicious_value(cleaned) and not _looks_like_garbled_text(cleaned) and not _contains_mojibake_noise(cleaned):
+        return cleaned
+    return code or str(fallback_title or "85xvideo").strip() or "85xvideo"
+
+
 def _clean_tinyavideo_title(raw_title, page_url="", fallback_title="TinyAVideo"):
     cleaned = html.unescape(str(raw_title or "")).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -5498,6 +5643,13 @@ def _bestjavporn_decode_player_config(data_config, player_url):
     source_blob = config.get("src", "")
     sources = json.loads(_bestjavporn_b64decode(source_blob).decode("utf-8", "ignore")) if source_blob else []
     return config, sources if isinstance(sources, list) else []
+
+
+def _javdock_fme(video_id, encrypted, encode_sources=True):
+    suffix = "_0x48107a" if encode_sources else "undefined"
+    key = _browser_api_reverse_btoa_seed(str(video_id or "") + suffix)
+    decrypted = _browser_api_rc4(_browser_api_atob(encrypted), key)
+    return _browser_api_atob(decrypted.decode("latin-1", "ignore")).decode("utf-8", "ignore")
 
 
 def _build_gimy_iframe_urls(page_url, player_data):
@@ -5983,11 +6135,13 @@ def _gimy_detail_candidates_from_play_url(url):
 
 
 SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
+    "85xvideo.com",
     "gimy",
     "movieffm",
     "missav",
     "avjoy",
     "bestjavporn.com",
+    "javdock.com",
     "supjav.com",
     "hanime1.me",
     "hanimeone.me",
@@ -6038,6 +6192,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
 )
 
 VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
+    "85xvideo.com",
     "tktube.com",
     "ani.gamer.com.tw",
     "anime1.me",
@@ -6060,6 +6215,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "avbebe.com",
     "avjoy.me",
     "bestjavporn.com",
+    "javdock.com",
     "supjav.com",
     "tinyavideo.com",
     "bilibili.com",
@@ -6113,7 +6269,9 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "thanju.com": 18,
     "avbebe.com": 18,
     "hayav.com": 18,
+    "85xvideo.com": 18,
     "bestjavporn.com": 19,
+    "javdock.com": 19,
     "tinyavideo.com": 19,
     "avjoy.me": 20,
     "supjav.com": 22,
@@ -6142,6 +6300,7 @@ VIDEO_SEARCH_SOURCE_WORKERS = 12
 VIDEO_SEARCH_ENRICH_WORKERS = 8
 VIDEO_SEARCH_ENRICH_LIMIT = min(12, VIDEO_SEARCH_MAX_RESULTS)
 VIDEO_SEARCH_FAST_STAGE_TARGET_RESULTS = 3
+BESTJAVPORN_MIN_FULL_DURATION_SECONDS = 60.0
 
 VIDEO_SEARCH_YTDLP_PAGE_SITE_MARKERS = (
     "youtube.com",
@@ -7059,10 +7218,34 @@ def _known_video_search_seed_results(query_text):
                     "quality": 720,
                 },
                 {
+                    "url": f"https://85xvideo.com/{code_slug}/",
+                    "title": f"{jav_code} 85xvideo",
+                    "snippet": "85xvideo jav code pattern seed",
+                    "quality": 720,
+                },
+                {
+                    "url": f"https://missav.ws/{code_slug}",
+                    "title": f"{jav_code} MissAV",
+                    "snippet": "missav jav code pattern seed",
+                    "quality": 720,
+                },
+                {
                     "url": f"https://www.bestjavporn.com/zh/video/{code_slug}c/",
                     "title": f"{jav_code} BestJavPorn 中文字幕",
                     "snippet": "bestjavporn jav code pattern seed",
-                    "quality": 1080,
+                    "quality": 720,
+                },
+                {
+                    "url": f"https://www.javdock.com/zh/video/{code_slug}c/",
+                    "title": f"{jav_code} JavDock 中文字幕",
+                    "snippet": "javdock jav code pattern seed",
+                    "quality": 720,
+                },
+                {
+                    "url": f"https://missav.ws/{code_slug}-chinese-subtitle",
+                    "title": f"{jav_code} MissAV 中文字幕",
+                    "snippet": "missav jav code pattern seed",
+                    "quality": 720,
                 },
                 {
                     "url": f"https://tinyavideo.com/video/{code_slug}-uncensored",
@@ -7733,9 +7916,10 @@ def _video_search_result_rank(result, query_text=""):
     speed_rank = _video_search_download_speed_score(result)
     popularity_rank = _video_search_popularity_score(result)
     search_order = int((result or {}).get("_search_order", 9999) or 9999)
+    preview_risk_rank = 1 if _video_search_site_for_url((result or {}).get("url", "")) == "bestjavporn.com" and not (result or {}).get("candidate_urls") else 0
     if _looks_like_actress_name_search(query_text):
-        return (match_rank, popularity_rank, subtitle_rank, search_order, -quality, speed_rank, len(str((result or {}).get("url", ""))))
-    return (match_rank, -quality, subtitle_rank, speed_rank, search_order, len(str((result or {}).get("url", ""))))
+        return (match_rank, preview_risk_rank, popularity_rank, subtitle_rank, search_order, -quality, speed_rank, len(str((result or {}).get("url", ""))))
+    return (match_rank, preview_risk_rank, -quality, subtitle_rank, speed_rank, search_order, len(str((result or {}).get("url", ""))))
 
 
 def _video_search_matches_query(result, query_text):
@@ -7792,10 +7976,12 @@ def _video_search_result_is_downloadable(result):
         "anime1.me",
         "anime1.pw",
         "av01.media",
+        "85xvideo.com",
         "avbebe.com",
         "avjoy.me",
         "avhd101.com",
         "bestjavporn.com",
+        "javdock.com",
         "supjav.com",
         "tinyavideo.com",
         "bilibili.com",
@@ -7915,6 +8101,72 @@ def _extract_bestjavporn_video_results(page_text, base_url="https://www.bestjavp
             title = re.sub(r"<[^>]+>", " ", title_match.group(1))
         title = _clean_bestjavporn_title(title, url, _extract_jav_code(url) or "BestJavPorn")
         results.append({"url": url, "title": title, "snippet": "bestjavporn site search", "quality": 1080})
+    return results
+
+
+def _extract_javdock_video_results(page_text, base_url="https://www.javdock.com/zh/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'<a\b[^>]+href=["\']([^"\']*/(?:zh/)?video/[^"\']+)["\'][^>]*>', text, re.IGNORECASE | re.DOTALL):
+        raw_url = html.unescape(match.group(1))
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen or not _is_javdock_video_page_url(url):
+            continue
+        seen.add(url)
+        link_html = match.group(0)
+        window = text[match.start():match.start() + 2400]
+        title = ""
+        title_match = re.search(r'\btitle=["\']([^"\']+)["\']', link_html, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'\balt=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r"<span[^>]*>(.*?)</span>", window, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title = re.sub(r"<[^>]+>", " ", title_match.group(1))
+        title = _clean_javdock_title(title, url, _extract_jav_code(url) or "JavDock")
+        results.append({"url": url, "title": title, "snippet": "javdock site search", "quality": 1080})
+    return results
+
+
+def _extract_85xvideo_media_candidates(page_text, base_url="https://85xvideo.com/"):
+    text = str(page_text or "")
+    candidates = []
+    candidates.extend(_extract_candidate_media_urls(text, allowed_exts=(".m3u8", ".mp4", ".mpd")))
+    for raw_url in re.findall(r'<source\b[^>]+\bsrc=["\']([^"\']+)["\']', text, re.IGNORECASE | re.DOTALL):
+        candidate = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(raw_url)))
+        if candidate:
+            candidates.append(candidate)
+    return [
+        candidate
+        for candidate in _dedupe_download_urls(candidates)
+        if not re.search(r"\.(?:jpg|jpeg|png|gif|webp)(?:[?#]|$)", candidate, re.IGNORECASE)
+    ]
+
+
+def _extract_85xvideo_video_results(page_text, base_url="https://85xvideo.com/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'<a\b[^>]+href=["\']([^"\']+)["\'][^>]*>', text, re.IGNORECASE | re.DOTALL):
+        raw_url = html.unescape(match.group(1))
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen or not _is_85xvideo_video_page_url(url):
+            continue
+        seen.add(url)
+        window = text[max(0, match.start() - 800):match.end() + 1800]
+        title_match = re.search(r'\btitle=["\']([^"\']+)["\']', match.group(0), re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'\balt=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r"<span[^>]*>(.*?)</span>", window, re.IGNORECASE | re.DOTALL)
+        title = re.sub(r"<[^>]+>", " ", title_match.group(1)) if title_match else ""
+        title = _clean_85xvideo_title(title, url, _extract_jav_code(url) or "85xvideo")
+        results.append({"url": url, "title": title, "snippet": "85xvideo site search", "quality": 720})
     return results
 
 
@@ -12729,9 +12981,11 @@ class DownloadManagerApp:
             "tktube.com": "tktube",
             "anime1.me": "anime1",
             "anime1.pw": "anime1",
+            "85xvideo.com": "85xvideo",
             "avbebe.com": "avbebe",
             "avjoy.me": "avjoy",
             "bestjavporn.com": "bestjavporn",
+            "javdock.com": "javdock",
             "supjav.com": "supjav",
             "tinyavideo.com": "tinyavideo",
             "bilibili.com": "bilibili",
@@ -13063,6 +13317,48 @@ class DownloadManagerApp:
                 if jav_code:
                     candidates.extend(_fetch_ggjav_related_candidate_urls(jav_code, c_req=c_req, max_pages=4))
                     candidates = _prefer_ggjav_media_group_matching_code(candidates, jav_code)
+            if not candidates and "bestjavporn.com" in search_host and _is_bestjavporn_video_page_url(url):
+                try:
+                    page_title, bestjavporn_candidates, player_url = self._fetch_bestjavporn_media_candidates(
+                        url,
+                        fallback_name=result.get("title") or query_text or "BestJavPorn",
+                    )
+                    if page_title:
+                        result["title"] = page_title
+                    if player_url:
+                        result["resolver_page"] = player_url
+                    candidates = bestjavporn_candidates
+                    result["_bestjavporn_resolved_player"] = True
+                except Exception as bestjavporn_exc:
+                    write_error_log(
+                        "bestjavporn search player resolve failed",
+                        bestjavporn_exc,
+                        source_page=url,
+                    )
+                    result["downloadable_probe_failed"] = True
+                    result["probe_rejected_reason"] = "bestjavporn_player_resolve_failed"
+                    return result
+            if not candidates and "javdock.com" in search_host and _is_javdock_video_page_url(url):
+                try:
+                    page_title, javdock_candidates, player_url = self._fetch_javdock_media_candidates(
+                        url,
+                        fallback_name=result.get("title") or query_text or "JavDock",
+                    )
+                    if page_title:
+                        result["title"] = page_title
+                    if player_url:
+                        result["resolver_page"] = player_url
+                    candidates = javdock_candidates
+                    result["_javdock_resolved_player"] = True
+                except Exception as javdock_exc:
+                    write_error_log(
+                        "javdock search player resolve failed",
+                        javdock_exc,
+                        source_page=url,
+                    )
+                    result["downloadable_probe_failed"] = True
+                    result["probe_rejected_reason"] = "javdock_player_resolve_failed"
+                    return result
             if not candidates and "xiaoyakankan." in search_host:
                 result["title"] = _clean_xiaoyakankan_title(result.get("title") or _extract_html_title(page_text, query_text))
                 play_urls = []
@@ -13091,15 +13387,75 @@ class DownloadManagerApp:
                     and "screenshot" not in str(candidate or "").lower()
                 ]
             if candidates:
+                if "bestjavporn.com" in search_host:
+                    expected_code = _normalize_jav_code_for_compare(query_text) or _normalize_jav_code_for_compare(result.get("title", "")) or _normalize_jav_code_for_compare(url)
+                    if expected_code and not result.get("_bestjavporn_resolved_player"):
+                        matching_candidates = [
+                            candidate for candidate in _dedupe_download_urls(candidates)
+                            if expected_code in re.sub(r"[^A-Za-z0-9]", "", urllib.parse.unquote(str(candidate or ""))).upper()
+                        ]
+                        if not matching_candidates:
+                            write_error_log(
+                                "bestjavporn unrelated search candidates rejected",
+                                Exception("BestJavPorn returned media candidates for a different JAV code"),
+                                source_page=url,
+                                expected_code=expected_code,
+                                rejected_count=len(candidates),
+                                rejected=_dedupe_download_urls(candidates)[:5],
+                            )
+                            result["downloadable_probe_failed"] = True
+                            result["probe_rejected_reason"] = "bestjavporn_unrelated_media_candidates"
+                            return result
+                        candidates = matching_candidates
+                    origin = f"{parsed_search_url.scheme or 'https'}://{parsed_search_url.netloc or 'www.bestjavporn.com'}"
+                    manifest_headers = _make_hls_http_headers(referer=url, origin=origin)
+                    valid_bestjavporn_candidates = []
+                    rejected_bestjavporn_candidates = []
+                    for candidate in _dedupe_download_urls(candidates):
+                        if not _looks_like_manifest_url(candidate):
+                            valid_bestjavporn_candidates.append(candidate)
+                            continue
+                        try:
+                            duration = self._get_m3u8_duration(candidate, headers=manifest_headers)
+                        except Exception as duration_exc:
+                            valid_bestjavporn_candidates.append(candidate)
+                            write_error_log(
+                                "bestjavporn search manifest duration probe failed",
+                                duration_exc,
+                                url=candidate,
+                                source_page=url,
+                            )
+                            continue
+                        if 0.0 < duration < BESTJAVPORN_MIN_FULL_DURATION_SECONDS:
+                            rejected_bestjavporn_candidates.append({"url": candidate, "duration": round(duration, 3)})
+                            continue
+                        valid_bestjavporn_candidates.append(candidate)
+                    if rejected_bestjavporn_candidates:
+                        write_error_log(
+                            "bestjavporn preview manifest rejected in search",
+                            Exception("BestJavPorn returned preview-length HLS manifest"),
+                            source_page=url,
+                            rejected=rejected_bestjavporn_candidates[:3],
+                        )
+                    candidates = valid_bestjavporn_candidates
+                    if not candidates:
+                        result["downloadable_probe_failed"] = True
+                        result["probe_rejected_reason"] = "bestjavporn_preview_manifest"
+                        return result
                 result_site = _video_search_site_for_url(result.get("url", ""))
                 result["candidate_urls"] = _filter_video_search_candidates_by_quality(candidates, source_site=result_site)
                 if not result["candidate_urls"]:
                     result["quality"] = max(_video_search_quality_score(candidate) for candidate in candidates)
                     result["quality_below_min"] = True
                     return result
-                result["quality"] = max(_video_search_quality_score(candidate) for candidate in result["candidate_urls"])
+                result["quality"] = max(
+                    int(result.get("quality") or 0),
+                    max(_video_search_quality_score(candidate) for candidate in result["candidate_urls"]),
+                )
         except Exception:
-            if "jav code pattern" in str(result.get("snippet") or "").lower():
+            result_site = _video_search_site_for_url(result.get("url", ""))
+            parser_resolvable_sites = {"missav", "movieffm.net", "85xvideo.com", "bestjavporn.com", "javdock.com", "supjav.com", "tinyavideo.com", "avbebe.com"}
+            if "jav code pattern" in str(result.get("snippet") or "").lower() and result_site not in parser_resolvable_sites:
                 result["downloadable_probe_failed"] = True
         if not result.get("quality"):
             result["quality"] = _video_search_quality_score(" ".join(str(result.get(key, "")) for key in ("url", "title", "snippet")))
@@ -13210,6 +13566,85 @@ class DownloadManagerApp:
                     append_unique_results(
                         collected,
                         _extract_bestjavporn_video_results(
+                            _response_text_utf8(resp),
+                            base_url=str(getattr(resp, "url", search_url)),
+                        ),
+                    )
+                except Exception:
+                    pass
+            return collected
+
+        def fetch_javdock_results():
+            collected = []
+            if jav_code:
+                code_slug = jav_code.lower()
+                append_unique_results(
+                    collected,
+                    [
+                        {
+                            "url": f"https://www.javdock.com/zh/video/{code_slug}c/",
+                            "title": f"{jav_code} JavDock 中文字幕",
+                            "snippet": "javdock jav code pattern",
+                            "quality": 720,
+                        }
+                    ],
+                )
+            for variant in search_variants:
+                search_slug = urllib.parse.quote(str(variant or "").strip())
+                if not search_slug:
+                    continue
+                for search_url in (
+                    f"https://www.javdock.com/zh/search/{search_slug}/",
+                    "https://www.javdock.com/zh/?" + urllib.parse.urlencode({"s": variant}),
+                ):
+                    try:
+                        resp = c_req.get(
+                            search_url,
+                            impersonate="chrome120",
+                            timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                            headers=_make_ytdlp_http_headers(referer="https://www.javdock.com/zh/"),
+                        )
+                        append_unique_results(
+                            collected,
+                            _extract_javdock_video_results(
+                                _response_text_utf8(resp),
+                                base_url=str(getattr(resp, "url", search_url)),
+                            ),
+                        )
+                    except Exception:
+                        pass
+            return collected
+
+        def fetch_85xvideo_results():
+            collected = []
+            if jav_code:
+                code_slug = jav_code.lower()
+                append_unique_results(
+                    collected,
+                    [
+                        {
+                            "url": f"https://85xvideo.com/{code_slug}/",
+                            "title": f"{jav_code} 85xvideo",
+                            "snippet": "85xvideo jav code permalink seed",
+                            "quality": 720,
+                        }
+                    ],
+                )
+            for variant in search_variants:
+                query = str(variant or "").strip()
+                if not query:
+                    continue
+                search_url = "https://85xvideo.com/?" + urllib.parse.urlencode({"s": query})
+                try:
+                    resp = c_req.get(
+                        search_url,
+                        impersonate="chrome120",
+                        timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                        headers=_make_ytdlp_http_headers(referer="https://85xvideo.com/"),
+                    )
+                    append_unique_results(
+                        collected,
+                        _extract_85xvideo_video_results(
                             _response_text_utf8(resp),
                             base_url=str(getattr(resp, "url", search_url)),
                         ),
@@ -13718,7 +14153,9 @@ class DownloadManagerApp:
                 ("777tv.ai", ("/vod/detail/id/", "/vod/play/id/")),
                 ("av01.media", ("/tw/video/", "/video/")),
                 ("avhd101.com", ("/search", "/vodplay", "/video")),
+                ("85xvideo.com", ("/",)),
                 ("bestjavporn.com", ("/zh/video/", "/video/")),
+                ("javdock.com", ("/zh/video/", "/video/")),
                 ("supjav.com", ("/zh/", "/en/", "/ja/")),
                 ("tinyavideo.com", ("/video/",)),
                 ("ikanbot.com", ("/play/", "/voddetail/", "/vodsearch/")),
@@ -13794,9 +14231,11 @@ class DownloadManagerApp:
         cjk_query = _video_search_text_has_cjk(search_text)
         if jav_code:
             fast_source_jobs = common_fast_jobs + [
+                ("85xvideo", fetch_85xvideo_results),
                 ("hayav", fetch_hayav_results),
                 ("missav", fetch_missav_results),
                 ("bestjavporn", fetch_bestjavporn_results),
+                ("javdock", fetch_javdock_results),
                 ("supjav", fetch_supjav_results),
                 ("tinyavideo", fetch_tinyavideo_results),
                 ("njav", fetch_njav_results),
@@ -13822,7 +14261,9 @@ class DownloadManagerApp:
             if actress_name_search:
                 fast_source_jobs = common_fast_jobs + [
                     ("avjoy", fetch_avjoy_results),
+                    ("85xvideo", fetch_85xvideo_results),
                     ("bestjavporn", fetch_bestjavporn_results),
+                    ("javdock", fetch_javdock_results),
                     ("supjav", fetch_supjav_results),
                     ("tinyavideo", fetch_tinyavideo_results),
                 ("missav", fetch_missav_results),
@@ -13876,6 +14317,7 @@ class DownloadManagerApp:
                     ("olevod", fetch_olevod_results),
                     ("tktube", fetch_tktube_results),
                     ("avjoy", fetch_avjoy_results),
+                    ("85xvideo", fetch_85xvideo_results),
                     ("hohoj", fetch_hohoj_results),
                     ("hayav", fetch_hayav_results),
                     ("missav", fetch_missav_results),
@@ -13946,8 +14388,12 @@ class DownloadManagerApp:
                 for query in (
                     f'"{primary}" "avjoy.me/video"',
                     f'"{primary}" site:avjoy.me/video',
+                    f'"{primary}" "85xvideo.com"',
+                    f'"{primary}" site:85xvideo.com',
                     f'"{primary}" "bestjavporn.com/zh/video"',
                     f'"{primary}" site:bestjavporn.com/zh/video',
+                    f'"{primary}" "javdock.com/zh/video"',
+                    f'"{primary}" site:javdock.com/zh/video',
                     f'"{primary}" "supjav.com/zh"',
                     f'"{primary}" site:supjav.com/zh',
                     f'"{primary}" "avbebe.com/archives"',
@@ -13974,8 +14420,12 @@ class DownloadManagerApp:
                 for query in (
                     f'"{primary}" "avjoy.me/video"',
                     f'"{primary}" site:avjoy.me/video',
+                    f'"{primary}" "85xvideo.com"',
+                    f'"{primary}" site:85xvideo.com',
                     f'"{primary}" "bestjavporn.com/zh/video"',
                     f'"{primary}" site:bestjavporn.com/zh/video',
+                    f'"{primary}" "javdock.com/zh/video"',
+                    f'"{primary}" site:javdock.com/zh/video',
                     f'"{primary}" "supjav.com/zh"',
                     f'"{primary}" site:supjav.com/zh',
                     f'"{primary}" "missav"',
@@ -14112,6 +14562,7 @@ class DownloadManagerApp:
         )
         source_page = target_url
         fallback_urls = []
+        page_refresh_candidates = []
         for index, result in enumerate(results):
             if index == selected_index:
                 continue
@@ -14121,7 +14572,7 @@ class DownloadManagerApp:
             fallback_site = _video_search_site_for_url(fallback_url)
             if _is_slow_external_fallback_url_for_site(fallback_url, fallback_site):
                 continue
-            fallback_urls.append(fallback_url)
+            page_refresh_candidates.append(fallback_url)
         if playlist_entries:
             source_page = target_url
             target_url = playlist_entries[0]["url"]
@@ -14129,7 +14580,7 @@ class DownloadManagerApp:
         elif candidate_urls:
             source_page = target_url
             target_url = candidate_urls[0]
-            fallback_urls = candidate_urls[1:] + fallback_urls
+            fallback_urls = candidate_urls[1:]
         if not target_url:
             return None
         source_site = self._source_site_from_search_url(source_page or target_url)
@@ -14140,6 +14591,7 @@ class DownloadManagerApp:
         extra = self._build_extra_task_data(
             source_page=source_page,
             fallback_urls=_dedupe_download_urls(fallback_urls, primary_url=target_url),
+            page_refresh_candidates=_dedupe_download_urls(page_refresh_candidates, primary_url=source_page),
         )
         return {
             "target_url": target_url,
@@ -15239,6 +15691,8 @@ class DownloadManagerApp:
             return "ffmpeg"
         resume_active = self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
         if resume_active:
+            if not is_mp3 and self._should_try_parallel_hls_segments(target_url, task):
+                return "parallel"
             return "ffmpeg"
         if (
             not is_mp3
@@ -19667,6 +20121,96 @@ class DownloadManagerApp:
             raise last_exc
         return fallback_name, [], ""
 
+    def _fetch_javdock_media_candidates(self, page_url, fallback_name="JavDock"):
+        parsed = urllib.parse.urlsplit(str(page_url or ""))
+        origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'www.javdock.com'}"
+        c_req = get_curl_cffi_requests()
+        last_exc = None
+        for browser in ("chrome120", "chrome110", "edge101"):
+            session = None
+            try:
+                session = self._track_network_session(c_req.Session(impersonate=browser))
+                page_headers = _make_browser_page_headers(referer=origin.rstrip("/") + "/zh/", origin=origin)
+                resp = session.get(page_url, timeout=25, headers=page_headers)
+                page_text = _response_text_utf8(resp)
+                final_page_url = str(getattr(resp, "url", page_url) or page_url)
+                player_match = re.search(r'id=["\']player-wrapper["\'][^>]*', page_text, re.IGNORECASE | re.DOTALL)
+                player_html = player_match.group(0) if player_match else ""
+                video_id_match = re.search(r'\bdata-ts-id=["\']([^"\']+)', player_html, re.IGNORECASE)
+                data_live_match = re.search(r'\bdata-ts-live=["\']([^"\']+)', player_html, re.IGNORECASE | re.DOTALL)
+                data_ep_match = re.search(r'\bdata-ts-ep=["\']([^"\']+)', player_html, re.IGNORECASE)
+                if not video_id_match or not data_live_match:
+                    raise Exception("JavDock player data missing")
+                video_id = html.unescape(video_id_match.group(1)).strip()
+                data_live = html.unescape(data_live_match.group(1)).strip()
+                ep_value = 1
+                if data_ep_match:
+                    try:
+                        ep_value = max(1, int(str(html.unescape(data_ep_match.group(1))).strip()) - 1)
+                    except Exception:
+                        ep_value = 1
+                sources = _javdock_fme(video_id, data_live, encode_sources=True)
+                api_headers = _make_ajax_http_headers(referer=final_page_url, origin=origin)
+                api_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+                api_resp = session.post(
+                    origin.rstrip("/") + "/api/play/",
+                    data={"sources": sources, "ep": ep_value, "ver": "2"},
+                    timeout=25,
+                    headers=api_headers,
+                )
+                payload = api_resp.json() or {}
+                if not payload.get("status") or not payload.get("data"):
+                    raise Exception("JavDock API returned no playable source")
+                player_path = _javdock_fme(video_id, payload.get("data", ""), encode_sources=False)
+                player_url = urllib.parse.urljoin(origin + "/", player_path)
+                player_origin = _url_origin(player_url) or origin
+                player_resp = session.get(
+                    player_url,
+                    timeout=25,
+                    headers=_make_browser_page_headers(referer=final_page_url, origin=origin),
+                )
+                player_text = _response_text_utf8(player_resp)
+                final_player_url = str(getattr(player_resp, "url", player_url) or player_url)
+                config_match = re.search(r'\bdata-config=["\']([^"\']+)', player_text, re.IGNORECASE | re.DOTALL)
+                if not config_match:
+                    raise Exception("JavDock player config missing")
+                _config, source_entries = _bestjavporn_decode_player_config(html.unescape(config_match.group(1)), final_player_url)
+                candidates = []
+                for entry in source_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    candidate = _normalize_download_url(entry.get("file") or entry.get("src") or entry.get("url"))
+                    if candidate:
+                        candidates.append(candidate)
+                expanded_candidates = []
+                hls_headers = _make_hls_http_headers(referer=final_player_url, origin=player_origin)
+                for candidate in _dedupe_download_urls(candidates):
+                    if _looks_like_manifest_url(candidate):
+                        try:
+                            manifest_resp = session.get(candidate, timeout=20, headers=hls_headers)
+                            manifest_text = _response_text_utf8(manifest_resp)
+                            variants = _extract_hls_variant_urls_by_quality(str(getattr(manifest_resp, "url", candidate) or candidate), manifest_text)
+                            if variants:
+                                expanded_candidates.extend(variants)
+                                expanded_candidates.append(candidate)
+                                continue
+                        except Exception:
+                            pass
+                    expanded_candidates.append(candidate)
+                candidates = _dedupe_download_urls(expanded_candidates)
+                title = _clean_javdock_title(_extract_html_title(page_text, fallback_name), final_page_url, fallback_name)
+                if candidates:
+                    return title, candidates, final_player_url
+                raise Exception("JavDock media URL missing")
+            except Exception as exc:
+                last_exc = exc
+            finally:
+                if session is not None:
+                    self._close_network_session(session)
+        if last_exc is not None:
+            raise last_exc
+        return fallback_name, [], ""
+
     def _select_avjoy_media_candidate(self, candidates, failed_urls=None):
         failed_set = set(_dedupe_download_urls(failed_urls or []))
         ordered = [candidate for candidate in _dedupe_download_urls(candidates) if candidate not in failed_set]
@@ -19750,11 +20294,31 @@ class DownloadManagerApp:
                 if is_placeholder:
                     rejected_candidates.append({"url": candidate, **(placeholder_details or {})})
                     continue
+                try:
+                    duration = self._get_m3u8_duration(candidate, headers=manifest_headers)
+                except Exception as duration_exc:
+                    duration = 0.0
+                    write_error_log(
+                        "bestjavporn manifest duration probe failed",
+                        duration_exc,
+                        item_id=item_id,
+                        source_site=site,
+                        url=candidate,
+                    )
+                if 0.0 < duration < BESTJAVPORN_MIN_FULL_DURATION_SECONDS:
+                    rejected_candidates.append(
+                        {
+                            "url": candidate,
+                            "duration": round(duration, 3),
+                            "reason": "preview-length manifest",
+                        }
+                    )
+                    continue
                 valid_candidates.append(candidate)
             if rejected_candidates:
                 write_error_log(
-                    "bestjavporn image placeholder hls rejected",
-                    Exception("BestJavPorn HLS manifest contains image placeholder segments"),
+                    "bestjavporn invalid hls rejected",
+                    Exception("BestJavPorn HLS manifest is placeholder or preview-length"),
                     item_id=item_id,
                     source_site=site,
                     rejected_count=len(rejected_candidates),
@@ -19769,8 +20333,8 @@ class DownloadManagerApp:
                     page_refresh_candidates=[],
                     clear_source_refresh_history=False,
                 )
-                self._set_task_parse_ui(item_id, error="BestJavPorn 目前只回傳 1x1 PNG 圖片分段，沒有可下載影片流")
-                raise DownloadSourceUnavailableException("BestJavPorn HLS source contains image placeholder segments")
+                self._set_task_parse_ui(item_id, error="BestJavPorn 目前只回傳預覽或圖片分段，沒有完整影片流")
+                raise DownloadSourceUnavailableException("BestJavPorn HLS source contains placeholder or preview-length segments")
             routed_candidates = valid_candidates
             media_url = routed_candidates[0]
             fallbacks = [candidate for candidate in routed_candidates[1:] if candidate != media_url]
@@ -21056,6 +21620,7 @@ class DownloadManagerApp:
             "18av",
             "movieffm",
             "avbebe",
+            "85xvideo",
             "bestjavporn",
             "dramasq",
             "gimy",
@@ -21854,7 +22419,12 @@ class DownloadManagerApp:
                 for token in (".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".mp3", ".m4a")
             )
         ]
-        page_refresh_candidates = _task_gimy_page_refresh_candidates(task) if source_site == "gimy" else [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls]
+        stored_page_refresh_candidates = _dedupe_download_urls(_task_field_value(task, "page_refresh_candidates", []))
+        page_refresh_candidates = (
+            _task_gimy_page_refresh_candidates(task)
+            if source_site == "gimy"
+            else _dedupe_download_urls(stored_page_refresh_candidates + [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls])
+        )
         gimy_failed_stream_urls = _task_gimy_failed_stream_urls(task) if source_site == "gimy" else []
         gimy_failed_stream_hosts = _task_gimy_failed_stream_hosts(task) if source_site == "gimy" else []
         detail_refresh_done = bool(_task_field_value(task, "_gimy_detail_refresh_done", False))
@@ -21903,11 +22473,31 @@ class DownloadManagerApp:
                 if is_placeholder:
                     rejected_candidates.append({"url": candidate, **(placeholder_details or {})})
                     continue
+                try:
+                    duration = self._get_m3u8_duration(candidate, headers=manifest_headers)
+                except Exception as duration_exc:
+                    duration = 0.0
+                    write_error_log(
+                        "bestjavporn manifest duration probe failed",
+                        duration_exc,
+                        url=candidate,
+                        item_id=item_id,
+                        source_site=source_site,
+                    )
+                if 0.0 < duration < BESTJAVPORN_MIN_FULL_DURATION_SECONDS:
+                    rejected_candidates.append(
+                        {
+                            "url": candidate,
+                            "duration": round(duration, 3),
+                            "reason": "preview-length manifest",
+                        }
+                    )
+                    continue
                 valid_candidate_urls.append(candidate)
             if rejected_candidates:
                 write_error_log(
-                    "bestjavporn image placeholder hls rejected",
-                    Exception("BestJavPorn HLS manifest contains image placeholder segments"),
+                    "bestjavporn invalid hls rejected",
+                    Exception("BestJavPorn HLS manifest is placeholder or preview-length"),
                     url=url,
                     item_id=item_id,
                     source_site=source_site,
@@ -21923,8 +22513,8 @@ class DownloadManagerApp:
                     page_refresh_candidates=[],
                     clear_source_refresh_history=False,
                 )
-                self._set_task_parse_ui(item_id, error="BestJavPorn 目前只回傳 1x1 PNG 圖片分段，沒有可下載影片流")
-                raise DownloadSourceUnavailableException("BestJavPorn HLS source contains image placeholder segments")
+                self._set_task_parse_ui(item_id, error="BestJavPorn 目前只回傳預覽或圖片分段，沒有完整影片流")
+                raise DownloadSourceUnavailableException("BestJavPorn HLS source contains placeholder or preview-length segments")
             candidate_urls = valid_candidate_urls
             url = candidate_urls[0]
         if source_site in ("gimy", "missav", "movieffm", "xiaoyakankan", "nnyy") and candidate_urls:
@@ -22224,7 +22814,7 @@ class DownloadManagerApp:
         parallel_unsupported_segment_url = ""
         parallel_unsupported_segment_error = None
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("18av", "bestjavporn", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("85xvideo", "18av", "bestjavporn", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -22240,7 +22830,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("18av", "bestjavporn", "gimy", "hayav", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("85xvideo", "18av", "bestjavporn", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -25575,7 +26165,17 @@ class DownloadManagerApp:
                 default_route=default_route,
                 force_ffmpeg=force_ffmpeg,
             )
-            if selected_route in ("ffmpeg", "parallel"):
+            if selected_route == "parallel":
+                # The HLS worker entrypoint tries parallel segment downloading first,
+                # then falls back to ffmpeg only if the site-specific segment path fails.
+                _download_manifest_with_ffmpeg_or_page_fallback(
+                    target_url,
+                    referer=referer,
+                    origin=origin,
+                    fallback_reason="parallel hls download failed; retrying next search result",
+                )
+                return
+            if selected_route == "ffmpeg":
                 _download_manifest_with_ffmpeg_or_page_fallback(target_url, referer=referer, origin=origin)
                 return
             if selected_route == "native":
@@ -29471,6 +30071,55 @@ class DownloadManagerApp:
             )
             raise DownloadSourceUnavailableException(message)
 
+        if _is_85xvideo_video_page_url(url):
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 85xvideo 影片...")
+            site_req = get_curl_cffi_requests()
+            origin = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or '85xvideo.com'}"
+            page_headers = _make_browser_page_headers(referer=origin + "/", origin=origin)
+            page_resp = site_req.get(url, impersonate="chrome120", timeout=25, headers=page_headers)
+            page_text = _response_text_utf8(page_resp)
+            final_page_url = str(getattr(page_resp, "url", url) or url)
+            page_title = _clean_85xvideo_title(_extract_html_title(page_text, short_name or "85xvideo"), final_page_url, short_name or "85xvideo")
+            candidates = _extract_85xvideo_media_candidates(page_text, final_page_url)
+            expanded_candidates = []
+            hls_headers = _make_hls_http_headers(referer=final_page_url, origin=origin)
+            for candidate in _dedupe_download_urls(candidates):
+                if _looks_like_manifest_url(candidate):
+                    try:
+                        manifest_resp = site_req.get(candidate, impersonate="chrome120", timeout=20, headers=hls_headers)
+                        manifest_text = _response_text_utf8(manifest_resp)
+                        variants = _extract_hls_variant_urls_by_quality(str(getattr(manifest_resp, "url", candidate) or candidate), manifest_text)
+                        if variants:
+                            expanded_candidates.extend(variants)
+                            expanded_candidates.append(candidate)
+                            continue
+                    except Exception:
+                        pass
+                expanded_candidates.append(candidate)
+            candidates = _dedupe_download_urls(expanded_candidates)
+            media_url, fallback_urls = _pick_primary_with_fallbacks(candidates, source_site="85xvideo")
+            if not media_url:
+                self._set_task_parse_ui(item_id, error="85xvideo 找不到可下載影片檔案")
+                raise DownloadSourceUnavailableException("85xvideo media URL missing")
+            _set_task_identity(name=page_title, source_site="85xvideo", source_page=final_page_url, fallback_urls=fallback_urls)
+            self._download_routed_media_url(
+                task,
+                item_id,
+                media_url,
+                save_dir,
+                page_title,
+                is_mp3=is_mp3,
+                source_site="85xvideo",
+                fallback_urls=fallback_urls,
+                referer=final_page_url,
+                origin=origin,
+                manifest_downloader=_download_manifest_with_site_strategy,
+                manifest_default_route="ffmpeg",
+                headers=hls_headers,
+                default_ext=".mp4",
+            )
+            return
+
         if _is_bestjavporn_video_page_url(url):
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 BestJavPorn 影片...")
             page_title, candidates, player_url = self._fetch_bestjavporn_media_candidates(url, fallback_name=short_name or "BestJavPorn")
@@ -29489,6 +30138,34 @@ class DownloadManagerApp:
                 page_title,
                 is_mp3=is_mp3,
                 source_site="bestjavporn",
+                fallback_urls=fallback_urls,
+                referer=media_referer,
+                origin=media_origin,
+                manifest_downloader=_download_manifest_with_site_strategy,
+                manifest_default_route="ffmpeg",
+                headers=_make_hls_http_headers(referer=media_referer, origin=media_origin),
+                default_ext=".mp4",
+            )
+            return
+
+        if _is_javdock_video_page_url(url):
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 JavDock 影片...")
+            page_title, candidates, player_url = self._fetch_javdock_media_candidates(url, fallback_name=short_name or "JavDock")
+            media_url, fallback_urls = _pick_primary_with_fallbacks(candidates, source_site="javdock")
+            if not media_url:
+                self._set_task_parse_ui(item_id, error="JavDock 找不到可下載影片檔案")
+                raise DownloadSourceUnavailableException("JavDock media URL missing")
+            _set_task_identity(name=page_title, source_site="javdock", source_page=url, fallback_urls=fallback_urls)
+            media_referer = player_url or url
+            media_origin = _url_origin(media_referer) or f"{parsed_url.scheme}://{parsed_url.netloc}"
+            self._download_routed_media_url(
+                task,
+                item_id,
+                media_url,
+                save_dir,
+                page_title,
+                is_mp3=is_mp3,
+                source_site="javdock",
                 fallback_urls=fallback_urls,
                 referer=media_referer,
                 origin=media_origin,

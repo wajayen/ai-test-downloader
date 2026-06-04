@@ -2,7 +2,7 @@
 
 Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔名 / 番號搜尋、多站備援、續傳、佇列管理與自動封裝為 Windows 較容易播放的 MP4。程式主要整合 `yt-dlp`、`curl_cffi`、`requests`、`ffmpeg`、`ffprobe` 與站台專用解析規則。
 
-目前版本：`20260604-3460`
+目前版本：`20260604-3470`
 
 ## 目前狀態
 
@@ -11,6 +11,10 @@ Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔
 - 編譯流程會先檢查最新執行紀錄，再依 `APP_BUILD` 建置執行檔；符合同步條件時會自動建立 GitHub commit、tag 與 release asset。
 - 已支援多站最高畫質優先選擇；若站台只提供較低畫質或需要登入 / cookies，會依可取得的來源下載。
 - AV01 目前可解析授權 manifest 與 1080p 串流；若 native HLS 產物驗證失敗，會自動回退 ffmpeg 下載。
+- MissAV 舊續傳任務會在啟動載入時重新正規化番號與中文字幕檔名，避免頁面標題亂碼污染任務列表與續傳比對。
+- 番號搜尋會避開 BestJavPorn / JavDock 只回傳短預覽片段的假可下載來源，並保留其他搜尋頁作為自動換源候選。
+- BestJavPorn / JavDock 會解析本頁加密 API 與 player config 取得真正 HLS，避免誤抓推薦卡片的預覽影片。
+- 85xvideo 會解析 WordPress / VideoJS 頁面內的直接 HLS source，並交由既有最高畫質與分段下載流程處理。
 - 部分成人或串流站台會因 CDN、地區、來源失效、Cloudflare 或站方變更而需要重新解析或改走備援搜尋。
 
 ## 主要功能
@@ -33,7 +37,7 @@ Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔
 下列為目前程式碼中已加入直接下載或解析流程的主要來源。實際可用性仍依站台當下播放來源、地區限制與登入狀態而定。
 
 - 一般影片與影集：MovieFFM、Gimy 系列、XiaoyaKankan、小鴨看看、YFSP、NNYY、iQIYI、Dailymotion、YouTube、Bilibili、Anime1、Ani Gamer、Ikanbot、3KOR、DramaSQ、Olevod / OleHDTV、Thanju、99iTV、777TV。
-- 成人影片站台：MissAV、NJAV / NJAVTV、Jable、TKTUBE、18JAV、18AV、AVJoy、AVBebe、GoodAV17、JavFilms、HayAV、BestJavPorn、TinyAVideo、SupJav、AV01、Hanime1 / HanimeOne。
+- 成人影片站台：MissAV、NJAV / NJAVTV、Jable、TKTUBE、18JAV、18AV、AVJoy、AVBebe、GoodAV17、JavFilms、HayAV、85xvideo、BestJavPorn、JavDock、TinyAVideo、SupJav、AV01、Hanime1 / HanimeOne。
 - 社群與平台：Facebook、Instagram、Threads、Twitter / X、TikTok。
 - 免空 / 雲端：MEGA、PikPak。
 
@@ -44,7 +48,7 @@ Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔
 - Anime1 / Ani Gamer
 - MovieFFM / Gimy / XiaoyaKankan / YFSP / NNYY / iQIYI / YouTube / Dailymotion
 - 3KOR / DramaSQ / Olevod / Thanju / Ikanbot / 777TV / 99iTV
-- AVBebe / AVJoy / HayAV / BestJavPorn / TinyAVideo / SupJav / AV01
+- AVBebe / AVJoy / HayAV / 85xvideo / BestJavPorn / JavDock / TinyAVideo / SupJav / AV01
 - MissAV / NJAV / NJAVTV / Jable / JavFilms / 18JAV / 18AV / GoodAV17 / HoHoJ / TKTUBE
 
 搜尋結果若是劇集頁，程式會盡量自動判斷為整季 / 多集下載，而不是只下載單集。
@@ -63,7 +67,7 @@ Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔
 ## 效能與限流
 
 - 全域同來源下載上限預設為 3 個檔案。
-- HLS parallel worker 依站台調整，例如 MovieFFM / Gimy / HayAV / TinyAVideo / SupJav 等站台有較高分段併發。
+- HLS parallel worker 依站台調整，例如 MovieFFM / Gimy / HayAV / 85xvideo / JavDock / TinyAVideo / SupJav 等站台有較高分段併發。
 - yt-dlp fragment 下載預設有重試、fragment retry、檔案存取 retry 與較大的 HTTP chunk。
 - 低速續傳會觸發重新解析，避免卡在失效 CDN 或過慢來源。
 - 對部分站台會優先測試多個 fallback URL，並跳過已知錯誤或失效來源。
