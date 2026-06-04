@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260603-3430"
+APP_BUILD = "20260604-3440"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -212,7 +212,10 @@ def _response_text_utf8(response):
             return -100000
         cjk_count = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", text))
         bad_count = text.count("\ufffd") + len(re.findall(r"[\ue000-\uf8ff]", text))
+        mojibake_count = _mojibake_visible_marker_count(text)
         score = min(len(text), 5000) + cjk_count * 8 - bad_count * 80
+        if mojibake_count >= 3:
+            score -= mojibake_count * 120
         if _looks_like_garbled_text(text):
             score -= 1000
         return score
@@ -308,6 +311,16 @@ def _looks_like_garbled_text(value):
     return (bad_count / max(len(text), 1)) > 0.04
 
 
+def _mojibake_visible_marker_count(value):
+    text = str(value or "")
+    if not text:
+        return 0
+    # Common visible CJK mojibake produced when UTF-8 Chinese/Japanese titles
+    # are decoded as legacy encodings. These characters can look "valid" to a
+    # broad CJK check, so keep this signal separate from replacement chars.
+    return len(re.findall(r"[銝剖典舐皞急尹喳蝡閮雿犖摮撘嚗蝛瘥憟鈭]", text))
+
+
 def _contains_mojibake_noise(value):
     text = str(value or "")
     if not text:
@@ -317,7 +330,12 @@ def _contains_mojibake_noise(value):
         codepoint = ord(char)
         if char == "\ufffd" or codepoint == 0xFFFD or 0x80 <= codepoint <= 0x9F or 0xE000 <= codepoint <= 0xF8FF:
             noisy_count += 1
-    return noisy_count > 0 or text.count("?") >= 2 or _looks_like_garbled_text(text)
+    return (
+        noisy_count > 0
+        or text.count("?") >= 2
+        or _mojibake_visible_marker_count(text) >= 3
+        or _looks_like_garbled_text(text)
+    )
 
 
 def _looks_like_code_only_title(value):
@@ -708,6 +726,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xlzyd.com",
     "52cute.com",
     "turboviplay.com",
+    "121126.com",
     "cdn-centaurus.com",
     "premilkyway.com",
     "ggjav.com",
@@ -780,7 +799,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "movieffm": 32,
     "18av": 32,
     "avbebe": 24,
-    "bestjavporn": 24,
+    "bestjavporn": 36,
     "dramasq": 24,
     "gimy": 24,
     "goodav17": 24,
@@ -823,6 +842,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "turbosplayer.com": 8,
     "turboviplay.com": 48,
     "turbovidhls.com": 48,
+    "121126.com": 48,
     "ggjav.com": 60,
     "surrit.com": 30,
     "streamfastpro": 32,
@@ -836,7 +856,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "cdn2020.com": 48,
     "huabf.com": 48,
     "googleusercontent.com": 1,
-    "tiktokcdn.com": 24,
+    "tiktokcdn.com": 36,
     "ts2ff6yms.com": 48,
     "upload18.org": 24,
 }
@@ -847,6 +867,7 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "premilkyway.com": 144,
     "turboviplay.com": 144,
     "turbovidhls.com": 144,
+    "121126.com": 144,
     "ggjav.com": 120,
     "media-cdn": 48,
     "mxcontent.net": 96,
@@ -854,7 +875,7 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "huabf.com": 144,
     "surrit.com": 90,
     "streamfastpro": 96,
-    "tiktokcdn.com": 72,
+    "tiktokcdn.com": 108,
     "ts2ff6yms.com": 144,
     "upload18.org": 72,
     "baisiweiting.com": 96,
@@ -1187,6 +1208,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg resume segment preserved",
     "parallel hls download started",
     "parallel hls download finished",
+    "parallel hls download interrupted",
     "parallel hls output already finalized",
     "parallel hls concat remux fallback to transport",
     "parallel hls resume complete before download",
@@ -1204,6 +1226,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ggjav hls exhausted page fallback",
     "parallel hls skipped fmp4 playlist",
     "parallel hls skipped huge playlist",
+    "parallel hls skipped unsupported edge segments",
+    "parallel hls google retry later",
     "parallel hls purged invalid resume segments",
     "parallel hls skipped missing leading resume segments",
     "parallel hls resume segments loaded",
@@ -5135,7 +5159,7 @@ def _clean_bestjavporn_title(raw_title, page_url="", fallback_title="BestJavPorn
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = re.sub(r"\s*[-|]\s*BestJavPorn.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
     code = _extract_jav_code(cleaned) or _extract_jav_code(page_url) or _extract_jav_code(fallback_title)
-    if cleaned and not _output_title_is_suspicious_value(cleaned):
+    if cleaned and not _output_title_is_suspicious_value(cleaned) and not _looks_like_garbled_text(cleaned) and not _contains_mojibake_noise(cleaned):
         return cleaned
     return code or str(fallback_title or "BestJavPorn").strip() or "BestJavPorn"
 
@@ -5145,7 +5169,7 @@ def _clean_tinyavideo_title(raw_title, page_url="", fallback_title="TinyAVideo")
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = re.sub(r"\s*[-|]\s*TinyAVideo.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
     code = _extract_jav_code(cleaned) or _extract_jav_code(page_url) or _extract_jav_code(fallback_title)
-    if cleaned and not _output_title_is_suspicious_value(cleaned):
+    if cleaned and not _output_title_is_suspicious_value(cleaned) and not _looks_like_garbled_text(cleaned) and not _contains_mojibake_noise(cleaned):
         return cleaned
     return code or str(fallback_title or "TinyAVideo").strip() or "TinyAVideo"
 
@@ -7226,6 +7250,92 @@ def _av01_manifest_url(video_id, storage_base=""):
     return manifest_url
 
 
+def _av01_storage_heartbeat(storage_base=""):
+    storage_base = str(storage_base or "").strip()
+    if not storage_base:
+        return ""
+    try:
+        return hashlib.sha256(storage_base.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return ""
+
+
+def _av01_authorized_manifest_url(video_id, storage_base="", referer="https://www.av01.media/"):
+    video_id = str(video_id or "").strip()
+    if not video_id:
+        return ""
+    c_req = get_curl_cffi_requests()
+    headers = _make_ytdlp_http_headers(referer=referer or "https://www.av01.media/", origin="https://www.av01.media")
+    geo_resp = c_req.get(
+        "https://files.iw01.xyz/edge/geo.js?json",
+        impersonate="chrome120",
+        timeout=20,
+        headers=headers,
+    )
+    geo_data = geo_resp.json()
+    query = {
+        "token_v2": str(geo_data.get("token_v2") or ""),
+        "expires": str(geo_data.get("expires") or ""),
+        "ip": str(geo_data.get("ip") or ""),
+    }
+    query = {key: value for key, value in query.items() if value}
+    if bool(geo_data.get("comp")):
+        query["comp"] = "true"
+    if not query.get("expires") or not query.get("ip"):
+        return ""
+    access_url = f"https://cdn.av01.tv/api/v1/videos/{video_id}/cdn-access?" + urllib.parse.urlencode(query)
+    access_resp = c_req.get(
+        access_url,
+        impersonate="chrome120",
+        timeout=20,
+        headers=headers,
+    )
+    access_data = access_resp.json()
+    access_token = str(access_data.get("access_token") or "").strip()
+    if not access_token:
+        return ""
+    manifest_query = {}
+    heartbeat = _av01_storage_heartbeat(storage_base)
+    if heartbeat:
+        manifest_query["hb"] = heartbeat
+    manifest_query["access_token"] = access_token
+    master_url = _av01_manifest_url(video_id, storage_base)
+    try:
+        master_resp = c_req.get(
+            master_url,
+            impersonate="chrome120",
+            timeout=20,
+            headers=headers,
+        )
+        variant_url, _variant_attrs = _select_highest_hls_variant_url(master_url, _response_text_utf8(master_resp))
+        if variant_url:
+            parsed_variant = urllib.parse.urlsplit(variant_url)
+            variant_path = parsed_variant.path.split("/manifest/", 1)[-1].lstrip("/")
+            variant_query = dict(urllib.parse.parse_qsl(parsed_variant.query, keep_blank_values=True))
+            variant_query["access_token"] = access_token
+            return f"https://cdn.av01.tv/api/v1/videos/{video_id}/manifest/{variant_path}?" + urllib.parse.urlencode(variant_query)
+    except Exception:
+        pass
+    return f"https://cdn.av01.tv/api/v1/videos/{video_id}/manifest/master.m3u8?" + urllib.parse.urlencode(manifest_query)
+
+
+def _is_av01_authorized_manifest_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(normalized)
+    except Exception:
+        return False
+    host = parsed.netloc.lower()
+    path = (parsed.path or "").lower()
+    return (
+        "cdn.av01.tv" in host
+        and "/api/v1/videos/" in path
+        and "/manifest/" in path
+    )
+
+
 def _av01_manifest_has_real_media(manifest_url, referer="https://www.av01.media/"):
     normalized_manifest = _normalize_download_url(manifest_url)
     if not normalized_manifest:
@@ -7241,18 +7351,20 @@ def _av01_manifest_has_real_media(manifest_url, referer="https://www.av01.media/
         )
         manifest_text = _response_text_utf8(manifest_resp)
         media_playlist_url = normalized_manifest
-        for line in manifest_text.splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                media_playlist_url = _normalize_download_url(urllib.parse.urljoin(normalized_manifest, line))
-                break
-        media_resp = c_req.get(
-            media_playlist_url,
-            impersonate="chrome120",
-            timeout=20,
-            headers=headers,
-        )
-        media_text = _response_text_utf8(media_resp)
+        media_text = manifest_text
+        if "#EXT-X-STREAM-INF" in manifest_text:
+            for line in manifest_text.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    media_playlist_url = _normalize_download_url(urllib.parse.urljoin(normalized_manifest, line))
+                    break
+            media_resp = c_req.get(
+                media_playlist_url,
+                impersonate="chrome120",
+                timeout=20,
+                headers=headers,
+            )
+            media_text = _response_text_utf8(media_resp)
         segment_url = ""
         for line in media_text.splitlines():
             line = line.strip()
@@ -7261,14 +7373,23 @@ def _av01_manifest_has_real_media(manifest_url, referer="https://www.av01.media/
                 break
         if not segment_url:
             return False
+        probe_headers = dict(headers)
+        probe_headers["Range"] = "bytes=0-511"
         segment_resp = c_req.get(
             segment_url,
             impersonate="chrome120",
             timeout=20,
-            headers=headers,
+            headers=probe_headers,
         )
         segment_bytes = bytes(getattr(segment_resp, "content", b"") or b"")
-        return int(getattr(segment_resp, "status_code", 0) or 0) < 400 and len(segment_bytes) >= 4096
+        status_code = int(getattr(segment_resp, "status_code", 0) or 0)
+        content_type = str((getattr(segment_resp, "headers", {}) or {}).get("content-type", "") or "").lower()
+        if status_code >= 400 or not segment_bytes:
+            return False
+        if content_type.startswith("video/") or "octet-stream" in content_type:
+            if segment_bytes.startswith(b"\x47") or b"ftyp" in segment_bytes[:32] or b"moof" in segment_bytes[:32] or b"styp" in segment_bytes[:32]:
+                return True
+        return len(segment_bytes) >= 4096
     except Exception:
         return False
 
@@ -14978,6 +15099,8 @@ class DownloadManagerApp:
         source_site = _task_source_site_name(task)
         if source_site == "bestjavporn" and not is_mp3:
             return "ffmpeg"
+        if source_site == "av01" and not is_mp3 and _is_av01_authorized_manifest_url(target_url):
+            return "native"
         if (
             not is_mp3
             and _should_force_native_hls_before_parallel(target_url, task)
@@ -20825,6 +20948,41 @@ class DownloadManagerApp:
             return True
         except StopDownloadException:
             stop_event.set()
+            try:
+                with completed_lock:
+                    interrupted_completed_segments = int(completed_segments or 0)
+                    interrupted_completed_bytes = int(completed_bytes or 0)
+                    interrupted_completed_duration = float(completed_duration or 0.0)
+                self._save_resume_progress(
+                    progress_path,
+                    interrupted_completed_duration,
+                    source_url=_normalize_download_url(url) or url,
+                    bytes_done=interrupted_completed_bytes,
+                    min_interval_seconds=0.0,
+                    min_bytes_delta=0,
+                )
+                current_state = str(_task_field_value(self.tasks.get(item_id, task), "state", "") or "")
+                self._log_ffmpeg_event(
+                    "parallel hls download interrupted",
+                    Exception("parallel hls interrupted"),
+                    self.tasks.get(item_id, task),
+                    item_id,
+                    media_url,
+                    completed_segments=interrupted_completed_segments,
+                    pending_segments=max(int(total_segments or 0) - interrupted_completed_segments, 0),
+                    completed_bytes=interrupted_completed_bytes,
+                    completed_duration_seconds=round(interrupted_completed_duration, 3),
+                    segments=total_segments,
+                    workers=worker_count,
+                    hls_host=hls_host,
+                    hls_host_active_downloads=hls_host_active_downloads,
+                    hls_host_worker_budget=hls_host_worker_budget,
+                    state=current_state,
+                    shutdown_started=bool(self._shutdown_started),
+                    progress_path=progress_path,
+                )
+            except Exception:
+                pass
             raise
         except RuntimeError as exc:
             stop_event.set()
@@ -25269,7 +25427,9 @@ class DownloadManagerApp:
             )
             video_data = api_resp.json()
             page_title = _av01_title_from_api(video_data, fallback=short_name or "AV01")
-            manifest_url = _av01_manifest_url(video_id, video_data.get("storage_base", ""))
+            manifest_url = _av01_authorized_manifest_url(video_id, video_data.get("storage_base", ""), referer=url)
+            if not manifest_url:
+                manifest_url = _av01_manifest_url(video_id, video_data.get("storage_base", ""))
             if not manifest_url:
                 raise Exception("Failed to build AV01 manifest URL")
             if _av01_manifest_has_real_media(manifest_url, referer=url):
@@ -25281,7 +25441,7 @@ class DownloadManagerApp:
                     fallback_urls=[],
                     referer=url,
                     origin="https://www.av01.media",
-                    default_route="generic",
+                    default_route="native",
                 )
                 return
             jav_code = _extract_jav_code(page_title) or _extract_jav_code(url)
