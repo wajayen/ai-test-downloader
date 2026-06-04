@@ -2,7 +2,7 @@
 
 Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔名 / 番號搜尋、多站備援、續傳、佇列管理與自動封裝為 Windows 較容易播放的 MP4。程式主要整合 `yt-dlp`、`curl_cffi`、`requests`、`ffmpeg`、`ffprobe` 與站台專用解析規則。
 
-目前版本：`20260604-3450`
+目前版本：`20260604-3460`
 
 ## 目前狀態
 
@@ -67,6 +67,8 @@ Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔
 - yt-dlp fragment 下載預設有重試、fragment retry、檔案存取 retry 與較大的 HTTP chunk。
 - 低速續傳會觸發重新解析，避免卡在失效 CDN 或過慢來源。
 - 對部分站台會優先測試多個 fallback URL，並跳過已知錯誤或失效來源。
+- TKTUBE 直接 MP4 會降低單任務 range 連線數，搭配更小 range segments 與站台專屬 timeout，避免同站過高併發造成連線逾時。
+- TKTUBE 標題若含亂碼會回退使用番號，避免下載檔名與續傳狀態被亂碼污染。
 
 ## 日誌與狀態檔
 
@@ -74,6 +76,7 @@ Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔
 - `dist/error.log`：最近錯誤紀錄，最多保留 10 筆。
 - `dist/activity.log`：重要流程紀錄，最多保留 10 筆。
 - `dist/ffmpeg.exe` / `dist/ffprobe.exe`：下載、封裝與媒體驗證工具。
+- 高頻續傳 checkpoint 使用原子寫入但不再產生 `.bak`，避免下載或執行目錄累積大量暫存備份檔。
 
 每次修改程式碼前，應先執行：
 

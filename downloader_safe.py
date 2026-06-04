@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260604-3450"
+APP_BUILD = "20260604-3460"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -809,7 +809,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "ikanbot": 24,
     "jable": 24,
     "missav": 30,
-    "njav": 24,
+    "njav": 36,
     "njavtv": 24,
     "nnyy": 24,
     "olevod": 24,
@@ -860,6 +860,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "tiktokcdn.com": 36,
     "ts2ff6yms.com": 48,
     "upload18.org": 24,
+    "cdn.usex.tube": 36,
 }
 PARALLEL_HLS_HOST_WORKER_BUDGET = 72
 PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
@@ -879,6 +880,7 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "tiktokcdn.com": 108,
     "ts2ff6yms.com": 144,
     "upload18.org": 72,
+    "cdn.usex.tube": 108,
     "baisiweiting.com": 96,
     "cdnlz": 72,
     "gsuus.com": 72,
@@ -1049,13 +1051,17 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "missav": 32,
     "njav": 24,
     "njavtv": 24,
-    "tktube": 24,
+    "tktube": 12,
     "youtube": 20,
 }
 HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
     "media-cdn": 8,
     "mxcontent.net": 16,
 }
+HTTP_MULTIPART_TARGET_PART_SIZE_BY_SITE = {
+    "tktube": 12 * 1024 * 1024,
+}
+HTTP_MULTIPART_TARGET_PART_SIZE_BY_HOST_MARKER = {}
 HTTP_MULTIPART_IMMEDIATE_MIN_BYTES = 2 * 1024 * 1024
 HTTP_MULTIPART_LARGE_FILE_IMMEDIATE_MIN_BYTES = 128 * 1024 * 1024
 HTTP_STREAM_CHUNK_SIZE = 16 * 1024 * 1024
@@ -1064,6 +1070,9 @@ HTTP_FILE_COPY_CHUNK_SIZE = 16 * 1024 * 1024
 HTTP_RANGE_PART_MAX_ATTEMPTS = 6
 HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS = 0.6
 HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS = 6
+HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS_BY_HOST_MARKER = {
+    "tktube.com": 20,
+}
 HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
     "18jav",
     "777tv",
@@ -1096,7 +1105,7 @@ YTDLP_DIRECT_MANIFEST_EXTRACT_SITES = frozenset((
     "18av",
     "hohoj",
 ))
-NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv"))
+NATIVE_HLS_ALWAYS_SITES = frozenset(("99itv", "777tv", "av01"))
 NATIVE_HLS_NEVER_SITES = frozenset(("18av", "jable", "njav", "njavtv", "3kor", "missav"))
 NATIVE_HLS_DISABLED_HOST_MARKERS = ("ggjav",)
 NATIVE_HLS_HOST_MARKERS_BY_SITE = {
@@ -1274,6 +1283,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg near complete resume accepted",
     "ffmpeg preserved resume segment finalized",
     "ffmpeg preserved resume segment finalize failed",
+    "resume sidecar ignored smaller than base",
     "resume invalid partial reset",
     "resume implausible near-complete reset",
     "resume low speed reanalysis requested",
@@ -1942,6 +1952,49 @@ def _normalize_state_entry(entry):
             or _output_title_is_suspicious_value(normalized.get("short_name", ""))
         ):
             normalized["short_name"] = av01_code
+    if source_site == "njav":
+        njav_code = (
+            _extract_jav_code(normalized.get("name", ""))
+            or _extract_jav_code(normalized.get("short_name", ""))
+            or _extract_jav_code(normalized.get("filename", ""))
+            or _extract_jav_code(normalized.get("source_page", ""))
+            or _extract_jav_code(normalized.get("url", ""))
+            or _extract_jav_code(normalized.get("resolved_url", ""))
+        )
+        if njav_code and (
+            _contains_mojibake_noise(normalized.get("name", ""))
+            or _output_title_is_suspicious_value(normalized.get("name", ""))
+        ):
+            normalized["name"] = njav_code
+            name = njav_code
+        if njav_code and (
+            "short_name" not in normalized
+            or _contains_mojibake_noise(normalized.get("short_name", ""))
+            or _output_title_is_suspicious_value(normalized.get("short_name", ""))
+        ):
+            normalized["short_name"] = njav_code
+    if source_site == "tktube":
+        tktube_page_url = normalized.get("source_page", "") or normalized.get("url", "")
+        tktube_code = (
+            _extract_jav_code(normalized.get("name", ""))
+            or _extract_jav_code(normalized.get("short_name", ""))
+            or _extract_jav_code(normalized.get("filename", ""))
+            or _extract_jav_code(normalized.get("temp_filename", ""))
+            or _extract_jav_code(tktube_page_url)
+            or _extract_jav_code(normalized.get("resolved_url", ""))
+        )
+        if tktube_code and (
+            _contains_mojibake_noise(normalized.get("name", ""))
+            or _output_title_is_suspicious_value(normalized.get("name", ""))
+        ):
+            normalized["name"] = tktube_code
+            name = tktube_code
+        if tktube_code and (
+            "short_name" not in normalized
+            or _contains_mojibake_noise(normalized.get("short_name", ""))
+            or _output_title_is_suspicious_value(normalized.get("short_name", ""))
+        ):
+            normalized["short_name"] = tktube_code
     if source_site == "avjoy":
         avjoy_source_page = normalized.get("source_page", "")
         if not avjoy_source_page and _is_avjoy_video_page_url(normalized.get("url", "")):
@@ -5758,7 +5811,10 @@ def _clean_tktube_title(raw_title, page_url="", fallback_title="TKTube"):
     cleaned = re.sub(r"\s+", " ", str(html.unescape(str(raw_title or "")) or "")).strip()
     cleaned = re.sub(r"\s*[-|]\s*TKTube.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
     fallback = str(fallback_title or "TKTube").strip() or "TKTube"
-    if cleaned and not _looks_like_garbled_text(cleaned) and not _output_title_is_suspicious_value(cleaned):
+    stable_code = _extract_jav_code(cleaned) or _extract_jav_code(fallback) or _extract_jav_code(page_url)
+    if cleaned and (_contains_mojibake_noise(cleaned) or _looks_like_garbled_text(cleaned) or _output_title_is_suspicious_value(cleaned)):
+        return stable_code or (fallback if not _contains_mojibake_noise(fallback) else "TKTube")
+    if cleaned:
         return cleaned
     normalized_url = _normalize_download_url(page_url)
     if normalized_url:
@@ -5771,8 +5827,10 @@ def _clean_tktube_title(raw_title, page_url="", fallback_title="TKTube"):
                 tail = segment[segment.upper().find(code.replace("-", " ")) + len(code.replace("-", " ")) :] if code.replace("-", " ") in segment.upper() else ""
                 tail = re.sub(r"\b\d+\b|\b[hl]\b", " ", tail, flags=re.IGNORECASE)
                 tail = re.sub(r"\s+", " ", tail).strip(" -|/,._")
+                if len(tail) <= 2 or _contains_mojibake_noise(tail) or _output_title_is_suspicious_value(tail):
+                    return code
                 candidate = f"{code} {tail}".strip()
-                if candidate and not _looks_like_garbled_text(candidate):
+                if candidate and not _looks_like_garbled_text(candidate) and not _contains_mojibake_noise(candidate):
                     return candidate
         for segment in reversed(segments):
             segment = re.sub(r"[-_]+", " ", segment).strip(" -|/,._")
@@ -7057,8 +7115,9 @@ def _clean_njav_title(title, fallback=""):
     value = re.sub(r"^\s*(?:觀看|Watch)\s+", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+(?:高清免費在線觀看JAV|Watch Online,?\s*nJAV\.com).*$", "", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+", " ", value).strip(" -|")
-    if _looks_like_garbled_text(value):
-        return _extract_jav_code(value) or str(fallback or "").strip() or "NJAV"
+    code = _extract_jav_code(value) or _extract_jav_code(fallback)
+    if _looks_like_garbled_text(value) or _contains_mojibake_noise(value) or _output_title_is_suspicious_value(value):
+        return code or str(fallback or "").strip() or "NJAV"
     return value or str(fallback or "").strip() or "NJAV"
 
 
@@ -8259,7 +8318,7 @@ def save_state_entries(entries):
     return True
 
 
-def _atomic_json_dump(path, payload):
+def _atomic_json_dump(path, payload, keep_backup=True):
     path = os.path.abspath(path)
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
@@ -8277,10 +8336,11 @@ def _atomic_json_dump(path, payload):
         except OSError:
             pass
         raise
-    try:
-        shutil.copyfile(path, f"{path}.bak")
-    except Exception:
-        pass
+    if keep_backup:
+        try:
+            shutil.copyfile(path, f"{path}.bak")
+        except Exception:
+            pass
 
 
 def _load_json_with_backup(path, default):
@@ -8390,6 +8450,17 @@ def _build_ytdlp_route_profile(site):
         "extractor_retries": int(retry_profile.get("extractor_retries", YTDLP_EXTRACTOR_RETRIES)),
         "file_access_retries": int(retry_profile.get("file_access_retries", YTDLP_FILE_ACCESS_RETRIES)),
     }
+
+
+def _http_range_part_timeout_for_url(url):
+    try:
+        host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+    except Exception:
+        host = ""
+    for marker, timeout_seconds in HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS_BY_HOST_MARKER.items():
+        if str(marker or "").lower() in host:
+            return max(float(timeout_seconds or HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS), 1.0)
+    return max(float(HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS), 1.0)
 
 
 def _apply_ytdlp_route_options(ydl_opts, route_options):
@@ -16575,6 +16646,26 @@ class DownloadManagerApp:
         except Exception:
             pass
 
+    def _forget_media_probe_info(self, *paths):
+        if not paths:
+            return
+        keys = []
+        for path in paths:
+            if not path:
+                continue
+            try:
+                keys.append(os.path.normcase(os.path.abspath(str(path))))
+            except Exception:
+                continue
+        if not keys:
+            return
+        try:
+            with self._media_probe_cache_lock:
+                for key in keys:
+                    self._media_probe_cache.pop(key, None)
+        except Exception:
+            pass
+
     def _is_windows_friendly_mp4_info(self, info):
         if not info or not info.get("valid"):
             return False
@@ -16849,8 +16940,36 @@ class DownloadManagerApp:
         try:
             if temp_exists and src_info.get("valid") and dst_info.get("valid"):
                 self._concat_media_files((src_path, dst_path), merged_path)
+                merged_info = self._probe_media_info(merged_path)
+                src_duration = max(float(src_info.get("duration", 0.0) or 0.0), 0.0)
+                dst_duration = max(float(dst_info.get("duration", 0.0) or 0.0), 0.0)
+                merged_duration = max(float(merged_info.get("duration", 0.0) or 0.0), 0.0)
+                if not merged_info.get("valid") or merged_duration + 5.0 < max(src_duration, dst_duration):
+                    raise Exception(
+                        f"merged resume artifact invalid: duration={merged_duration:.3f} "
+                        f"base={src_duration:.3f} segment={dst_duration:.3f}"
+                    )
                 self._move_file_with_retry(merged_path, src_path)
             elif temp_exists and not src_info.get("valid") and dst_info.get("valid"):
+                src_size = int(src_info.get("size") or 0)
+                dst_size = int(dst_info.get("size") or 0)
+                if src_size >= max(dst_size * 2, 64 * 1024 * 1024):
+                    try:
+                        os.remove(dst_path)
+                        self._forget_media_probe_info(dst_path)
+                    except OSError:
+                        pass
+                    write_error_log(
+                        "resume sidecar ignored smaller than base",
+                        Exception("kept larger partial resume base instead of replacing it with a smaller sidecar"),
+                        src_path=src_path,
+                        dst_path=dst_path,
+                        src_size=src_size,
+                        dst_size=dst_size,
+                        src_valid=bool(src_info.get("valid")),
+                        dst_valid=bool(dst_info.get("valid")),
+                    )
+                    return True
                 try:
                     os.remove(src_path)
                 except OSError:
@@ -16887,14 +17006,19 @@ class DownloadManagerApp:
             return True
         except Exception as exc:
             best_candidate = None
+            src_size = int(src_info.get("size") or 0)
+            dst_size = int(dst_info.get("size") or 0)
+            if temp_exists and src_info.get("valid") and src_size >= max(dst_size, 1):
+                best_candidate = src_path
             candidate_paths = []
-            for candidate in (merged_path, src_path, dst_path):
-                if candidate and os.path.exists(candidate):
-                    try:
-                        candidate_paths.append((os.path.getsize(candidate), candidate))
-                    except OSError:
-                        continue
-            if candidate_paths:
+            if best_candidate is None:
+                for candidate in (merged_path, src_path, dst_path):
+                    if candidate and os.path.exists(candidate):
+                        try:
+                            candidate_paths.append((os.path.getsize(candidate), candidate))
+                        except OSError:
+                            continue
+            if best_candidate is None and candidate_paths:
                 candidate_paths.sort(reverse=True)
                 best_candidate = candidate_paths[0][1]
             if best_candidate and best_candidate != src_path:
@@ -16964,6 +17088,7 @@ class DownloadManagerApp:
         for attempt in range(total_attempts):
             try:
                 shutil.move(src_path, dst_path)
+                self._forget_media_probe_info(src_path, dst_path)
                 return True
             except PermissionError as exc:
                 last_error = exc
@@ -16998,8 +17123,10 @@ class DownloadManagerApp:
                 try:
                     if os.path.isdir(cleanup_path) and not os.path.islink(cleanup_path):
                         shutil.rmtree(cleanup_path, ignore_errors=True)
+                        self._forget_media_probe_info(cleanup_path)
                     elif os.path.exists(cleanup_path):
                         os.remove(cleanup_path)
+                        self._forget_media_probe_info(cleanup_path)
                 except OSError:
                     continue
 
@@ -17643,7 +17770,7 @@ class DownloadManagerApp:
             "updated_at": now,
         }
         try:
-            _atomic_json_dump(progress_path, payload)
+            _atomic_json_dump(progress_path, payload, keep_backup=False)
             with self._resume_progress_lock:
                 self._resume_progress_cache[progress_path] = {
                     "seconds": seconds_value,
@@ -18048,6 +18175,7 @@ class DownloadManagerApp:
             or ("avjoy.me" in download_netloc and "media-cdn" in download_netloc)
             or "anime1.me" in download_netloc
         )
+        request_timeout = _http_range_part_timeout_for_url(url)
         expected_size = max(int(expected_total_size if expected_total_size is not None else int(end_byte) - int(start_byte) + 1), 0)
         if prefer_curl_transport:
             c_req = get_curl_cffi_requests()
@@ -18070,7 +18198,7 @@ class DownloadManagerApp:
                             candidate_response = candidate_session.get(
                                 url,
                                 headers=req_headers,
-                                timeout=HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS,
+                                timeout=request_timeout,
                                 stream=True,
                                 verify=False,
                             )
@@ -18125,7 +18253,7 @@ class DownloadManagerApp:
                     self._close_network_session(candidate_session)
             return
         req = urllib.request.Request(url, headers=req_headers)
-        with urllib.request.urlopen(req, timeout=HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS) as resp:
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             status = int(getattr(resp, "status", 0) or resp.getcode() or 0)
             if expected_size > 0 and status != 206:
                 raise Exception(f"HTTP range request returned {status or 'unknown'}")
@@ -19120,10 +19248,16 @@ class DownloadManagerApp:
                     download_host,
                     remaining_size,
                 )
+                segment_count, http_segment_marker, http_target_part_size = self._http_multipart_segment_count_for_transfer(
+                    source_site,
+                    download_host,
+                    remaining_size,
+                    part_count,
+                )
                 multipart_part_count = part_count
                 multipart_host_marker = http_host_marker
                 multipart_remaining_size = remaining_size
-                part_size = max((remaining_end - remaining_start + 1) // part_count, 1)
+                part_size = max((remaining_end - remaining_start + 1) // segment_count, 1)
                 write_error_log(
                     "http multipart download started",
                     Exception("http multipart download started"),
@@ -19135,6 +19269,9 @@ class DownloadManagerApp:
                     host_marker=http_host_marker or None,
                     host_active_downloads=http_host_active_downloads,
                     host_worker_budget=http_host_worker_budget,
+                    segment_count=segment_count,
+                    segment_marker=http_segment_marker or None,
+                    target_part_size=http_target_part_size or None,
                     remaining_size=remaining_size,
                     multipart_resume_part_bytes=multipart_resume_part_bytes,
                     part_size=part_size,
@@ -19146,11 +19283,11 @@ class DownloadManagerApp:
                 part_specs = []
                 try:
                     executor = DaemonThreadPoolExecutor(max_workers=part_count)
-                    for index in range(part_count):
+                    for index in range(segment_count):
                         part_start = remaining_start + index * part_size
                         if part_start > remaining_end:
                             break
-                        part_end = remaining_end if index == part_count - 1 else min(remaining_end, part_start + part_size - 1)
+                        part_end = remaining_end if index == segment_count - 1 else min(remaining_end, part_start + part_size - 1)
                         part_path = self._http_multipart_part_path(out_path, index, part_start, part_end)
                         part_paths.append(part_path)
                         part_specs.append((part_path, part_start, part_end))
@@ -19940,6 +20077,27 @@ class DownloadManagerApp:
             )
             part_count = min(part_count, per_task_part_budget)
         return min(max(2, int(part_count)), 32), host_active_downloads, host_worker_budget, host_marker
+
+    def _http_multipart_segment_count_for_transfer(self, source_site, download_host, remaining_size, worker_count):
+        site = str(source_site or "").strip().lower()
+        host = str(download_host or "").strip().lower()
+        target_part_size = int(HTTP_MULTIPART_TARGET_PART_SIZE_BY_SITE.get(site, 0) or 0)
+        target_marker = ""
+        for marker, marker_part_size in HTTP_MULTIPART_TARGET_PART_SIZE_BY_HOST_MARKER.items():
+            if marker in host:
+                target_marker = marker
+                marker_part_size = int(marker_part_size or 0)
+                target_part_size = min(target_part_size, marker_part_size) if target_part_size > 0 else marker_part_size
+                break
+        try:
+            remaining = max(int(remaining_size or 0), 0)
+        except Exception:
+            remaining = 0
+        worker_count = max(int(worker_count or 1), 1)
+        if remaining <= 0 or target_part_size <= 0:
+            return worker_count, target_marker, 0
+        segment_count = max(worker_count, int((remaining + target_part_size - 1) // target_part_size))
+        return min(max(segment_count, worker_count), 256), target_marker, target_part_size
 
     def _should_try_parallel_hls_segments(self, url, task):
         source_site = _task_source_site_name(task) or _infer_source_site_from_task_urls(
@@ -22436,13 +22594,18 @@ class DownloadManagerApp:
                     resume_seconds = stored_seconds
                     resume_mode = "media_probe_persisted"
                 elif same_resume_target and stored_seconds > resume_seconds:
-                    self._save_resume_progress(
-                        progress_path,
-                        partial_duration,
-                        source_url=resume_key,
-                        bytes_done=partial_size,
-                        force=True,
-                    )
+                    if self._should_prefer_lower_resume_progress(partial_duration, partial_size, stored_seconds, stored_bytes):
+                        self._save_resume_progress(
+                            progress_path,
+                            partial_duration,
+                            source_url=resume_key,
+                            bytes_done=partial_size,
+                            force=True,
+                        )
+                    else:
+                        resume_seconds = stored_seconds
+                        base_bytes = max(partial_size, stored_bytes)
+                        resume_mode = "media_probe_bookmark_protected"
             elif usable_sidecar_only_partial:
                 base_bytes = partial_size
                 resume_seconds = stored_seconds
