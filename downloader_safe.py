@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260605-3480"
+APP_BUILD = "20260605-3490"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -77,6 +77,7 @@ CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
 STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
 ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
 TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
+URL_INPUT_HISTORY_LIMIT = 10
 MAX_DOWNLOADS_PER_DOMAIN = 3
 MAX_ACTIVE_DOWNLOADS_GLOBAL = 12
 STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 3
@@ -111,6 +112,9 @@ SINGLE_INSTANCE_ACQUIRE_RETRY_INTERVAL_SECONDS = 0.2
 FORCED_SHUTDOWN_EXIT_DELAY_SECONDS = 8.0
 FINAL_SHUTDOWN_EXIT_DELAY_SECONDS = 0.35
 SHUTDOWN_BACKGROUND_THREAD_WAIT_SECONDS = 3.0
+SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS = 18.0
+SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS = 120
+SHUTDOWN_NEAR_COMPLETE_HLS_MIN_RATIO = 0.90
 MEDIA_PROBE_CACHE_TTL_SECONDS = 2.5
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 FFMPEG_WINDOWS_FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -871,7 +875,7 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "85xvideo": 48,
-    "movieffm": 32,
+    "movieffm": 48,
     "18av": 32,
     "avbebe": 24,
     "bestjavporn": 36,
@@ -896,12 +900,12 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
 PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "xluuss": 12,
     "ijycnd.com": 32,
-    "huyall.com": 32,
-    "qsstvw.com": 32,
+    "huyall.com": 48,
+    "qsstvw.com": 48,
     "qqqrst.com": 32,
     "ppqrrs.com": 32,
     "bdzybf": 24,
-    "baisiweiting.com": 32,
+    "baisiweiting.com": 48,
     "cdnlz": 24,
     "dytt-see.com": 24,
     "vip.dytt-see.com": 24,
@@ -966,12 +970,18 @@ PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX = 120
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
 PARALLEL_HLS_IN_FLIGHT_MULTIPLIER = 4
 PARALLEL_HLS_SCHEDULER_POLL_SECONDS = 0.2
-PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS = 1800
+PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS = 900
 PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS_BY_HOST = {
+    "baisiweiting.com": 900,
+    "huyall.com": 900,
+    "qsstvw.com": 900,
     "surrit.com": 1500,
 }
-PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS = 32
+PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS = 48
 PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
+    "baisiweiting.com",
+    "huyall.com",
+    "qsstvw.com",
     "ggjav.com",
     "mushroomtrack.com",
     "hls.sb-cd.com",
@@ -1118,7 +1128,7 @@ HTTP_MULTIPART_PART_COUNT_DEFAULT = 20
 HTTP_MULTIPART_MEDIUM_FILE_MAX_PARTS = 16
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "18jav": 20,
-    "anime1": 4,
+    "anime1": 10,
     "avjoy": 12,
     "gimy": 32,
     "goodav17": 32,
@@ -1137,6 +1147,7 @@ HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
     "mxcontent.net": 16,
 }
 HTTP_MULTIPART_TARGET_PART_SIZE_BY_SITE = {
+    "anime1": 16 * 1024 * 1024,
     "tktube": 12 * 1024 * 1024,
 }
 HTTP_MULTIPART_TARGET_PART_SIZE_BY_HOST_MARKER = {}
@@ -1155,6 +1166,7 @@ HTTP_MULTIPART_IMMEDIATE_SITES = frozenset((
     "18jav",
     "777tv",
     "99itv",
+    "anime1",
     "avjoy",
     "gimy",
     "goodav17",
@@ -1303,6 +1315,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls resume complete before download",
     "download task duplicate worker skipped",
     "download task active transfer state repaired",
+    "download task delete requested",
     "download task worker released",
     "retryable persisted error resumed",
     "http media download finished",
@@ -1340,6 +1353,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "m3u8 total bytes invalidated",
     "download concurrency limit changed",
     "http multipart download started",
+    "http multipart fallback to single stream",
     "http range part retry",
     "http media output incomplete",
     "state save skipped disk full",
@@ -1376,6 +1390,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "cached resolved url unavailable",
     "close active download warning shown",
     "close active download warning result",
+    "near complete shutdown grace started",
+    "near complete shutdown grace result",
     "close active download dialog fallback",
     "hayav unavailable external embed skipped",
     "missav parser retry recovered",
@@ -7075,6 +7091,76 @@ def _anime1_url_is_episode_page(url):
     return bool(re.fullmatch(r"/\d+/?", parsed.path or ""))
 
 
+def _extract_anime1_episode_title(page_text, fallback="anime1"):
+    fallback_text = str(fallback or "anime1").strip() or "anime1"
+    title = ""
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", str(page_text or ""), re.IGNORECASE | re.DOTALL)
+    if title_match:
+        title = html.unescape(re.sub(r"<[^>]+>", " ", title_match.group(1)))
+    title = re.sub(r"\s+", " ", title).strip()
+    if title:
+        # Anime titles often contain hyphens, so only strip the real site suffix.
+        title = re.sub(r"\s*(?:&#8211;|–|—|-)\s*Anime1\.(?:me|pw).*$", "", title, flags=re.IGNORECASE).strip()
+        title = re.sub(r"\s*動畫線上看\s*$", "", title, flags=re.IGNORECASE).strip()
+    return title or fallback_text
+
+
+def _pick_anime1_api_media_src(api_data):
+    sources = []
+    raw_sources = None
+    if isinstance(api_data, dict):
+        raw_sources = api_data.get("s") or api_data.get("src") or api_data.get("url")
+    if isinstance(raw_sources, list):
+        sources = raw_sources
+    elif raw_sources:
+        sources = [raw_sources]
+    for item in sources:
+        if isinstance(item, dict):
+            media_type = str(item.get("type") or "").lower()
+            candidate = item.get("src") or item.get("file") or item.get("url")
+            if isinstance(candidate, str) and candidate.strip() and ("video" in media_type or candidate.lower().split("?", 1)[0].endswith(".mp4")):
+                return candidate.strip()
+    for item in sources:
+        candidate = item.get("src") or item.get("file") or item.get("url") if isinstance(item, dict) else item
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _prewarm_anime1_media_session(session, headers):
+    try:
+        page_url = str((headers or {}).get("Referer") or "").strip()
+        if not _anime1_url_is_episode_page(page_url):
+            return False
+        parsed = urllib.parse.urlsplit(page_url)
+        page_origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'anime1.me'}"
+        page_headers = {
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Referer": page_url,
+            "Origin": page_origin,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        page_resp = session.get(page_url, headers=page_headers, timeout=20)
+        match = re.search(r"data-apireq=[\"']([^\"']+)[\"']", getattr(page_resp, "text", "") or "")
+        if not match:
+            return False
+        api_headers = {
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Referer": page_url,
+            "Origin": page_origin,
+            "Accept": "application/json, text/plain, */*",
+        }
+        api_resp = session.post(
+            "https://v.anime1.me/api",
+            data={"d": urllib.parse.unquote(match.group(1))},
+            headers=api_headers,
+            timeout=20,
+        )
+        return int(getattr(api_resp, "status_code", 0) or 0) < 400
+    except Exception:
+        return False
+
+
 def _is_known_non_download_listing_url(url):
     parsed = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or ""))
     host = parsed.netloc.lower()
@@ -8718,8 +8804,11 @@ def save_state_entries(entries):
             continue
         seen.add(normalized_url)
         normalized_entries.append(normalized)
+    if not normalized_entries:
+        _remove_json_state_files(STATE_FILE)
+        return True
     try:
-        _atomic_json_dump(STATE_FILE, normalized_entries)
+        _atomic_json_dump(STATE_FILE, normalized_entries, keep_backup=False)
     except Exception as exc:
         if _is_no_space_left_error(exc):
             write_error_log(
@@ -8731,6 +8820,15 @@ def save_state_entries(entries):
             return False
         raise
     return True
+
+
+def _remove_json_state_files(path):
+    for candidate in (path, f"{path}.bak"):
+        try:
+            if os.path.exists(candidate):
+                os.remove(candidate)
+        except OSError:
+            continue
 
 
 def _atomic_json_dump(path, payload, keep_backup=True):
@@ -9946,6 +10044,8 @@ class DownloadManagerApp:
         self._save_dir_cached = self._normalize_save_dir_value(configured_save_dir)
         self.save_dir_var = tk.StringVar(value=self._save_dir_cached)
         self.format_var = tk.StringVar(value=t("format_video") if "format_video" in I18N_DICT.get(CURRENT_LANG, {}) else "Video")
+        self.url_history = self._load_url_input_history()
+        self._url_history_index = -1
         self.tree = None
         self.ui_throttler = None
         self.throttler = None
@@ -10141,9 +10241,18 @@ class DownloadManagerApp:
         input_frame.columnconfigure(0, weight=1)
         self.new_url_label = tk.Label(input_frame, text=t("new_url"), font=("Microsoft JhengHei UI", 9), bg="#f8fbff", fg="#d96c00")
         self.new_url_label.grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.url_entry = tk.Entry(input_frame, font=("Segoe UI", 9), relief="groove", bd=1)
+        self.url_entry = ttk.Combobox(
+            input_frame,
+            values=self.url_history,
+            state="normal",
+            font=("Segoe UI", 9),
+            style="App.TCombobox",
+        )
+        self.url_entry.set("")
         self.url_entry.grid(row=1, column=0, sticky="ew", ipady=1)
         self.url_entry.bind("<Return>", lambda _event: self.add_new_download())
+        self.url_entry.bind("<Up>", lambda _event: self._select_url_history(-1))
+        self.url_entry.bind("<Down>", lambda _event: self._select_url_history(1))
         make_context_menu(self.url_entry)
         self.format_dropdown = ttk.Combobox(
             input_frame,
@@ -10596,6 +10705,66 @@ class DownloadManagerApp:
         self.save_dir_var.set(normalized)
         save_config({"save_dir": normalized})
 
+    def _load_url_input_history(self):
+        history = []
+        seen = set()
+        raw_history = self.config.get("url_history", [])
+        if not isinstance(raw_history, list):
+            return history
+        for value in raw_history:
+            clean_value = str(value or "").strip()
+            if not clean_value:
+                continue
+            key = clean_value.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            history.append(clean_value)
+            if len(history) >= URL_INPUT_HISTORY_LIMIT:
+                break
+        return history
+
+    def _refresh_url_history_values(self):
+        url_entry = getattr(self, "url_entry", None)
+        if not url_entry:
+            return
+        try:
+            url_entry.configure(values=self.url_history)
+        except Exception:
+            pass
+
+    def _remember_url_input(self, value):
+        clean_value = str(value or "").strip()
+        if not clean_value:
+            return
+        history = [clean_value]
+        clean_key = clean_value.casefold()
+        for old_value in getattr(self, "url_history", []) or []:
+            old_clean = str(old_value or "").strip()
+            if not old_clean or old_clean.casefold() == clean_key:
+                continue
+            history.append(old_clean)
+            if len(history) >= URL_INPUT_HISTORY_LIMIT:
+                break
+        self.url_history = history[:URL_INPUT_HISTORY_LIMIT]
+        self._url_history_index = -1
+        self._refresh_url_history_values()
+        save_config({"url_history": self.url_history})
+
+    def _select_url_history(self, direction):
+        if not getattr(self, "url_history", None):
+            return "break"
+        direction_value = int(direction or 0)
+        if direction_value < 0:
+            self._url_history_index = min(self._url_history_index + 1, len(self.url_history) - 1)
+        else:
+            self._url_history_index = max(self._url_history_index - 1, -1)
+        if self._url_history_index < 0:
+            self._set_url_entry("")
+        else:
+            self._set_url_entry(self.url_history[self._url_history_index])
+        return "break"
+
     def refresh_language_ui(self):
         try:
             self.root.title(f"{t('app_title')} v{APP_BUILD.split('-')[-1]}")
@@ -10812,6 +10981,7 @@ class DownloadManagerApp:
         if not new_url:
             self._show_warning(t("new_url"))
             return
+        self._remember_url_input(raw_input)
 
         format_choice = self.format_var.get() if hasattr(self, "format_var") else ""
         is_mp3 = format_choice == t("format_audio")
@@ -12685,11 +12855,18 @@ class DownloadManagerApp:
         self._schedule_ui_call(lambda msg=message, target=parent: self._show_error(msg, parent=target))
 
     def _clear_url_entry(self):
-        self.url_entry.delete(0, tk.END)
+        self._url_history_index = -1
+        try:
+            self.url_entry.set("")
+        except Exception:
+            self.url_entry.delete(0, tk.END)
 
     def _set_url_entry(self, value):
-        self._clear_url_entry()
-        self.url_entry.insert(0, value)
+        try:
+            self.url_entry.set(str(value or ""))
+        except Exception:
+            self._clear_url_entry()
+            self.url_entry.insert(0, value)
 
     def _show_warning(self, message, parent=None):
         try:
@@ -12846,14 +13023,21 @@ class DownloadManagerApp:
     def _clear_url_entry(self):
         url_entry = getattr(self, "url_entry", None)
         if url_entry:
-            url_entry.delete(0, tk.END)
+            self._url_history_index = -1
+            try:
+                url_entry.set("")
+            except Exception:
+                url_entry.delete(0, tk.END)
 
     def _set_url_entry(self, value):
         url_entry = getattr(self, "url_entry", None)
         if not url_entry:
             return
-        self._clear_url_entry()
-        url_entry.insert(0, value)
+        try:
+            url_entry.set(str(value or ""))
+        except Exception:
+            self._clear_url_entry()
+            url_entry.insert(0, value)
 
     def _start_daemon_thread(self, target, *args, track=True, **kwargs):
         thread_ref = {"thread": None}
@@ -18568,9 +18752,10 @@ class DownloadManagerApp:
                         continue
                 for candidate_session in candidate_sessions:
                     try:
+                        probe_headers = _make_range_http_headers(headers)
                         resp = candidate_session.get(
                             url,
-                            headers=headers,
+                            headers=probe_headers,
                             timeout=20,
                             stream=True,
                             verify=not disable_ssl_verify,
@@ -18812,6 +18997,8 @@ class DownloadManagerApp:
                 for attempt in range(4):
                     for candidate_session in candidate_sessions:
                         try:
+                            if ".v.anime1.me" in download_netloc:
+                                _prewarm_anime1_media_session(candidate_session, req_headers)
                             candidate_response = candidate_session.get(
                                 url,
                                 headers=req_headers,
@@ -19594,7 +19781,7 @@ class DownloadManagerApp:
             return
         self._mark_task_finished(item_id)
 
-    def _download_http_media(self, item_id, url, out_path, headers=None, session=None, mark_finished=True, deferred_finish_reason=""):
+    def _download_http_media(self, item_id, url, out_path, headers=None, session=None, mark_finished=True, deferred_finish_reason="", allow_multipart=True):
         headers = dict(headers or {})
         task = self._ensure_task_can_continue(item_id)
         task = self._ensure_task_active_transfer_state(item_id, task, reason="http_media")
@@ -19673,7 +19860,8 @@ class DownloadManagerApp:
         source_site = _task_source_site_name(task)
         total_size_int = max(int(total_size or 0), 0)
         immediate_multipart = (
-            range_supported
+            allow_multipart
+            and range_supported
             and total_size_int > 0
             and resume_bytes <= 0
             and (
@@ -19792,7 +19980,7 @@ class DownloadManagerApp:
                     if immediate_multipart and not switched_to_multipart:
                         switched_to_multipart = True
                         break
-                    if not switched_to_multipart and range_supported and total_size > 0 and _task_source_site_name(task) != "anime1":
+                    if allow_multipart and not switched_to_multipart and range_supported and total_size > 0 and _task_source_site_name(task) != "anime1":
                         elapsed_probe = time.time() - start_time
                         if elapsed_probe >= HTTP_MULTIPART_TRIGGER_SECONDS:
                             current_speed = max((downloaded - resume_bytes) / max(elapsed_probe, 0.001), 0.0)
@@ -19891,6 +20079,7 @@ class DownloadManagerApp:
                     segment_count=segment_count,
                     segment_marker=http_segment_marker or None,
                     target_part_size=http_target_part_size or None,
+                    target_part_size_mb=(round(http_target_part_size / (1024 * 1024), 2) if http_target_part_size else None),
                     remaining_size=remaining_size,
                     multipart_resume_part_bytes=multipart_resume_part_bytes,
                     part_size=part_size,
@@ -19900,6 +20089,7 @@ class DownloadManagerApp:
                 futures = []
                 executor = None
                 part_specs = []
+                multipart_fallback_exc = None
                 try:
                     executor = DaemonThreadPoolExecutor(max_workers=part_count)
                     for index in range(segment_count):
@@ -19959,7 +20149,11 @@ class DownloadManagerApp:
                                 if stop_state in {"DELETE_REQUESTED", "DELETED"}:
                                     skip_session_close_on_stop = True
                                     raise KeyboardInterrupt()
-                                raise part_error
+                                multipart_fallback_exc = part_error
+                                futures = set()
+                                break
+                        if multipart_fallback_exc is not None:
+                            break
                         now = time.time()
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         elapsed = max(now - start_time, 0.001)
@@ -20002,7 +20196,41 @@ class DownloadManagerApp:
                     expected_part_size = max(part_end - part_start + 1, 0)
                     actual_part_size = self._get_existing_file_size(part_path)
                     if expected_part_size > 0 and actual_part_size != expected_part_size:
-                        raise Exception(f"HTTP multipart part incomplete: expected {expected_part_size}, got {actual_part_size}")
+                        multipart_fallback_exc = Exception(f"HTTP multipart part incomplete: expected {expected_part_size}, got {actual_part_size}")
+                        break
+                if multipart_fallback_exc is not None:
+                    stop_event.set()
+                    for part_path in part_paths:
+                        if os.path.exists(part_path):
+                            try:
+                                os.remove(part_path)
+                            except OSError:
+                                pass
+                    if allow_multipart and not self._shutdown_started:
+                        write_error_log(
+                            "http multipart fallback to single stream",
+                            multipart_fallback_exc,
+                            url=url,
+                            item_id=item_id,
+                            source_site=source_site,
+                            download_host=download_host,
+                            part_count=part_count,
+                            segment_count=segment_count,
+                            output=out_path,
+                            downloaded_bytes=downloaded,
+                            total_size=total_size,
+                        )
+                        return self._download_http_media(
+                            item_id,
+                            url,
+                            out_path,
+                            headers=headers,
+                            session=session,
+                            mark_finished=mark_finished,
+                            deferred_finish_reason=deferred_finish_reason,
+                            allow_multipart=False,
+                        )
+                    raise multipart_fallback_exc
                 with open(out_path, "ab") as main_out:
                     for part_path in part_paths:
                         with open(part_path, "rb") as part_in:
@@ -21857,6 +22085,14 @@ class DownloadManagerApp:
         )
         hls_host_active_downloads = self._active_hls_downloads_for_host(hls_host)
         hls_host_worker_budget = self._hls_host_worker_budget(hls_host)
+        _set_task_aux_fields(
+            task,
+            _parallel_hls_total_segments=int(total_segments),
+            _parallel_hls_completed_segments=int(completed_segments),
+            _parallel_hls_pending_segments=int(pending_segment_count),
+            _parallel_hls_workers=int(worker_count),
+            _parallel_hls_updated_at=time.time(),
+        )
         self._log_ffmpeg_event(
             "parallel hls download started",
             Exception("parallel hls started"),
@@ -21915,6 +22151,14 @@ class DownloadManagerApp:
                 completed_bytes += int(part_size or 0)
                 completed_duration += max(float(segment.get("duration", 0.0) or 0.0), 0.0)
                 completed_segments += 1
+                _set_task_aux_fields(
+                    task,
+                    _parallel_hls_total_segments=int(total_segments),
+                    _parallel_hls_completed_segments=int(completed_segments),
+                    _parallel_hls_pending_segments=max(int(total_segments) - int(completed_segments), 0),
+                    _parallel_hls_workers=int(worker_count),
+                    _parallel_hls_updated_at=time.time(),
+                )
                 now = time.time()
                 elapsed = max(now - started_at, 0.001)
                 speed_bps = completed_bytes / elapsed
@@ -24383,6 +24627,81 @@ class DownloadManagerApp:
             self._save_resume_progress(progress_path, best_seconds, source_url=source_url, bytes_done=best_bytes)
             if existing_progress_path and existing_progress_path != progress_path:
                 self._remove_artifact_paths(existing_progress_path)
+
+    def _near_complete_shutdown_hls_task_ids(self):
+        candidates = []
+        try:
+            with self._active_download_item_ids_lock:
+                active_worker_ids = set(self._active_download_item_ids)
+        except Exception:
+            active_worker_ids = set()
+        for item_id in active_worker_ids:
+            task = self.tasks.get(item_id)
+            if not task:
+                continue
+            state = str(_task_field_value(task, "state", "") or "")
+            if state not in ("DOWNLOADING", "PAUSE_REQUESTED"):
+                continue
+            try:
+                total_segments = int(_task_field_value(task, "_parallel_hls_total_segments", 0) or 0)
+                completed_segments = int(_task_field_value(task, "_parallel_hls_completed_segments", 0) or 0)
+                pending_segments = int(_task_field_value(task, "_parallel_hls_pending_segments", 0) or 0)
+                worker_count = int(_task_field_value(task, "_parallel_hls_workers", 1) or 1)
+            except Exception:
+                continue
+            if total_segments <= 0 or completed_segments <= 0:
+                continue
+            if pending_segments <= 0:
+                candidates.append(item_id)
+                continue
+            completion_ratio = completed_segments / max(total_segments, 1)
+            pending_limit = max(int(SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS), worker_count * 2)
+            if completion_ratio >= float(SHUTDOWN_NEAR_COMPLETE_HLS_MIN_RATIO) and pending_segments <= pending_limit:
+                candidates.append(item_id)
+        return candidates
+
+    def _wait_for_near_complete_shutdown_downloads(self):
+        candidate_ids = self._near_complete_shutdown_hls_task_ids()
+        if not candidate_ids:
+            return False
+        started_at = time.time()
+        deadline = started_at + max(float(SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS or 0.0), 0.0)
+        try:
+            write_error_log(
+                "near complete shutdown grace started",
+                Exception("near complete shutdown grace started"),
+                item_ids=", ".join(candidate_ids),
+                timeout_seconds=SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS,
+            )
+        except Exception:
+            pass
+        completed = False
+        while time.time() < deadline:
+            remaining = self._near_complete_shutdown_hls_task_ids()
+            if not remaining:
+                completed = True
+                break
+            try:
+                with self._active_download_item_ids_lock:
+                    still_active = any(item_id in self._active_download_item_ids for item_id in remaining)
+                if not still_active:
+                    completed = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.25)
+        try:
+            write_error_log(
+                "near complete shutdown grace result",
+                Exception("near complete shutdown grace result"),
+                item_ids=", ".join(candidate_ids),
+                completed=bool(completed),
+                elapsed_seconds=round(time.time() - started_at, 3),
+                remaining_item_ids=", ".join(self._near_complete_shutdown_hls_task_ids()),
+            )
+        except Exception:
+            pass
+        return completed
 
     def _prepare_shutdown_resume_state(self):
         self._request_shutdown_stop_for_active_tasks()
@@ -31016,10 +31335,7 @@ class DownloadManagerApp:
                 page_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
                 page_headers = {"Referer": page_url, "Origin": page_origin, "User-Agent": DEFAULT_USER_AGENT}
                 resp = anime1_session.get(page_url, timeout=15, headers=page_headers)
-                title_m = re.search(r"<title>(.*?)(?:\s*&#8211;|\s*\u2013|\s*-)", resp.text, re.IGNORECASE | re.DOTALL)
-                clean_title = short_name
-                if title_m:
-                    clean_title = html.unescape(title_m.group(1).strip())
+                clean_title = _extract_anime1_episode_title(resp.text, fallback=short_name)
                 m_apireq = re.search(r"data-apireq=[\"']([^\"']+)[\"']", resp.text)
                 if m_apireq:
                     data_req = urllib.parse.unquote(m_apireq.group(1))
@@ -31027,26 +31343,17 @@ class DownloadManagerApp:
                     api_data = api_resp.json()
                     if "s" not in api_data and not api_data.get("src"):
                         raise Exception("Anime1 API response did not contain a source URL")
-                    v_src = api_data.get("s", api_data.get("src", ""))
-                    if isinstance(v_src, list):
-                        picked = ""
-                        for item in v_src:
-                            if isinstance(item, dict):
-                                candidate = item.get("src") or item.get("file") or item.get("url")
-                            else:
-                                candidate = item
-                            if isinstance(candidate, str) and candidate.strip():
-                                picked = candidate.strip()
-                                break
-                        v_src = picked
+                    v_src = _pick_anime1_api_media_src(api_data)
                     if v_src.startswith("//"):
                         v_src = "https:" + v_src
                     url = v_src
-                    out_name = clean_title + ".mp4"
+                    out_name = _safe_output_stem(clean_title, fallback=short_name) + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
+                    media_headers = _make_browser_page_headers(referer=page_url, origin=page_origin)
+                    media_headers.update({"Accept": "*/*", "Sec-Fetch-Dest": "video", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Site": "cross-site"})
                     self._set_task_named_column_text(item_id, "name", out_name)
                     self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
-                    self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
+                    self._download_http_media(item_id, url, out_path, headers=media_headers, session=anime1_session)
                     return
                 direct_mp4 = re.search(r'<source[^>]+src=["\']([^"\']+\.mp4[^"\']*)["\']', resp.text, re.IGNORECASE)
                 if direct_mp4:
@@ -31054,11 +31361,13 @@ class DownloadManagerApp:
                     if v_src.startswith("//"):
                         v_src = "https:" + v_src
                     url = v_src
-                    out_name = clean_title + ".mp4"
+                    out_name = _safe_output_stem(clean_title, fallback=short_name) + ".mp4"
                     out_path = os.path.join(save_dir, out_name)
+                    media_headers = _make_browser_page_headers(referer=page_url, origin=page_origin)
+                    media_headers.update({"Accept": "*/*", "Sec-Fetch-Dest": "video", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Site": "cross-site"})
                     self._set_task_named_column_text(item_id, "name", out_name)
                     self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址"))
-                    self._download_http_media(item_id, url, out_path, headers=page_headers, session=anime1_session)
+                    self._download_http_media(item_id, url, out_path, headers=media_headers, session=anime1_session)
                     return
                 direct_m3u8 = re.search(r'(https?://[^\s"\'\\]+(?:surrit\.com|[^"\']+)\.m3u8[^\s"\']*)', resp.text)
                 if direct_m3u8:
@@ -31244,6 +31553,7 @@ class DownloadManagerApp:
         if current_downloading > 0:
             if self._ask_close_downloads_confirmation(t("msg_close_warn", count=current_downloading), active_count=current_downloading, parent=self.root):
                 try:
+                    self._wait_for_near_complete_shutdown_downloads()
                     self._shutdown_started = True
                     self._signal_transfer_stop_events()
                     self._prepare_shutdown_resume_state()
