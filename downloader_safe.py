@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260605-3490"
+APP_BUILD = "20260606-3500"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1292,6 +1292,13 @@ MEDIA_DOWNLOAD_RETRY_MARKERS = (
 _ERROR_LOG_RECENT = {}
 ERROR_LOG_MAX_ENTRIES = 10
 TRACE_LOG_MAX_ENTRIES = 10
+LOG_ASCII_MIRROR_KEYS = frozenset((
+    "filename",
+    "final_path",
+    "output",
+    "path",
+    "temp_filename",
+))
 TRACE_LOG_CONTEXTS = frozenset((
     "app start",
     "app shutdown finalized",
@@ -1314,6 +1321,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls concat remux fallback to transport",
     "parallel hls resume complete before download",
     "download task duplicate worker skipped",
+    "download worker skipped during shutdown",
     "download task active transfer state repaired",
     "download task delete requested",
     "download task worker released",
@@ -1333,6 +1341,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls purged invalid resume segments",
     "parallel hls skipped missing leading resume segments",
     "parallel hls resume segments loaded",
+    "ggjav hls exhausted search fallback",
     "startup resume temp path prepared",
     "completed output renamed",
     "existing output rejected",
@@ -1395,6 +1404,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "close active download dialog fallback",
     "hayav unavailable external embed skipped",
     "missav parser retry recovered",
+    "anime1 custom parser fallback",
+    "anime1 source retry after media failure",
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
     "dead external source refresh",
@@ -9738,6 +9749,23 @@ def create_taiwan_map_icon():
     return None
 
 
+def _log_entry_context(entry):
+    first_line = str(entry or "").splitlines()[0].strip() if str(entry or "").splitlines() else ""
+    if first_line.startswith("[") and "] " in first_line:
+        return first_line.split("] ", 1)[1].strip()
+    return first_line
+
+
+def _log_ascii_mirror(value):
+    text = str(value or "").replace("\x00", "")
+    if not text or text.isascii():
+        return ""
+    try:
+        return text.encode("unicode_escape", errors="backslashreplace").decode("ascii", errors="replace")
+    except Exception:
+        return ""
+
+
 def _trim_delimited_log_entries(log_path, max_entries):
     if max_entries <= 0:
         return
@@ -9746,7 +9774,13 @@ def _trim_delimited_log_entries(log_path, max_entries):
         with open(log_path, "r", encoding="utf-8") as f:
             log_text = f.read().replace("\x00", "")
         raw_entries = [chunk.strip() for chunk in log_text.split(delimiter_line) if chunk.strip()]
-        if len(raw_entries) <= max_entries:
+        original_count = len(raw_entries)
+        if os.path.abspath(str(log_path or "")) == os.path.abspath(ERROR_LOG_FILE):
+            raw_entries = [
+                entry for entry in raw_entries
+                if _log_entry_context(entry) not in TRACE_LOG_CONTEXTS
+            ]
+        if len(raw_entries) <= max_entries and len(raw_entries) == original_count:
             return
         kept_entries = raw_entries[-max_entries:]
         normalized_text = ""
@@ -9793,6 +9827,10 @@ def write_error_log(context, exc, **extra):
                 if key in ("original_error", "reason", "message"):
                     safe_value = _summarize_log_exception(safe_value)
                 lines.append(f"{key}: {safe_value}")
+                if key in LOG_ASCII_MIRROR_KEYS:
+                    ascii_value = _log_ascii_mirror(safe_value)
+                    if ascii_value:
+                        lines.append(f"{key}_ascii: {ascii_value}")
             if not trace_only:
                 lines.append("traceback:")
                 lines.append("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).replace("\x00", "").rstrip())
@@ -9801,6 +9839,8 @@ def write_error_log(context, exc, **extra):
                 f.write("\n".join(lines).replace("\x00", "") + "\n")
             max_entries = TRACE_LOG_MAX_ENTRIES if log_path == TRACE_LOG_FILE else ERROR_LOG_MAX_ENTRIES
             _trim_delimited_log_entries(log_path, max_entries)
+            if trace_only:
+                _trim_delimited_log_entries(ERROR_LOG_FILE, ERROR_LOG_MAX_ENTRIES)
     except Exception:
         return
 
@@ -10075,6 +10115,7 @@ class DownloadManagerApp:
         self._queue_process_scheduled = False
         self._last_overview_text = None
         self._shutdown_started = False
+        self._shutdown_queue_blocked = False
         self._shutdown_finalized = False
         self._forced_exit_timer = None
         self._final_exit_timer = None
@@ -13232,6 +13273,19 @@ class DownloadManagerApp:
 
     def _download_task_worker_entry(self, url, item_id, save_dir, use_impersonate, is_mp3=False):
         try:
+            if getattr(self, "_shutdown_started", False) or getattr(self, "_shutdown_queue_blocked", False):
+                task = self.tasks.get(item_id, {})
+                if task and str(_task_field_value(task, "state", "") or "") not in TERMINAL_TASK_STATES:
+                    _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, resume_requested=True, _manual_pause_requested=False)
+                    self._update_task_state_entry(task, state="PAUSED", resume_requested=True, _stop_reason=None)
+                write_error_log(
+                    "download worker skipped during shutdown",
+                    Exception("queued download worker skipped because shutdown is in progress"),
+                    item_id=item_id,
+                    url=url,
+                    source_site=_task_source_site_name(task) or None,
+                )
+                return
             self._ensure_task_active_transfer_state(item_id, reason="worker_entry")
             self.download_task(url, item_id, save_dir, use_impersonate, is_mp3)
         finally:
@@ -19859,19 +19913,21 @@ class DownloadManagerApp:
             resume_bytes = 0
         source_site = _task_source_site_name(task)
         total_size_int = max(int(total_size or 0), 0)
+        resume_bytes_int = max(int(resume_bytes or 0), 0)
+        remaining_after_resume = max(total_size_int - resume_bytes_int, 0)
         immediate_multipart = (
             allow_multipart
             and range_supported
             and total_size_int > 0
-            and resume_bytes <= 0
+            and remaining_after_resume > HTTP_MULTIPART_MIN_REMAINING_BYTES
             and (
                 (
                     source_site in HTTP_MULTIPART_IMMEDIATE_SITES
-                    and total_size_int >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
+                    and remaining_after_resume >= HTTP_MULTIPART_IMMEDIATE_MIN_BYTES
                 )
                 or (
                     source_site != "anime1"
-                    and total_size_int >= HTTP_MULTIPART_LARGE_FILE_IMMEDIATE_MIN_BYTES
+                    and remaining_after_resume >= HTTP_MULTIPART_LARGE_FILE_IMMEDIATE_MIN_BYTES
                 )
             )
         )
@@ -20295,6 +20351,10 @@ class DownloadManagerApp:
             final_size = self._get_existing_file_size(out_path)
         task_state_after_download = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
         final_task_filename = str(_task_field_value(self.tasks.get(item_id, {}), "filename", "") or "").strip()
+        session_downloaded_bytes = max(int(final_size or 0) - int(resume_bytes or 0) - int(multipart_resume_part_bytes or 0), 0)
+        session_average_speed_bps = int(session_downloaded_bytes / elapsed_seconds) if session_downloaded_bytes > 0 else 0
+        output_effective_average_speed_bps = int(final_size / elapsed_seconds) if final_size > 0 else 0
+        _set_task_aux_fields(task, _last_speed_bps=max(float(session_average_speed_bps or 0), 0.0))
         try:
             output_is_task_file = bool(
                 final_task_filename
@@ -20318,7 +20378,9 @@ class DownloadManagerApp:
             output=out_path,
             bytes=final_size,
             elapsed_seconds=round(elapsed_seconds, 3),
-            average_speed_bps=int(final_size / elapsed_seconds) if final_size > 0 else 0,
+            session_downloaded_bytes=session_downloaded_bytes,
+            session_average_speed_bps=session_average_speed_bps,
+            output_effective_average_speed_bps=output_effective_average_speed_bps,
             mark_finished=bool(mark_finished),
             deferred_finish_reason=(None if mark_finished else (str(deferred_finish_reason or "").strip() or "caller will validate and finalize output")),
             output_is_task_file=output_is_task_file,
@@ -22077,6 +22139,8 @@ class DownloadManagerApp:
 
         pending_segments = [segment for segment in segments if int(segment["index"]) not in completed_segment_indexes]
         pending_segment_count = len(pending_segments)
+        session_start_completed_bytes = int(completed_bytes or 0)
+        session_start_completed_segments = int(completed_segments or 0)
         worker_plan_segments = pending_segments if pending_segments else segments
         worker_plan = self._parallel_hls_worker_plan(source_site, media_url, worker_plan_segments)
         worker_count = min(
@@ -22321,8 +22385,11 @@ class DownloadManagerApp:
             logged_output_path = self._task_output_path_or_default(task, out_path)
             logged_output_size = self._get_existing_file_size(logged_output_path)
             elapsed_seconds = max(time.time() - started_at, 0.001)
-            average_speed_bps = int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0
-            _set_task_aux_fields(task, _last_speed_bps=max(float(average_speed_bps or 0), 0.0))
+            session_segment_bytes = max(int(completed_bytes or 0) - session_start_completed_bytes, 0)
+            session_completed_segments = max(int(completed_segments or 0) - session_start_completed_segments, 0)
+            session_segment_average_speed_bps = int(session_segment_bytes / elapsed_seconds) if session_segment_bytes > 0 else 0
+            output_effective_average_speed_bps = int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0
+            _set_task_aux_fields(task, _last_speed_bps=max(float(session_segment_average_speed_bps or 0), 0.0))
             self._log_ffmpeg_event(
                 "parallel hls download finished",
                 Exception("parallel hls finished"),
@@ -22338,7 +22405,10 @@ class DownloadManagerApp:
                 hls_host_worker_budget=hls_host_worker_budget,
                 remux_strategy=remux_strategy,
                 elapsed_seconds=round(elapsed_seconds, 3),
-                average_speed_bps=average_speed_bps,
+                session_segment_bytes=session_segment_bytes,
+                session_completed_segments=session_completed_segments,
+                session_segment_average_speed_bps=session_segment_average_speed_bps,
+                output_effective_average_speed_bps=output_effective_average_speed_bps,
             )
             return True
         except StopDownloadException:
@@ -24962,7 +25032,7 @@ class DownloadManagerApp:
             return
 
     def _process_queue(self):
-        if self._shutdown_started:
+        if self._shutdown_started or getattr(self, "_shutdown_queue_blocked", False):
             return
         domain_limit = self._effective_domain_download_limit()
         global_limit = self._effective_global_download_limit()
@@ -24993,6 +25063,8 @@ class DownloadManagerApp:
                 queued_items.append(item_id)
         self._log_domain_limit_change(domain_limit, sum(domain_counts.values()), len(queued_items), global_limit=global_limit)
         for item_id in queued_items:
+            if self._shutdown_started or getattr(self, "_shutdown_queue_blocked", False):
+                return
             task = self.tasks[item_id]
             if self._download_worker_active(item_id):
                 continue
@@ -31418,12 +31490,13 @@ class DownloadManagerApp:
                 if self._shutdown_started or str(_task_field_value(task, "state", "") or "") in ("PAUSE_REQUESTED", "DELETED", "DELETE_REQUESTED"):
                     if _is_session_closed_error(e):
                         raise StopDownloadException("application is shutting down")
-                write_error_log("anime1 custom parser fallback", e, page_url=page_url, item_id=item_id, use_impersonate=use_impersonate)
                 if not page_url or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", _normalize_download_url(page_url) or ""):
+                    write_error_log("anime1 custom parser failure", e, page_url=page_url, item_id=item_id, use_impersonate=use_impersonate)
                     raise
                 if self._is_retryable_media_download_error(e):
                     retry_attempts = int(_task_field_value(task, "_anime1_source_retry_attempts", 0) or 0)
                     if retry_attempts < 3:
+                        write_error_log("anime1 custom parser fallback", e, page_url=page_url, item_id=item_id, use_impersonate=use_impersonate)
                         _set_task_aux_fields(task, _anime1_source_retry_attempts=retry_attempts + 1)
                         self._set_cached_resolved_link_state(
                             task,
@@ -31442,6 +31515,7 @@ class DownloadManagerApp:
                         self._set_task_parse_ui(item_id, message="Anime1 直連已失效，重新解析來源頁...")
                         self._download_task_internal(page_url, item_id, save_dir, use_impersonate, is_mp3)
                         return
+                write_error_log("anime1 custom parser failure", e, page_url=page_url, item_id=item_id, use_impersonate=use_impersonate)
                 self._mark_task_error_state(item_id, e)
                 return
 
@@ -31553,6 +31627,7 @@ class DownloadManagerApp:
         if current_downloading > 0:
             if self._ask_close_downloads_confirmation(t("msg_close_warn", count=current_downloading), active_count=current_downloading, parent=self.root):
                 try:
+                    self._shutdown_queue_blocked = True
                     self._wait_for_near_complete_shutdown_downloads()
                     self._shutdown_started = True
                     self._signal_transfer_stop_events()
