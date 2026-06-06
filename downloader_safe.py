@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260606-3500"
+APP_BUILD = "20260606-3510"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1146,6 +1146,17 @@ HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
     "media-cdn": 12,
     "mxcontent.net": 16,
 }
+HTTP_MULTIPART_SOURCE_WORKER_BUDGET_DEFAULT = 36
+HTTP_MULTIPART_SOURCE_WORKER_BUDGET_BY_SITE = {
+    "anime1": 24,
+    "gimy": 48,
+    "goodav17": 48,
+    "hohoj": 36,
+    "missav": 48,
+    "movieffm": 48,
+    "tktube": 24,
+    "youtube": 24,
+}
 HTTP_MULTIPART_TARGET_PART_SIZE_BY_SITE = {
     "anime1": 16 * 1024 * 1024,
     "tktube": 12 * 1024 * 1024,
@@ -1363,6 +1374,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "download concurrency limit changed",
     "http multipart download started",
     "http multipart fallback to single stream",
+    "http multipart parts preserved for resume",
     "http range part retry",
     "http media output incomplete",
     "state save skipped disk full",
@@ -18952,6 +18964,41 @@ class DownloadManagerApp:
                 total += min(size, expected_size) if expected_size > 0 else size
         return total
 
+    def _http_multipart_existing_part_bytes_for_specs(self, part_specs):
+        total = 0
+        for part_path, part_start, part_end in part_specs or []:
+            expected_size = max(int(part_end) - int(part_start) + 1, 0)
+            if expected_size <= 0:
+                continue
+            try:
+                size = os.path.getsize(part_path)
+            except OSError:
+                continue
+            if 0 < size <= expected_size:
+                total += size
+        return total
+
+    def _remove_stale_http_multipart_parts(self, out_path, keep_paths):
+        if not out_path:
+            return
+        prefix = self._http_multipart_part_path(out_path, "")
+        keep = {
+            os.path.normcase(os.path.abspath(str(path)))
+            for path in (keep_paths or [])
+            if path
+        }
+        for part_path in glob.glob(prefix + "*"):
+            try:
+                part_key = os.path.normcase(os.path.abspath(str(part_path)))
+            except Exception:
+                part_key = str(part_path)
+            if part_key in keep:
+                continue
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
         expected_size = max(int(end_byte) - int(start_byte) + 1, 0)
         last_exc = None
@@ -20001,6 +20048,9 @@ class DownloadManagerApp:
         multipart_part_count = 0
         multipart_host_marker = ""
         multipart_remaining_size = 0
+        multipart_source_active_downloads = 0
+        multipart_source_worker_budget = 0
+        multipart_segment_count = 0
         downloaded = resume_bytes
         start_time = time.time()
         last_update_time = start_time
@@ -20100,13 +20150,20 @@ class DownloadManagerApp:
                 stop_event = threading.Event()
                 self._register_http_multipart_stop_event(item_id, stop_event)
                 part_paths = []
+                part_specs = []
                 remaining_start = downloaded
                 remaining_end = total_size - 1
                 remaining_size = max(total_size - downloaded, 0)
-                multipart_resume_part_bytes = self._http_multipart_existing_part_bytes(out_path)
                 source_site = _task_source_site_name(task)
                 download_host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
-                part_count, http_host_active_downloads, http_host_worker_budget, http_host_marker = self._http_multipart_part_count_for_transfer(
+                (
+                    part_count,
+                    http_host_active_downloads,
+                    http_host_worker_budget,
+                    http_host_marker,
+                    http_source_active_downloads,
+                    http_source_worker_budget,
+                ) = self._http_multipart_part_count_for_transfer(
                     source_site,
                     download_host,
                     remaining_size,
@@ -20120,7 +20177,21 @@ class DownloadManagerApp:
                 multipart_part_count = part_count
                 multipart_host_marker = http_host_marker
                 multipart_remaining_size = remaining_size
+                multipart_source_active_downloads = http_source_active_downloads
+                multipart_source_worker_budget = http_source_worker_budget
+                multipart_segment_count = segment_count
                 part_size = max((remaining_end - remaining_start + 1) // segment_count, 1)
+                for index in range(segment_count):
+                    part_start = remaining_start + index * part_size
+                    if part_start > remaining_end:
+                        break
+                    part_end = remaining_end if index == segment_count - 1 else min(remaining_end, part_start + part_size - 1)
+                    part_path = self._http_multipart_part_path(out_path, index, part_start, part_end)
+                    part_paths.append(part_path)
+                    part_specs.append((part_path, part_start, part_end))
+                self._remove_stale_http_multipart_parts(out_path, part_paths)
+                multipart_resume_part_bytes = self._http_multipart_existing_part_bytes_for_specs(part_specs)
+                multipart_session_start_bytes = max(int(resume_bytes or 0) + int(multipart_resume_part_bytes or 0), 0)
                 write_error_log(
                     "http multipart download started",
                     Exception("http multipart download started"),
@@ -20132,6 +20203,8 @@ class DownloadManagerApp:
                     host_marker=http_host_marker or None,
                     host_active_downloads=http_host_active_downloads,
                     host_worker_budget=http_host_worker_budget,
+                    source_active_downloads=http_source_active_downloads,
+                    source_worker_budget=http_source_worker_budget,
                     segment_count=segment_count,
                     segment_marker=http_segment_marker or None,
                     target_part_size=http_target_part_size or None,
@@ -20144,21 +20217,15 @@ class DownloadManagerApp:
                 )
                 futures = []
                 executor = None
-                part_specs = []
                 multipart_fallback_exc = None
                 try:
                     executor = DaemonThreadPoolExecutor(max_workers=part_count)
-                    for index in range(segment_count):
-                        part_start = remaining_start + index * part_size
-                        if part_start > remaining_end:
-                            break
-                        part_end = remaining_end if index == segment_count - 1 else min(remaining_end, part_start + part_size - 1)
-                        part_path = self._http_multipart_part_path(out_path, index, part_start, part_end)
-                        part_paths.append(part_path)
-                        part_specs.append((part_path, part_start, part_end))
+                    for part_path, part_start, part_end in part_specs:
                         box = {"bytes": 0}
                         progress_boxes.append(box)
                         futures.append(executor.submit(self._download_http_range_part, url, headers, part_start, part_end, part_path, box, stop_event))
+                    last_multipart_update_time = time.time()
+                    last_multipart_update_bytes = max(downloaded + sum(box["bytes"] for box in progress_boxes), multipart_session_start_bytes)
                     while futures:
                         if self._shutdown_started:
                             stop_event.set()
@@ -20212,8 +20279,10 @@ class DownloadManagerApp:
                             break
                         now = time.time()
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
-                        elapsed = max(now - start_time, 0.001)
-                        speed_bps = max((multi_downloaded - resume_bytes) / elapsed, 0.0)
+                        interval_seconds = max(now - last_multipart_update_time, 0.001)
+                        speed_bps = max((multi_downloaded - last_multipart_update_bytes) / interval_seconds, 0.0)
+                        last_multipart_update_time = now
+                        last_multipart_update_bytes = multi_downloaded
                         try:
                             value = max(float(speed_bps or 0.0), 0.0)
                         except Exception:
@@ -20256,13 +20325,8 @@ class DownloadManagerApp:
                         break
                 if multipart_fallback_exc is not None:
                     stop_event.set()
-                    for part_path in part_paths:
-                        if os.path.exists(part_path):
-                            try:
-                                os.remove(part_path)
-                            except OSError:
-                                pass
                     if allow_multipart and not self._shutdown_started:
+                        preserved_part_bytes = self._http_multipart_existing_part_bytes_for_specs(part_specs)
                         write_error_log(
                             "http multipart fallback to single stream",
                             multipart_fallback_exc,
@@ -20274,8 +20338,20 @@ class DownloadManagerApp:
                             segment_count=segment_count,
                             output=out_path,
                             downloaded_bytes=downloaded,
+                            preserved_part_bytes=preserved_part_bytes,
                             total_size=total_size,
                         )
+                        if preserved_part_bytes > 0:
+                            write_error_log(
+                                "http multipart parts preserved for resume",
+                                Exception("HTTP multipart partial range files preserved for a future resume attempt"),
+                                url=url,
+                                item_id=item_id,
+                                source_site=source_site,
+                                output=out_path,
+                                preserved_part_bytes=preserved_part_bytes,
+                                part_count=len(part_specs),
+                            )
                         return self._download_http_media(
                             item_id,
                             url,
@@ -20341,6 +20417,7 @@ class DownloadManagerApp:
             raise incomplete_exc
         elapsed_seconds = max(time.time() - start_time, 0.001)
         final_download_host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+        multipart_cleanup_out_path = out_path
         if mark_finished:
             self._set_task_output_file(task, item_id, out_path)
             self._set_task_named_column_text(item_id, "progress", "100%")
@@ -20349,11 +20426,15 @@ class DownloadManagerApp:
             task = self.tasks.get(item_id, task)
             out_path = self._task_output_path_or_default(task, out_path)
             final_size = self._get_existing_file_size(out_path)
+            self._remove_stale_http_multipart_parts(multipart_cleanup_out_path, [])
+            if os.path.normcase(os.path.abspath(str(multipart_cleanup_out_path))) != os.path.normcase(os.path.abspath(str(out_path))):
+                self._remove_stale_http_multipart_parts(out_path, [])
         task_state_after_download = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
         final_task_filename = str(_task_field_value(self.tasks.get(item_id, {}), "filename", "") or "").strip()
         session_downloaded_bytes = max(int(final_size or 0) - int(resume_bytes or 0) - int(multipart_resume_part_bytes or 0), 0)
         session_average_speed_bps = int(session_downloaded_bytes / elapsed_seconds) if session_downloaded_bytes > 0 else 0
-        output_effective_average_speed_bps = int(final_size / elapsed_seconds) if final_size > 0 else 0
+        output_effective_average_speed_bps = int(session_downloaded_bytes / elapsed_seconds) if session_downloaded_bytes > 0 else 0
+        output_full_file_average_speed_bps = int(final_size / elapsed_seconds) if final_size > 0 else 0
         _set_task_aux_fields(task, _last_speed_bps=max(float(session_average_speed_bps or 0), 0.0))
         try:
             output_is_task_file = bool(
@@ -20375,12 +20456,16 @@ class DownloadManagerApp:
             multipart_part_count=(multipart_part_count or None),
             multipart_host_marker=(multipart_host_marker or None),
             multipart_remaining_size=(multipart_remaining_size or None),
+            multipart_segment_count=(multipart_segment_count or None),
+            source_active_downloads=(multipart_source_active_downloads or None),
+            source_worker_budget=(multipart_source_worker_budget or None),
             output=out_path,
             bytes=final_size,
             elapsed_seconds=round(elapsed_seconds, 3),
             session_downloaded_bytes=session_downloaded_bytes,
             session_average_speed_bps=session_average_speed_bps,
             output_effective_average_speed_bps=output_effective_average_speed_bps,
+            output_full_file_average_speed_bps=output_full_file_average_speed_bps,
             mark_finished=bool(mark_finished),
             deferred_finish_reason=(None if mark_finished else (str(deferred_finish_reason or "").strip() or "caller will validate and finalize output")),
             output_is_task_file=output_is_task_file,
@@ -21064,6 +21149,26 @@ class DownloadManagerApp:
                 count += 1
         return max(count, 1)
 
+    def _active_http_multipart_downloads_for_source_site(self, source_site):
+        target_site = str(source_site or "").strip().lower()
+        if not target_site:
+            return 1
+        count = 0
+        for task in self.tasks.values():
+            if not self._is_active_download_slot_state(str(_task_field_value(task, "state", "") or "")):
+                continue
+            task_site = _task_source_site_name(task)
+            if task_site and str(task_site).strip().lower() == target_site:
+                count += 1
+        return max(count, 1)
+
+    def _http_multipart_source_worker_budget(self, source_site):
+        site = str(source_site or "").strip().lower()
+        try:
+            return int(HTTP_MULTIPART_SOURCE_WORKER_BUDGET_BY_SITE.get(site, HTTP_MULTIPART_SOURCE_WORKER_BUDGET_DEFAULT))
+        except Exception:
+            return int(HTTP_MULTIPART_SOURCE_WORKER_BUDGET_DEFAULT)
+
     def _http_multipart_part_count_for_transfer(self, source_site, download_host, remaining_size):
         site = str(source_site or "").strip().lower()
         host = str(download_host or "").strip().lower()
@@ -21095,7 +21200,22 @@ class DownloadManagerApp:
                 int(host_worker_budget) // max(host_active_downloads, 1),
             )
             part_count = min(part_count, per_task_part_budget)
-        return min(max(2, int(part_count)), 32), host_active_downloads, host_worker_budget, host_marker
+        source_active_downloads = self._active_http_multipart_downloads_for_source_site(site)
+        source_worker_budget = self._http_multipart_source_worker_budget(site)
+        if source_active_downloads > 1:
+            per_task_source_budget = max(
+                int(PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK),
+                int(source_worker_budget) // max(source_active_downloads, 1),
+            )
+            part_count = min(part_count, per_task_source_budget)
+        return (
+            min(max(2, int(part_count)), 32),
+            host_active_downloads,
+            host_worker_budget,
+            host_marker,
+            source_active_downloads,
+            source_worker_budget,
+        )
 
     def _http_multipart_segment_count_for_transfer(self, source_site, download_host, remaining_size, worker_count):
         site = str(source_site or "").strip().lower()
@@ -22141,6 +22261,8 @@ class DownloadManagerApp:
         pending_segment_count = len(pending_segments)
         session_start_completed_bytes = int(completed_bytes or 0)
         session_start_completed_segments = int(completed_segments or 0)
+        last_segment_speed_update = time.time()
+        last_segment_speed_bytes = int(completed_bytes or 0)
         worker_plan_segments = pending_segments if pending_segments else segments
         worker_plan = self._parallel_hls_worker_plan(source_site, media_url, worker_plan_segments)
         worker_count = min(
@@ -22183,7 +22305,7 @@ class DownloadManagerApp:
         )
 
         def _download_one(segment):
-            nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes
+            nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes, last_segment_speed_update, last_segment_speed_bytes
             task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
             if self._is_pause_requested_state(task_state) or self._is_delete_requested_state(task_state):
                 stop_event.set()
@@ -22225,9 +22347,9 @@ class DownloadManagerApp:
                 )
                 now = time.time()
                 elapsed = max(now - started_at, 0.001)
-                speed_bps = completed_bytes / elapsed
-                _set_task_aux_fields(task, _last_speed_bps=max(float(speed_bps or 0.0), 0.0))
-                eta = elapsed / completed_segments * (total_segments - completed_segments) if completed_segments and total_segments > completed_segments else None
+                session_segment_bytes = max(int(completed_bytes or 0) - int(session_start_completed_bytes or 0), 0)
+                session_completed_segments = max(int(completed_segments or 0) - int(session_start_completed_segments or 0), 0)
+                speed_bps = session_segment_bytes / elapsed if session_segment_bytes > 0 else 0.0
                 is_complete = completed_segments >= total_segments
                 should_refresh_progress_ui = (
                     is_complete
@@ -22236,11 +22358,20 @@ class DownloadManagerApp:
                     or abs(completed_bytes - last_segment_ui_bytes) >= FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA
                 )
                 if total_duration > 0 and should_refresh_progress_ui:
+                    interval_seconds = max(now - last_segment_speed_update, 0.001)
+                    interval_bytes = max(int(completed_bytes or 0) - int(last_segment_speed_bytes or 0), 0)
+                    display_speed_bps = interval_bytes / interval_seconds if interval_bytes > 0 else speed_bps
+                    last_segment_speed_update = now
+                    last_segment_speed_bytes = int(completed_bytes or 0)
+                    average_segment_bytes = (session_segment_bytes / session_completed_segments) if session_completed_segments > 0 else 0.0
+                    remaining_bytes = max(int(average_segment_bytes * max(total_segments - completed_segments, 0)), 0)
+                    eta = (remaining_bytes / max(display_speed_bps, 1.0)) if remaining_bytes > 0 and display_speed_bps > 0 else None
+                    _set_task_aux_fields(task, _last_speed_bps=max(float(display_speed_bps or 0.0), 0.0))
                     percent = min((completed_duration / total_duration) * 100.0, 99.0)
                     self.update_tree_many(item_id, {
                         "progress": f"{percent:.1f}%",
                         "size": f"{completed_segments}/{total_segments}",
-                        "speed_eta": f"{format_transfer_rate(speed_bps)} | {format_eta(eta)}" if eta else format_transfer_rate(speed_bps),
+                        "speed_eta": f"{format_transfer_rate(display_speed_bps)} | {format_eta(eta)}" if eta else format_transfer_rate(display_speed_bps),
                     }, force=False)
                     last_segment_ui_update = now
                     last_segment_ui_bytes = completed_bytes
@@ -22388,7 +22519,8 @@ class DownloadManagerApp:
             session_segment_bytes = max(int(completed_bytes or 0) - session_start_completed_bytes, 0)
             session_completed_segments = max(int(completed_segments or 0) - session_start_completed_segments, 0)
             session_segment_average_speed_bps = int(session_segment_bytes / elapsed_seconds) if session_segment_bytes > 0 else 0
-            output_effective_average_speed_bps = int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0
+            output_effective_average_speed_bps = int(session_segment_bytes / elapsed_seconds) if session_segment_bytes > 0 else 0
+            output_full_file_average_speed_bps = int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0
             _set_task_aux_fields(task, _last_speed_bps=max(float(session_segment_average_speed_bps or 0), 0.0))
             self._log_ffmpeg_event(
                 "parallel hls download finished",
@@ -22409,6 +22541,7 @@ class DownloadManagerApp:
                 session_completed_segments=session_completed_segments,
                 session_segment_average_speed_bps=session_segment_average_speed_bps,
                 output_effective_average_speed_bps=output_effective_average_speed_bps,
+                output_full_file_average_speed_bps=output_full_file_average_speed_bps,
             )
             return True
         except StopDownloadException:
