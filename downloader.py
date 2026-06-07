@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260607-3530"
+APP_BUILD = "20260607-3540"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -817,6 +817,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "huyall.com",
     "qsstvw.com",
     "qqqrst.com",
+    "qwe132456.cc",
     "ppqrrs.com",
     "adfg8.vip",
     "subokk.com",
@@ -861,6 +862,7 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "huyall.com",
     "qsstvw.com",
     "qqqrst.com",
+    "qwe132456.cc",
     "ppqrrs.com",
     "adfg8.vip",
     "subokk.com",
@@ -909,9 +911,11 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "ijycnd.com": 32,
     "huyall.com": 48,
     "qsstvw.com": 48,
-    "qqqrst.com": 32,
+    "qqqrst.com": 48,
+    "qwe132456.cc": 48,
     "ppqrrs.com": 48,
     "adfg8.vip": 48,
+    "yzzy": 48,
     "bdzybf": 24,
     "baisiweiting.com": 48,
     "cdnlz": 24,
@@ -969,7 +973,10 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "upload18.org": 72,
     "cdn.usex.tube": 108,
     "baisiweiting.com": 96,
+    "qqqrst.com": 144,
+    "qwe132456.cc": 144,
     "adfg8.vip": 144,
+    "yzzy": 144,
     "cdnlz": 72,
     "gsuus.com": 72,
     "lz-cdn": 144,
@@ -986,20 +993,29 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS_BY_HOST = {
     "baisiweiting.com": 900,
     "huyall.com": 900,
     "qsstvw.com": 900,
+    "qqqrst.com": 900,
+    "qwe132456.cc": 900,
     "adfg8.vip": 900,
+    "yzzy": 900,
     "surrit.com": 1500,
 }
 PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS = 48
 PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS_BY_HOST = {
+    "qqqrst.com": 60,
+    "qwe132456.cc": 60,
     "ppqrrs.com": 60,
     "adfg8.vip": 60,
+    "yzzy": 60,
 }
 PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "baisiweiting.com",
     "huyall.com",
     "qsstvw.com",
+    "qqqrst.com",
+    "qwe132456.cc",
     "ppqrrs.com",
     "adfg8.vip",
+    "yzzy",
     "ggjav.com",
     "mushroomtrack.com",
     "hls.sb-cd.com",
@@ -1321,6 +1337,11 @@ MEDIA_DOWNLOAD_RETRY_MARKERS = (
     "download output is not a valid media file",
     "not a valid media file",
     "ffprobe-error",
+    "invalid data found when processing input",
+    "error opening input files: invalid data",
+    "certificate verify failed",
+    "sec_e_untrusted_root",
+    "schannel:",
 )
 _ERROR_LOG_RECENT = {}
 ERROR_LOG_MAX_ENTRIES = 10
@@ -1377,6 +1398,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ggjav hls exhausted search fallback",
     "startup resume temp path prepared",
     "completed output renamed",
+    "existing output accepted",
     "existing output rejected",
     "download task state normalized",
     "garbled download thread title repaired",
@@ -1445,6 +1467,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "anime1 source retry after media failure",
     "xiaoyakankan parse start",
     "xiaoyakankan parse success",
+    "xiaoyakankan parse fallback",
     "dead external source refresh",
     "page fallback retry",
     "hohoj slow external source refresh",
@@ -3604,7 +3627,7 @@ def _should_use_ffmpeg_for_movieffm_manifest(stream_url):
 def _movieffm_manifest_candidate_is_dead(stream_url, referer="https://www.movieffm.net/"):
     normalized_url = _normalize_download_url(stream_url)
     host = urllib.parse.urlsplit(normalized_url).netloc.lower()
-    if not normalized_url or "okzy" not in host:
+    if not normalized_url or not _looks_like_manifest_url(normalized_url):
         return False
     try:
         c_req = get_curl_cffi_requests()
@@ -3623,8 +3646,14 @@ def _movieffm_manifest_candidate_is_dead(stream_url, referer="https://www.movief
             body = str(resp.text or "")
             if resp.status_code >= 400:
                 return True
-            if "#EXTM3U" in body or normalized_url.lower().endswith(".m3u8"):
+            content_type = str((getattr(resp, "headers", {}) or {}).get("content-type", "") or "").lower()
+            body_head = body[:512].lstrip().lower()
+            if "#EXTM3U" in body:
                 return False
+            if body_head.startswith("<!doctype") or body_head.startswith("<html") or "text/html" in content_type:
+                return True
+            if normalized_url.lower().endswith(".m3u8"):
+                return True
         finally:
             try:
                 session.close()
@@ -13352,6 +13381,8 @@ class DownloadManagerApp:
                     item_id=item_id,
                     url=url,
                     source_site=_task_source_site_name(self.tasks.get(item_id, {})) or None,
+                    state=str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or ""),
+                    filename=str(_task_field_value(self.tasks.get(item_id, {}), "filename", "") or ""),
                 )
             except Exception:
                 pass
@@ -16481,6 +16512,15 @@ class DownloadManagerApp:
         if self._can_accept_existing_output(task, item_id, explicit_output):
             self._set_task_output_file(task, item_id, explicit_output)
             self._mark_existing_file_complete(item_id, self._ui_text("msg_file_exists", "檔案已存在"))
+            write_error_log(
+                "existing output accepted",
+                Exception("existing output accepted before download"),
+                item_id=item_id,
+                output=explicit_output,
+                source_site=_task_source_site_name(task) or None,
+                reason="explicit_output",
+                bytes=self._get_existing_file_size(explicit_output),
+            )
             return True
         short_name = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
         if not short_name or short_name == "Queued":
@@ -16494,6 +16534,15 @@ class DownloadManagerApp:
             if self._can_accept_existing_output(task, item_id, candidate_output):
                 self._set_task_output_file(task, item_id, candidate_output)
                 self._mark_existing_file_complete(item_id, message)
+                write_error_log(
+                    "existing output accepted",
+                    Exception("existing output accepted before download"),
+                    item_id=item_id,
+                    output=candidate_output,
+                    source_site=_task_source_site_name(task) or None,
+                    reason="matched_short_name",
+                    bytes=self._get_existing_file_size(candidate_output),
+                )
                 return True
         return False
 
@@ -17003,7 +17052,12 @@ class DownloadManagerApp:
             "Origin": (headers or {}).get("Origin"),
             "User-Agent": (headers or {}).get("User-Agent") or DEFAULT_USER_AGENT,
         }
-        resp = c_req.get(url, impersonate="chrome110", timeout=timeout_seconds, headers=headers)
+        try:
+            resp = c_req.get(url, impersonate="chrome110", timeout=timeout_seconds, headers=headers)
+        except Exception as exc:
+            if not self._is_ssl_certificate_probe_error(exc):
+                raise
+            resp = c_req.get(url, impersonate="chrome110", timeout=timeout_seconds, headers=headers, verify=False)
         status_code = int(getattr(resp, "status_code", 0) or 0)
         if status_code >= 400:
             return True, {"status": status_code, "playlist_url": url, "reason": "playlist_http_error"}
@@ -17014,7 +17068,12 @@ class DownloadManagerApp:
         if "#EXT-X-STREAM-INF" in text:
             variant, _variant_attrs = _select_highest_hls_variant_url(playlist_url, text)
             if variant:
-                resp = c_req.get(variant, impersonate="chrome110", timeout=timeout_seconds, headers=headers)
+                try:
+                    resp = c_req.get(variant, impersonate="chrome110", timeout=timeout_seconds, headers=headers)
+                except Exception as exc:
+                    if not self._is_ssl_certificate_probe_error(exc):
+                        raise
+                    resp = c_req.get(variant, impersonate="chrome110", timeout=timeout_seconds, headers=headers, verify=False)
                 status_code = int(getattr(resp, "status_code", 0) or 0)
                 if status_code >= 400:
                     return True, {"status": status_code, "playlist_url": variant, "reason": "variant_http_error"}
@@ -17038,7 +17097,12 @@ class DownloadManagerApp:
         probe_headers["Range"] = "bytes=0-2047"
         for segment_url in segment_urls:
             try:
-                segment_resp = c_req.get(segment_url, impersonate="chrome110", timeout=timeout_seconds, headers=probe_headers)
+                try:
+                    segment_resp = c_req.get(segment_url, impersonate="chrome110", timeout=timeout_seconds, headers=probe_headers)
+                except Exception as exc:
+                    if not self._is_ssl_certificate_probe_error(exc):
+                        raise
+                    segment_resp = c_req.get(segment_url, impersonate="chrome110", timeout=timeout_seconds, headers=probe_headers, verify=False)
                 segment_status = int(getattr(segment_resp, "status_code", 0) or 0)
                 content_type = str((getattr(segment_resp, "headers", {}) or {}).get("content-type", "") or "").lower()
                 segment_body = bytes(getattr(segment_resp, "content", b"") or b"")
@@ -20737,6 +20801,20 @@ class DownloadManagerApp:
         text = str(exc or "").lower()
         return any(marker in text for marker in MEDIA_DOWNLOAD_RETRY_MARKERS)
 
+    def _is_ssl_certificate_probe_error(self, exc):
+        text = str(exc or "").lower()
+        return any(
+            marker in text
+            for marker in (
+                "curl: (60)",
+                "ssl certificate problem",
+                "unable to get local issuer certificate",
+                "certificate verify failed",
+                "sec_e_untrusted_root",
+                "schannel:",
+            )
+        )
+
     def _fetch_tinyavideo_page_text(self, page_url, origin=None, timeout=14):
         variants = _tinyavideo_video_page_variants(page_url)
         if not variants:
@@ -21220,7 +21298,7 @@ class DownloadManagerApp:
     def _parallel_hls_workers_for_segments(self, source_site, media_url, segments):
         return int(self._parallel_hls_worker_plan(source_site, media_url, segments).get("workers", 1))
 
-    def _parallel_hls_worker_plan(self, source_site, media_url, segments):
+    def _parallel_hls_worker_plan(self, source_site, media_url, segments, total_segment_count=None):
         site = (source_site or "").strip().lower()
         site_worker_cap = int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, PARALLEL_HLS_SEGMENT_WORKERS))
         workers = site_worker_cap
@@ -21252,9 +21330,13 @@ class DownloadManagerApp:
                 boost_worker_cap = int(marker_workers)
                 break
         boost_applied = False
+        try:
+            boost_segment_count = max(int(total_segment_count or 0), len(segments or []))
+        except Exception:
+            boost_segment_count = len(segments or [])
         if (
             host_peer_count <= 1
-            and len(segments or []) >= boost_segment_threshold
+            and boost_segment_count >= boost_segment_threshold
             and any(marker in dominant_host for marker in PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS)
         ):
             boost_applied = True
@@ -21300,6 +21382,7 @@ class DownloadManagerApp:
             "per_task_worker_budget": int(per_task_budget),
             "boost_applied": bool(boost_applied),
             "boost_segment_threshold": int(boost_segment_threshold),
+            "boost_segment_count": int(boost_segment_count),
             "boost_worker_cap": int(boost_worker_cap),
             "budget_limited": bool(budget_limited),
             "tail_worker_cap": int(tail_worker_cap),
@@ -21703,7 +21786,7 @@ class DownloadManagerApp:
         except Exception:
             return False
 
-    def _preflight_parallel_hls_segments(self, segments, headers, sample_limit=3, stop_event=None):
+    def _preflight_parallel_hls_segments(self, segments, headers, sample_limit=3, stop_event=None, prefer_curl=False):
         google_segments = [
             segment
             for segment in (segments or [])
@@ -21735,7 +21818,19 @@ class DownloadManagerApp:
                     content_type = str(resp.headers.get("Content-Type") or "").lower()
                     data = resp.read() if segment_has_key else resp.read(512)
             except Exception:
-                continue
+                if not prefer_curl:
+                    continue
+                try:
+                    data, content_type = self._fetch_parallel_hls_segment_payload(
+                        segment_url,
+                        probe_headers,
+                        prefer_curl=True,
+                        stop_event=stop_event,
+                    )
+                    if not segment_has_key:
+                        data = bytes(data or b"")[:512]
+                except Exception:
+                    continue
             if segment_has_key:
                 data = self._decrypt_parallel_hls_segment_data(data, segment, key_cache)
             allow_mislabelled_media = (
@@ -22410,34 +22505,6 @@ class DownloadManagerApp:
             "googleusercontent.com" in urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower()
             for segment in segments
         )
-        try:
-            if any((segment.get("key") or {}).get("uri") for segment in segments) and CryptoAES is None:
-                return False
-            key_cache = self._fetch_parallel_hls_keys(segments, headers, stop_event=stop_event)
-            if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False) or stop_event.is_set():
-                raise StopDownloadException("shutdown requested")
-            self._preflight_parallel_hls_segments(segments, headers, stop_event=stop_event)
-            if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False) or stop_event.is_set():
-                raise StopDownloadException("shutdown requested")
-        except ParallelHlsUnsupportedSegmentContentException as exc:
-            write_error_log(
-                "parallel hls unsupported segment content",
-                exc,
-                url=media_url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                segments=total_segments,
-                google_segments=has_google_segments,
-            )
-            raise
-        total_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in segments)
-        completed_bytes = 0
-        completed_duration = 0.0
-        completed_segments = 0
-        started_at = time.time()
-        last_segment_ui_update = 0.0
-        last_segment_ui_bytes = 0
-        completed_lock = threading.Lock()
         source_site = _task_source_site_name(task)
         prefer_curl_segments = source_site in (
             "99itv",
@@ -22463,6 +22530,39 @@ class DownloadManagerApp:
             "tinyavideo",
             "xiaoyakankan",
         )
+        try:
+            if any((segment.get("key") or {}).get("uri") for segment in segments) and CryptoAES is None:
+                return False
+            key_cache = self._fetch_parallel_hls_keys(segments, headers, stop_event=stop_event)
+            if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False) or stop_event.is_set():
+                raise StopDownloadException("shutdown requested")
+            self._preflight_parallel_hls_segments(
+                segments,
+                headers,
+                stop_event=stop_event,
+                prefer_curl=prefer_curl_segments,
+            )
+            if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False) or stop_event.is_set():
+                raise StopDownloadException("shutdown requested")
+        except ParallelHlsUnsupportedSegmentContentException as exc:
+            write_error_log(
+                "parallel hls unsupported segment content",
+                exc,
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                segments=total_segments,
+                google_segments=has_google_segments,
+            )
+            raise
+        total_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in segments)
+        completed_bytes = 0
+        completed_duration = 0.0
+        completed_segments = 0
+        started_at = time.time()
+        last_segment_ui_update = 0.0
+        last_segment_ui_bytes = 0
+        completed_lock = threading.Lock()
         hls_host, representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
         if representative_segment_url:
             self._set_task_active_media_url(task, representative_segment_url)
@@ -22513,7 +22613,12 @@ class DownloadManagerApp:
         last_segment_speed_update = time.time()
         last_segment_speed_bytes = int(completed_bytes or 0)
         worker_plan_segments = pending_segments if pending_segments else segments
-        worker_plan = self._parallel_hls_worker_plan(source_site, media_url, worker_plan_segments)
+        worker_plan = self._parallel_hls_worker_plan(
+            source_site,
+            media_url,
+            worker_plan_segments,
+            total_segment_count=total_segments,
+        )
         worker_count = min(
             int(worker_plan.get("workers", 1)),
             max(pending_segment_count, 1),
@@ -22546,6 +22651,7 @@ class DownloadManagerApp:
             per_task_worker_budget=int(worker_plan.get("per_task_worker_budget", hls_host_worker_budget) or hls_host_worker_budget),
             worker_budget_limited=bool(worker_plan.get("budget_limited", False)),
             single_task_boost_applied=bool(worker_plan.get("boost_applied", False)),
+            boost_segment_count=int(worker_plan.get("boost_segment_count", 0) or 0),
             boost_worker_cap=int(worker_plan.get("boost_worker_cap", 0) or 0),
             tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
             tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
@@ -22817,6 +22923,7 @@ class DownloadManagerApp:
                     bytes_done=interrupted_completed_bytes,
                     min_interval_seconds=0.0,
                     min_bytes_delta=0,
+                    force=True,
                 )
                 current_state = str(_task_field_value(self.tasks.get(item_id, task), "state", "") or "")
                 self._log_ffmpeg_event(
@@ -28957,9 +29064,10 @@ class DownloadManagerApp:
                 )
                 return
             except Exception as e:
-                write_error_log("xiaoyakankan parse failure", e, url=url, item_id=item_id)
                 if _retry_next_page_fallback("xiaoyakankan parse failed; retrying next search result", e):
+                    write_error_log("xiaoyakankan parse fallback", e, url=url, item_id=item_id)
                     return
+                write_error_log("xiaoyakankan parse failure", e, url=url, item_id=item_id)
                 self._set_task_parse_ui(item_id, error=e)
 
         if "xiaoyakankan.com" in parsed_url.netloc:
@@ -29019,9 +29127,10 @@ class DownloadManagerApp:
                 )
                 return
             except Exception as e:
-                write_error_log("xiaoyakankan parse failure", e, url=url, item_id=item_id)
                 if _retry_next_page_fallback("xiaoyakankan parse failed; retrying next search result", e):
+                    write_error_log("xiaoyakankan parse fallback", e, url=url, item_id=item_id)
                     return
+                write_error_log("xiaoyakankan parse failure", e, url=url, item_id=item_id)
                 self._set_task_parse_ui(item_id, error=e)
 
         if "movieffm.net" in parsed_url.netloc and "/drama/" not in parsed_url.path:
@@ -32096,10 +32205,12 @@ class DownloadManagerApp:
         if current_downloading > 0:
             if self._ask_close_downloads_confirmation(t("msg_close_warn", count=current_downloading), active_count=current_downloading, parent=self.root):
                 try:
-                    self._shutdown_stop_requested = True
                     self._shutdown_queue_blocked = True
-                    self._signal_transfer_stop_events()
+                    # Give nearly complete HLS jobs a chance to finish before
+                    # signaling the worker stop event; otherwise the grace wait
+                    # only waits for an already-interrupted transfer.
                     self._wait_for_near_complete_shutdown_downloads()
+                    self._shutdown_stop_requested = True
                     self._shutdown_started = True
                     self._signal_transfer_stop_events()
                     self._prepare_shutdown_resume_state()
