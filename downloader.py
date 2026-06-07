@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260607-3540"
+APP_BUILD = "20260607-3550"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -115,6 +115,7 @@ FORCED_SHUTDOWN_EXIT_DELAY_SECONDS = 16.0
 FINAL_SHUTDOWN_EXIT_DELAY_SECONDS = 0.35
 SHUTDOWN_BACKGROUND_THREAD_WAIT_SECONDS = 3.0
 SHUTDOWN_BACKGROUND_THREAD_EXTRA_WAIT_SECONDS = 6.0
+SHUTDOWN_DOWNLOAD_THREAD_EXTRA_WAIT_SECONDS = 12.0
 SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS = 18.0
 SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS = 120
 SHUTDOWN_NEAR_COMPLETE_HLS_MIN_RATIO = 0.90
@@ -1378,6 +1379,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "download worker skipped during shutdown",
     "download task active transfer state repaired",
     "download task delete requested",
+    "download task delete waiting for worker stop",
     "download task worker released",
     "retryable persisted error resumed",
     "http media download finished",
@@ -6346,15 +6348,15 @@ def _gimy_play_url_numbers(url_or_path):
     path = str(url_or_path or "")
     if re.match(r"^https?://", path, re.IGNORECASE):
         path = urllib.parse.urlsplit(path).path
-    match = re.search(r"/(?:(?:vod)?play|watch|eps)/(\d+)-(\d+)(?:-(\d+))?\.html", path, re.IGNORECASE)
+    match = re.search(r"/(?:(?:vod)?play|watch|eps)/([A-Za-z0-9]+)-(\d+)(?:-(\d+))?\.html", path, re.IGNORECASE)
     if match:
         line_no = int(match.group(2))
         episode_no = int(match.group(3)) if match.group(3) else line_no
-        return int(match.group(1)), line_no, episode_no
-    match = re.search(r"/video/(\d+)-(\d+)\.html", path, re.IGNORECASE)
+        return match.group(1), line_no, episode_no
+    match = re.search(r"/video/([A-Za-z0-9]+)-(\d+)\.html", path, re.IGNORECASE)
     if match:
-        return int(match.group(1)), 0, int(match.group(2))
-    return 0, 0, 0
+        return match.group(1), 0, int(match.group(2))
+    return "", 0, 0
 
 
 def _gimy_detail_candidates_from_play_url(url):
@@ -6412,6 +6414,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "gimy01.co",
     "gimy01.tv",
     "gimy.tube",
+    "gimytube.com",
     "xiaoyakankan",
     "yfsp.tv",
     "tiktok.com",
@@ -6455,6 +6458,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "gimy01.co",
     "gimy01.tv",
     "gimy.tube",
+    "gimytube.com",
     "avbebe.com",
     "avjoy.me",
     "bestjavporn.com",
@@ -6505,6 +6509,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "gimy01.co": 15,
     "gimy01.tv": 16,
     "gimy.tube": 17,
+    "gimytube.com": 17,
     "3kor.com": 17,
     "dramasq.io": 17,
     "olevod.com": 18,
@@ -6561,6 +6566,7 @@ VIDEO_SEARCH_PLAYLIST_DETAIL_SITE_MARKERS = (
     "gimy01.co",
     "gimy01.tv",
     "gimy.tube",
+    "gimytube.com",
     "movieffm.net",
     "nnyy.in",
     "xiaoyakankan.io",
@@ -8332,6 +8338,7 @@ def _video_search_result_is_downloadable(result):
         "gimy01.co",
         "gimy01.tv",
         "gimy.tube",
+        "gimytube.com",
         "18jav.tv",
         "18av.mm-cg.com",
         "99itv.net",
@@ -11255,7 +11262,7 @@ class DownloadManagerApp:
                 base = f"{parsed.scheme}://{parsed.netloc}"
 
                 if not re.search(
-                    r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|watch/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
+                    r'href=[\"\'](/(?:(?:vod)?play/[A-Za-z0-9]+\-[0-9]+\-[0-9]+\.html|watch/[A-Za-z0-9]+\-[0-9]+\-[0-9]+\.html|video/[A-Za-z0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[A-Za-z0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
                     resp_text,
                 ):
                     self._schedule_warning(t("err_site_parse"))
@@ -12196,7 +12203,7 @@ class DownloadManagerApp:
 
         matches = list(
             re.finditer(
-                r'href=["\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|watch/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))["\'][^>]*>(.*?)</a>',
+                r'href=["\'](/(?:(?:vod)?play/[A-Za-z0-9]+\-[0-9]+\-[0-9]+\.html|watch/[A-Za-z0-9]+\-[0-9]+\-[0-9]+\.html|video/[A-Za-z0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[A-Za-z0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))["\'][^>]*>(.*?)</a>',
                 resp_text,
             )
         )
@@ -12211,14 +12218,14 @@ class DownloadManagerApp:
             if _is_promo_title(title):
                 continue
             ep_url = urllib.parse.urljoin(base, link)
-            number_match = re.search(r"/(?:(?:vod)?play|watch|eps)/\d+-(\d+)(?:-(\d+))?\.html", link)
+            number_match = re.search(r"/(?:(?:vod)?play|watch|eps)/[A-Za-z0-9]+-(\d+)(?:-(\d+))?\.html", link)
             if number_match:
                 line_no = int(number_match.group(1))
                 episode_no = int(number_match.group(2)) if number_match.group(2) else line_no
                 if not number_match.group(2):
                     line_no = 0
             else:
-                number_match = re.search(r"/video/\d+-(\d+)\.html", link)
+                number_match = re.search(r"/video/[A-Za-z0-9]+-(\d+)\.html", link)
                 line_no = 0
                 episode_no = int(number_match.group(1)) if number_match else 0
             full_name = " ".join(part for part in (drama_name, title) if part).strip() or drama_name
@@ -13224,6 +13231,46 @@ class DownloadManagerApp:
                 continue
         return names
 
+    def _wait_for_download_background_threads(self, timeout_seconds=SHUTDOWN_DOWNLOAD_THREAD_EXTRA_WAIT_SECONDS):
+        deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
+        while time.time() < deadline:
+            try:
+                with self._background_threads_lock:
+                    threads = [thread for thread in self._background_threads if thread.is_alive()]
+                    self._background_threads = set(threads)
+                    download_threads = [
+                        thread for thread in threads
+                        if str(getattr(thread, "name", "") or "").startswith("download-")
+                    ]
+            except Exception:
+                download_threads = []
+            if not download_threads:
+                return 0
+            try:
+                self._signal_transfer_stop_events()
+            except Exception:
+                pass
+            try:
+                self._close_active_network_sessions()
+            except Exception:
+                pass
+            per_thread_timeout = max(min(deadline - time.time(), 0.08), 0.0)
+            if per_thread_timeout <= 0:
+                break
+            for thread in download_threads:
+                try:
+                    thread.join(timeout=per_thread_timeout)
+                except RuntimeError:
+                    continue
+        try:
+            with self._background_threads_lock:
+                return sum(
+                    1 for thread in self._background_threads
+                    if thread.is_alive() and str(getattr(thread, "name", "") or "").startswith("download-")
+                )
+        except Exception:
+            return 0
+
     def _download_worker_active(self, item_id):
         if not item_id:
             return False
@@ -13375,14 +13422,18 @@ class DownloadManagerApp:
                     pass
                 self._schedule_process_queue(delay=0)
             try:
+                released_task = self.tasks.get(item_id, {})
                 write_error_log(
                     "download task worker released",
                     Exception("download task worker released"),
                     item_id=item_id,
-                    url=url,
-                    source_site=_task_source_site_name(self.tasks.get(item_id, {})) or None,
-                    state=str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or ""),
-                    filename=str(_task_field_value(self.tasks.get(item_id, {}), "filename", "") or ""),
+                    url=_normalize_download_url(_task_field_value(released_task, "url", "")) or url,
+                    worker_url=url,
+                    resolved_url=_normalize_download_url(_task_field_value(released_task, "resolved_url", "")) or "",
+                    source_page=self._get_task_source_page(released_task, fallback_url="") if released_task else "",
+                    source_site=_task_source_site_name(released_task) or None,
+                    state=str(_task_field_value(released_task, "state", "") or ""),
+                    filename=str(_task_field_value(released_task, "filename", "") or ""),
                 )
             except Exception:
                 pass
@@ -13493,6 +13544,7 @@ class DownloadManagerApp:
             "gimy01.co": "gimy",
             "gimy01.tv": "gimy",
             "gimy.tube": "gimy",
+            "gimytube.com": "gimy",
             "javfilms.com": "javfilms",
             "18jav.tv": "18jav",
             "hohoj.tv": "hohoj",
@@ -13541,7 +13593,7 @@ class DownloadManagerApp:
                 {"url": episode_url, "title": title}
                 for episode_url, title in _extract_olevod_episode_entries(page_text, normalized_url, page_title or query_text or "Olevod")
             ]
-        if site in ("gimy.cc", "gimy.tw", "gimy01.co", "gimy01.tv", "gimy.tube") and _is_gimy_detail_path(parsed.path):
+        if site in ("gimy.cc", "gimy.tw", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com") and _is_gimy_detail_path(parsed.path):
             base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
             drama_name = _clean_gimy_title(page_title or "Gimy", fallback_title=page_title or query_text or "Gimy", page_url=normalized_url)
             entries = self._extract_gimy_detail_entries(page_text, base, drama_name)
@@ -14493,7 +14545,7 @@ class DownloadManagerApp:
         def fetch_gimy_results():
             collected = []
             for variant in search_variants:
-                for root_url in ("https://gimy.tw", "https://gimy.tube"):
+                for root_url in ("https://gimy.tw", "https://gimy.tube", "https://gimytube.com"):
                     try:
                         search_url = root_url + "/vodsearch/-------------.html?" + urllib.parse.urlencode({"wd": variant})
                         resp = c_req.get(
@@ -14515,7 +14567,7 @@ class DownloadManagerApp:
                 return collected
             if jav_code:
                 return collected
-            for domain in ("gimy.tw", "gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube"):
+            for domain in ("gimy.tw", "gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com"):
                 for path_marker in ("/voddetail", "/detail", "/title", "/watch"):
                     for primary in primary_queries:
                         query = f"{primary} site:{domain}{path_marker}"
@@ -16651,8 +16703,14 @@ class DownloadManagerApp:
         fallback_value = str(default_path or "").strip()
         return primary_value or secondary_value or fallback_value
 
-    def _log_ytdlp_native_hls_finished(self, task, item_id, url, output_path=None):
+    def _log_ytdlp_native_hls_finished(self, task, item_id, url, output_path=None, started_at=None):
         final_output_path = self._task_output_path_or_default(task, output_path)
+        output_size = self._get_existing_file_size(final_output_path)
+        elapsed_seconds, output_average_speed_bps, output_effective_average_speed_bps = self._set_task_completion_average_speed(
+            task,
+            output_size,
+            started_at,
+        )
         write_error_log(
             "yt-dlp native hls fallback finished",
             Exception("yt-dlp native hls fallback finished"),
@@ -16660,7 +16718,10 @@ class DownloadManagerApp:
             item_id=item_id,
             source_site=_task_source_site_name(task) or None,
             output=final_output_path,
-            bytes=self._get_existing_file_size(final_output_path),
+            bytes=output_size,
+            elapsed_seconds=(round(elapsed_seconds, 3) if elapsed_seconds > 0 else None),
+            output_average_speed_bps=(output_average_speed_bps or None),
+            output_effective_average_speed_bps=(output_effective_average_speed_bps or None),
         )
 
     def _set_output_path_and_complete_if_exists(self, task, item_id, output_path, message=None, temp=False):
@@ -16839,6 +16900,10 @@ class DownloadManagerApp:
             return
         self._signal_transfer_stop_events([item_id])
         _set_task_aux_fields(task, state="DELETE_REQUESTED", _stop_reason=STOP_REASON_DELETE)
+        try:
+            self.persist_unfinished_state(force=True)
+        except Exception:
+            pass
         write_error_log(
             "download task delete requested",
             Exception("download task delete requested"),
@@ -16868,6 +16933,10 @@ class DownloadManagerApp:
                         previous_state=state,
                     )
                     self._delete_tree_item(item_id)
+                    try:
+                        self.persist_unfinished_state(force=True)
+                    except Exception:
+                        pass
                     self._schedule_process_queue()
                     return
                 self._discard_deleted_task(item_id)
@@ -17380,10 +17449,65 @@ class DownloadManagerApp:
             return total_bytes
         return None
 
-    def _get_stable_resume_base(self, url, ext="mp4", resume_key=None):
+    def _get_stable_resume_base(self, url, ext="mp4", resume_key=None, save_dir=None):
         normalized_url = _normalize_download_url(resume_key or url) or str(resume_key or url)
         digest = hashlib.sha1(normalized_url.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        return os.path.join(tempfile.gettempdir(), f"downloader_resume_{digest}.{ext}")
+        normalized_ext = str(ext or "mp4").lstrip(".") or "mp4"
+        return os.path.join(self._resume_artifact_dir(save_dir), f"downloader_resume_{digest}.{normalized_ext}")
+
+    def _resume_artifact_dir(self, save_dir=None):
+        base_dir = ""
+        for candidate in (save_dir, None):
+            if candidate:
+                base_dir = str(candidate or "").strip()
+            else:
+                try:
+                    base_dir = self._safe_get_save_dir()
+                except Exception:
+                    base_dir = ""
+            if base_dir:
+                break
+        try:
+            base_dir = os.path.abspath(os.path.expanduser(base_dir or ""))
+        except Exception:
+            base_dir = ""
+        if not base_dir:
+            return tempfile.gettempdir()
+        resume_dir = os.path.join(base_dir, ".downloader_resume")
+        try:
+            os.makedirs(resume_dir, exist_ok=True)
+            if platform.system() == "Windows":
+                try:
+                    startupinfo = None
+                    creationflags = 0
+                    if platform.system() == "Windows":
+                        startupinfo = subprocess.STARTUPINFO()
+                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        startupinfo.wShowWindow = 0
+                        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    subprocess.run(
+                        ["attrib", "+H", resume_dir],
+                        capture_output=True,
+                        startupinfo=startupinfo,
+                        creationflags=creationflags,
+                        timeout=2,
+                    )
+                except Exception:
+                    pass
+            return resume_dir
+        except Exception:
+            return tempfile.gettempdir()
+
+    def _stable_resume_base_candidates(self, url, ext="mp4", resume_key=None, save_dir=None):
+        normalized_url = _normalize_download_url(resume_key or url) or str(resume_key or url)
+        digest = hashlib.sha1(normalized_url.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        normalized_ext = str(ext or "mp4").lstrip(".") or "mp4"
+        candidates = []
+        for root_dir in (self._resume_artifact_dir(save_dir), tempfile.gettempdir()):
+            candidate = os.path.join(root_dir, f"downloader_resume_{digest}.{normalized_ext}")
+            if candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
 
     def _build_resume_output_identity_key(self, task, ext="mp4", save_dir=None, fallback_name="Video"):
         primary_value = str(_task_field_value(task, "filename") or "").strip()
@@ -17435,8 +17559,12 @@ class DownloadManagerApp:
         except Exception:
             absolute_base = clean_base
             base_in_temp = False
-        # Internal temp artifacts are already outside the user's download folder.
-        if base_in_temp and os.path.basename(absolute_base).lower().startswith("downloader_resume_"):
+        base_parent_name = os.path.basename(os.path.dirname(absolute_base)).lower()
+        # Internal resume artifacts live outside normal media output; keep progress sidecars beside them.
+        if (
+            os.path.basename(absolute_base).lower().startswith("downloader_resume_")
+            and (base_in_temp or base_parent_name == ".downloader_resume")
+        ):
             return legacy_path
         try:
             ext = os.path.splitext(absolute_base)[1].lstrip(".").lower() or "media"
@@ -17497,22 +17625,30 @@ class DownloadManagerApp:
         except OSError:
             return False
 
-    def _find_resume_artifact_base_by_source_keys(self, resume_keys, ext="mp4"):
+    def _resume_artifact_search_dirs(self, save_dir=None):
+        dirs = []
+        for candidate in (self._resume_artifact_dir(save_dir), tempfile.gettempdir()):
+            if candidate and candidate not in dirs:
+                dirs.append(candidate)
+        return dirs
+
+    def _find_resume_artifact_base_by_source_keys(self, resume_keys, ext="mp4", save_dir=None):
         normalized_keys = set(self._normalize_resume_match_keys(resume_keys))
         if not normalized_keys:
             return ""
         normalized_ext = str(ext or "mp4").lstrip(".") or "mp4"
-        progress_pattern = os.path.join(tempfile.gettempdir(), f"downloader_resume_*.{normalized_ext}.progress.json")
-        for progress_path in glob.glob(progress_pattern):
-            try:
-                progress_info = self._load_resume_progress_info(progress_path)
-                if not self._resume_progress_matches(progress_info, list(normalized_keys), progress_path):
+        for search_dir in self._resume_artifact_search_dirs(save_dir):
+            progress_pattern = os.path.join(search_dir, f"downloader_resume_*.{normalized_ext}.progress.json")
+            for progress_path in glob.glob(progress_pattern):
+                try:
+                    progress_info = self._load_resume_progress_info(progress_path)
+                    if not self._resume_progress_matches(progress_info, list(normalized_keys), progress_path):
+                        continue
+                    base_path = progress_path[: -len(".progress.json")]
+                    if self._has_resume_artifact_family(base_path):
+                        return base_path
+                except Exception:
                     continue
-                base_path = progress_path[: -len(".progress.json")]
-                if self._has_resume_artifact_family(base_path):
-                    return base_path
-            except Exception:
-                continue
         return ""
 
     def _resume_artifact_matches_keys(self, base_path, resume_keys):
@@ -17593,12 +17729,15 @@ class DownloadManagerApp:
         explicit_output_path = str(_task_field_value(task, "filename", "") or "").strip()
         if explicit_output_path and self._resume_artifact_matches_keys(explicit_output_path, resume_keys):
             return explicit_output_path, primary_key, resume_keys
-        primary_base = self._get_stable_resume_base(url, ext=ext, resume_key=primary_key)
+        primary_base = self._get_stable_resume_base(url, ext=ext, resume_key=primary_key, save_dir=save_dir)
+        for candidate_base in self._stable_resume_base_candidates(url, ext=ext, resume_key=primary_key, save_dir=save_dir):
+            if candidate_base != primary_base and self._resume_artifact_matches_keys(candidate_base, resume_keys):
+                return candidate_base, primary_key, resume_keys
         for legacy_key in resume_keys[1:]:
-            legacy_base = self._get_stable_resume_base(url, ext=ext, resume_key=legacy_key)
-            if legacy_base != primary_base and self._resume_artifact_matches_keys(legacy_base, resume_keys):
-                return legacy_base, primary_key, resume_keys
-        discovered_base = self._find_resume_artifact_base_by_source_keys(resume_keys, ext=ext)
+            for legacy_base in self._stable_resume_base_candidates(url, ext=ext, resume_key=legacy_key, save_dir=save_dir):
+                if legacy_base != primary_base and self._resume_artifact_matches_keys(legacy_base, resume_keys):
+                    return legacy_base, primary_key, resume_keys
+        discovered_base = self._find_resume_artifact_base_by_source_keys(resume_keys, ext=ext, save_dir=save_dir)
         if discovered_base and discovered_base != primary_base:
             return discovered_base, primary_key, resume_keys
         return primary_base, primary_key, resume_keys
@@ -19729,6 +19868,25 @@ class DownloadManagerApp:
         _set_task_aux_fields(task, _last_speed_bps=value, _last_speed_updated_at=time.time())
         return value
 
+    def _set_task_completion_average_speed(self, task, output_size, started_at, preferred_speed_bps=0):
+        try:
+            elapsed_seconds = max(time.time() - float(started_at or 0.0), 0.001) if started_at else 0.0
+        except Exception:
+            elapsed_seconds = 0.0
+        try:
+            output_size_value = max(int(output_size or 0), 0)
+        except Exception:
+            output_size_value = 0
+        output_average_speed_bps = int(output_size_value / elapsed_seconds) if output_size_value > 0 and elapsed_seconds > 0 else 0
+        try:
+            preferred_speed_value = max(int(preferred_speed_bps or 0), 0)
+        except Exception:
+            preferred_speed_value = 0
+        effective_speed_bps = preferred_speed_value or output_average_speed_bps
+        if effective_speed_bps > 0:
+            self._set_task_last_speed(task, effective_speed_bps)
+        return elapsed_seconds, output_average_speed_bps, effective_speed_bps
+
     def _set_task_active_transfer_ui(self, task, item_id, downloaded_bytes, total_bytes=None, speed_bps=None, eta_seconds=None, cap_at_99=False):
         _set_task_aux_fields(task, downloaded_bytes=downloaded_bytes, total_bytes=total_bytes)
         self._set_task_last_speed(task, speed_bps)
@@ -19751,8 +19909,9 @@ class DownloadManagerApp:
 
     def _effective_domain_download_limit(self):
         active_tasks = []
-        for task in self.tasks.values():
-            if self._is_downloading_state(str(_task_field_value(task, "state", "") or "")):
+        for item_id, task in self.tasks.items():
+            state = str(_task_field_value(task, "state", "") or "")
+            if self._is_active_download_slot_state(state) or self._download_worker_active(item_id):
                 active_tasks.append(task)
         if not active_tasks:
             return MAX_DOWNLOADS_PER_DOMAIN
@@ -20717,9 +20876,12 @@ class DownloadManagerApp:
         final_task_filename = str(_task_field_value(self.tasks.get(item_id, {}), "filename", "") or "").strip()
         session_downloaded_bytes = max(int(final_size or 0) - int(resume_bytes or 0) - int(multipart_resume_part_bytes or 0), 0)
         session_average_speed_bps = int(session_downloaded_bytes / elapsed_seconds) if session_downloaded_bytes > 0 else 0
-        output_effective_average_speed_bps = int(session_downloaded_bytes / elapsed_seconds) if session_downloaded_bytes > 0 else 0
-        output_full_file_average_speed_bps = int(final_size / elapsed_seconds) if final_size > 0 else 0
-        self._set_task_last_speed(task, session_average_speed_bps)
+        _completion_elapsed_seconds, output_full_file_average_speed_bps, output_effective_average_speed_bps = self._set_task_completion_average_speed(
+            task,
+            final_size,
+            start_time,
+            preferred_speed_bps=session_average_speed_bps,
+        )
         try:
             output_is_task_file = bool(
                 final_task_filename
@@ -22882,9 +23044,12 @@ class DownloadManagerApp:
             session_segment_bytes = max(int(completed_bytes or 0) - session_start_completed_bytes, 0)
             session_completed_segments = max(int(completed_segments or 0) - session_start_completed_segments, 0)
             session_segment_average_speed_bps = int(session_segment_bytes / elapsed_seconds) if session_segment_bytes > 0 else 0
-            output_effective_average_speed_bps = int(session_segment_bytes / elapsed_seconds) if session_segment_bytes > 0 else 0
-            output_full_file_average_speed_bps = int(logged_output_size / elapsed_seconds) if logged_output_size > 0 else 0
-            self._set_task_last_speed(task, session_segment_average_speed_bps)
+            _completion_elapsed_seconds, output_full_file_average_speed_bps, output_effective_average_speed_bps = self._set_task_completion_average_speed(
+                task,
+                logged_output_size,
+                started_at,
+                preferred_speed_bps=session_segment_average_speed_bps,
+            )
             self._log_ffmpeg_event(
                 "parallel hls download finished",
                 Exception("parallel hls finished"),
@@ -23208,6 +23373,7 @@ class DownloadManagerApp:
             hls_use_mpegts=ydl_opts["hls_use_mpegts"],
         )
         info = None
+        native_started_at = time.time()
         pre_existing_output = self._has_nonempty_file(out_path)
         try:
             self._ensure_task_can_continue(item_id)
@@ -23303,10 +23469,10 @@ class DownloadManagerApp:
         if self._has_nonempty_file(final_output_path):
             self._set_task_output_file(task, item_id, final_output_path)
             self._mark_task_finished(item_id)
-            self._log_ytdlp_native_hls_finished(task, item_id, url, final_output_path)
+            self._log_ytdlp_native_hls_finished(task, item_id, url, final_output_path, started_at=native_started_at)
             return
         if self._complete_if_output_exists(item_id):
-            self._log_ytdlp_native_hls_finished(task, item_id, url, out_path)
+            self._log_ytdlp_native_hls_finished(task, item_id, url, out_path, started_at=native_started_at)
             return
         write_error_log(
             "yt-dlp native hls fallback output missing",
@@ -25364,6 +25530,12 @@ class DownloadManagerApp:
                     self._release_download_worker(item_id)
                 except Exception:
                     continue
+            try:
+                self._wait_for_shutdown_resume_artifacts(timeout_seconds=max(SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS, 1.5), stable_polls=3)
+                self._flush_live_resume_state()
+                self.persist_unfinished_state(force=True)
+            except Exception:
+                pass
 
     def _has_active_parallel_hls_shutdown_work(self):
         try:
@@ -29464,7 +29636,7 @@ class DownloadManagerApp:
                     raise fallback_exc from last_detail_error
             base = f"{parsed_url.scheme}://{parsed_url.netloc}"
             if not re.search(
-                r'href=[\"\'](/(?:(?:vod)?play/[0-9]+\-[0-9]+\-[0-9]+\.html|watch/[0-9]+\-[0-9]+\-[0-9]+\.html|video/[0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
+                r'href=[\"\'](/(?:(?:vod)?play/[A-Za-z0-9]+\-[0-9]+\-[0-9]+\.html|watch/[A-Za-z0-9]+\-[0-9]+\-[0-9]+\.html|video/[A-Za-z0-9]+\-[0-9]+\.html(?:#sid=\d+)?|eps/[A-Za-z0-9]+\-[0-9]+(?:\-[0-9]+)?\.html))[\"\'][^>]*>(.*?)</a>',
                 resp_text,
             ):
                 raise Exception("Gimy detail page did not expose episode links")
@@ -29848,7 +30020,7 @@ class DownloadManagerApp:
                     parsed = urllib.parse.urlsplit(normalized_page_url)
                     base = f"{parsed.scheme or 'https'}://{parsed.netloc or 'gimy01.tv'}"
                     path = parsed.path or ""
-                    for pattern in (r"/eps/(\d+)-\d+(?:-\d+)?\.html", r"/(?:play|vodplay|video)/(\d+)-\d+(?:-\d+)?\.html"):
+                    for pattern in (r"/eps/([A-Za-z0-9]+)-\d+(?:-\d+)?\.html", r"/(?:play|vodplay|watch|video)/([A-Za-z0-9]+)-\d+(?:-\d+)?\.html"):
                         match = re.search(pattern, path)
                         if not match:
                             continue
@@ -32284,7 +32456,19 @@ class DownloadManagerApp:
             except Exception:
                 pass
             try:
+                self._wait_for_shutdown_resume_artifacts(timeout_seconds=max(SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS, 1.0), stable_polls=2)
+                self._flush_live_resume_state()
+                self.persist_unfinished_state(force=True)
+            except Exception:
+                pass
+            try:
                 remaining_threads = self._wait_for_background_threads(timeout_seconds=SHUTDOWN_BACKGROUND_THREAD_EXTRA_WAIT_SECONDS)
+            except Exception:
+                pass
+        if remaining_threads > 0 and any(name.startswith("download-") for name in self._active_background_thread_names()):
+            try:
+                remaining_download_threads = self._wait_for_download_background_threads(timeout_seconds=SHUTDOWN_DOWNLOAD_THREAD_EXTRA_WAIT_SECONDS)
+                remaining_threads = max(remaining_download_threads, self._wait_for_background_threads(timeout_seconds=0.5))
             except Exception:
                 pass
         try:
