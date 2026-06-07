@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260607-3520"
+APP_BUILD = "20260607-3530"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -119,6 +119,8 @@ SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS = 18.0
 SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS = 120
 SHUTDOWN_NEAR_COMPLETE_HLS_MIN_RATIO = 0.90
 MEDIA_PROBE_CACHE_TTL_SECONDS = 2.5
+VIDEO_SEARCH_MEDIA_PROBE_CACHE_TTL_SECONDS = 300.0
+VIDEO_SEARCH_HLS_PROBE_TIMEOUT_SECONDS = 5.0
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 FFMPEG_WINDOWS_FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 FFMPEG_WINDOWS_FFPROBE_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
@@ -816,6 +818,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "qsstvw.com",
     "qqqrst.com",
     "ppqrrs.com",
+    "adfg8.vip",
     "subokk.com",
     "hhuus.com",
     "bfvvs.com",
@@ -859,6 +862,7 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "qsstvw.com",
     "qqqrst.com",
     "ppqrrs.com",
+    "adfg8.vip",
     "subokk.com",
     "hhuus.com",
     "bfvvs.com",
@@ -906,7 +910,8 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "huyall.com": 48,
     "qsstvw.com": 48,
     "qqqrst.com": 32,
-    "ppqrrs.com": 32,
+    "ppqrrs.com": 48,
+    "adfg8.vip": 48,
     "bdzybf": 24,
     "baisiweiting.com": 48,
     "cdnlz": 24,
@@ -964,6 +969,7 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "upload18.org": 72,
     "cdn.usex.tube": 108,
     "baisiweiting.com": 96,
+    "adfg8.vip": 144,
     "cdnlz": 72,
     "gsuus.com": 72,
     "lz-cdn": 144,
@@ -973,18 +979,27 @@ PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX = 120
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
 PARALLEL_HLS_IN_FLIGHT_MULTIPLIER = 4
 PARALLEL_HLS_SCHEDULER_POLL_SECONDS = 0.2
+PARALLEL_HLS_TAIL_SHRINK_SEGMENT_FACTOR = 3
+PARALLEL_HLS_TAIL_SHRINK_MIN_WORKERS = 2
 PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS = 900
 PARALLEL_HLS_SINGLE_TASK_BOOST_SEGMENTS_BY_HOST = {
     "baisiweiting.com": 900,
     "huyall.com": 900,
     "qsstvw.com": 900,
+    "adfg8.vip": 900,
     "surrit.com": 1500,
 }
 PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS = 48
+PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS_BY_HOST = {
+    "ppqrrs.com": 60,
+    "adfg8.vip": 60,
+}
 PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "baisiweiting.com",
     "huyall.com",
     "qsstvw.com",
+    "ppqrrs.com",
+    "adfg8.vip",
     "ggjav.com",
     "mushroomtrack.com",
     "hls.sb-cd.com",
@@ -1224,6 +1239,7 @@ NATIVE_HLS_HOST_MARKERS_BY_SITE = {
 }
 NATIVE_HLS_GLOBAL_HOST_MARKERS = ("qqqrst.com", "ppqrrs.com", "surrit.com")
 M3U8_TOTAL_BYTES_PROBE_WORKERS = 4
+M3U8_TOTAL_BYTES_MAX_PROBE_SEGMENTS = 240
 M3U8_TOTAL_BYTES_PROBE_WORKERS_BY_SITE = {
     "gimy": 4,
     "movieffm": 4,
@@ -1275,6 +1291,8 @@ MEDIA_DOWNLOAD_RETRY_MARKERS = (
     "server returned 400 bad request",
     "http 403",
     "http 404",
+    "404 not found",
+    "server returned 404",
     "http 410",
     "http 429",
     "http 500",
@@ -1375,6 +1393,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ffmpeg direct audio finished",
     "ffmpeg audio transcode retry",
     "m3u8 total bytes invalidated",
+    "m3u8 total bytes probe skipped",
     "download concurrency limit changed",
     "http multipart download started",
     "http multipart fallback to single stream",
@@ -1396,6 +1415,8 @@ TRACE_LOG_CONTEXTS = frozenset((
     "existing output quarantined",
     "native hls handoff to ffmpeg",
     "gimy native hls handoff to ffmpeg",
+    "manifest source page refresh",
+    "video search candidate rejected",
     "native hls failed output removed",
     "ffmpeg near complete resume accepted",
     "ffmpeg preserved resume segment finalized",
@@ -13555,6 +13576,111 @@ class DownloadManagerApp:
             )
         return []
 
+    def _filter_search_media_candidates_by_availability(self, candidate_urls, source_page="", source_site="", query_text=""):
+        filtered = []
+        rejected = []
+        source_page = _normalize_download_url(source_page)
+        parsed_source = urllib.parse.urlsplit(source_page or "")
+        source_origin = f"{parsed_source.scheme}://{parsed_source.netloc}" if parsed_source.scheme and parsed_source.netloc else None
+        ordered_candidates = _dedupe_download_urls(candidate_urls)
+        if ordered_candidates:
+            ordered_candidates = _order_site_hls_candidates(ordered_candidates[0], ordered_candidates[1:], source_site=source_site)
+        for candidate_url in ordered_candidates:
+            if not candidate_url:
+                continue
+            if not _looks_like_manifest_url(candidate_url):
+                filtered.append(candidate_url)
+                continue
+            cache_key = f"search-hls-availability:{candidate_url}|{source_page}"
+            cached = None
+            try:
+                now = time.time()
+                with self._media_probe_cache_lock:
+                    cached = self._media_probe_cache.get(cache_key)
+                if cached and now - float(cached.get("_cached_at", 0.0) or 0.0) <= VIDEO_SEARCH_MEDIA_PROBE_CACHE_TTL_SECONDS:
+                    if bool(cached.get("available", False)):
+                        filtered.append(candidate_url)
+                    else:
+                        rejected.append({"url": candidate_url, "details": cached.get("details") or {}})
+                    continue
+            except Exception:
+                cached = None
+            probe_headers = _make_hls_http_headers(referer=source_page or candidate_url, origin=source_origin)
+            try:
+                unavailable, probe_details = self._hls_manifest_has_unavailable_segments(
+                    candidate_url,
+                    headers=probe_headers,
+                    sample_size=1,
+                    timeout_seconds=VIDEO_SEARCH_HLS_PROBE_TIMEOUT_SECONDS,
+                )
+            except Exception as probe_exc:
+                probe_details = {"reason": "probe_exception", "error": _summarize_log_exception(probe_exc)}
+                if self._is_retryable_media_download_error(probe_exc):
+                    rejected.append({"url": candidate_url, "details": probe_details})
+                    try:
+                        with self._media_probe_cache_lock:
+                            self._media_probe_cache[cache_key] = {
+                                "available": False,
+                                "details": probe_details,
+                                "_cached_at": time.time(),
+                            }
+                    except Exception:
+                        pass
+                    write_error_log(
+                        "video search candidate rejected",
+                        probe_exc,
+                        message="search HLS availability probe failed closed",
+                        url=candidate_url,
+                        source_page=source_page,
+                        source_site=source_site,
+                        query=query_text,
+                        probe=probe_details,
+                    )
+                    continue
+                write_error_log(
+                    "video search candidate rejected",
+                    probe_exc,
+                    message="search HLS availability probe failed open",
+                    url=candidate_url,
+                    source_page=source_page,
+                    source_site=source_site,
+                    query=query_text,
+                )
+                filtered.append(candidate_url)
+                continue
+            if unavailable:
+                rejected.append({"url": candidate_url, "details": probe_details})
+                try:
+                    with self._media_probe_cache_lock:
+                        self._media_probe_cache[cache_key] = {
+                            "available": False,
+                            "details": probe_details,
+                            "_cached_at": time.time(),
+                        }
+                except Exception:
+                    pass
+                write_error_log(
+                    "video search candidate rejected",
+                    Exception("search HLS candidate is unavailable"),
+                    url=candidate_url,
+                    source_page=source_page,
+                    source_site=source_site,
+                    query=query_text,
+                    probe=probe_details,
+                )
+                continue
+            try:
+                with self._media_probe_cache_lock:
+                    self._media_probe_cache[cache_key] = {
+                        "available": True,
+                        "details": probe_details,
+                        "_cached_at": time.time(),
+                    }
+            except Exception:
+                pass
+            filtered.append(candidate_url)
+        return filtered, rejected
+
     def _enrich_video_search_result(self, result, query_text):
         result = dict(result or {})
         url = _normalize_download_url(result.get("url", ""))
@@ -13883,6 +14009,18 @@ class DownloadManagerApp:
                     result["quality"] = max(_video_search_quality_score(candidate) for candidate in candidates)
                     result["quality_below_min"] = True
                     return result
+                available_candidates, rejected_candidates = self._filter_search_media_candidates_by_availability(
+                    result["candidate_urls"],
+                    source_page=result.get("source_page") or url,
+                    source_site=result_site,
+                    query_text=query_text,
+                )
+                if not available_candidates:
+                    result["downloadable_probe_failed"] = True
+                    result["probe_rejected_reason"] = "media_candidates_unavailable"
+                    result["rejected_candidate_count"] = len(rejected_candidates)
+                    return result
+                result["candidate_urls"] = available_candidates
                 result["quality"] = max(
                     int(result.get("quality") or 0),
                     max(_video_search_quality_score(candidate) for candidate in result["candidate_urls"]),
@@ -15612,6 +15750,11 @@ class DownloadManagerApp:
 
     def _log_m3u8_route_selected(self, task, item_id, media_url, source_site=None, fallback_urls=None):
         site = _task_source_site_name(task, fallback_site=source_site or "")
+        route_selected_at = time.time()
+        try:
+            _set_task_aux_fields(task, _m3u8_route_selected_at=route_selected_at)
+        except Exception:
+            pass
         probe_task = self._parallel_hls_probe_task(task, site)
         route_label = "ffmpeg"
         if _should_force_native_hls_before_parallel(media_url, probe_task) and _should_prefer_native_hls(media_url, probe_task):
@@ -15642,6 +15785,15 @@ class DownloadManagerApp:
             fallback_count=fallback_count,
             quality_score=_media_candidate_quality_score(media_url, source_site=site),
         )
+
+    def _m3u8_route_start_delay_seconds(self, task):
+        try:
+            route_selected_at = float(_task_field_value(task, "_m3u8_route_selected_at", 0.0) or 0.0)
+        except Exception:
+            route_selected_at = 0.0
+        if route_selected_at <= 0.0:
+            return 0.0
+        return round(max(time.time() - route_selected_at, 0.0), 3)
 
     def _build_ffmpeg_runtime_fields(self, ffmpeg_path, retry_count=0, cmd=None, ffmpeg_version=None, **extra):
         fields = {
@@ -16843,14 +16995,15 @@ class DownloadManagerApp:
             "samples": samples,
         }
 
-    def _hls_manifest_has_unavailable_segments(self, url, headers=None, sample_size=3):
+    def _hls_manifest_has_unavailable_segments(self, url, headers=None, sample_size=3, timeout_seconds=15):
         c_req = get_curl_cffi_requests()
+        timeout_seconds = max(float(timeout_seconds or 0.0), 1.0)
         headers = {
             "Referer": (headers or {}).get("Referer"),
             "Origin": (headers or {}).get("Origin"),
             "User-Agent": (headers or {}).get("User-Agent") or DEFAULT_USER_AGENT,
         }
-        resp = c_req.get(url, impersonate="chrome110", timeout=15, headers=headers)
+        resp = c_req.get(url, impersonate="chrome110", timeout=timeout_seconds, headers=headers)
         status_code = int(getattr(resp, "status_code", 0) or 0)
         if status_code >= 400:
             return True, {"status": status_code, "playlist_url": url, "reason": "playlist_http_error"}
@@ -16861,7 +17014,7 @@ class DownloadManagerApp:
         if "#EXT-X-STREAM-INF" in text:
             variant, _variant_attrs = _select_highest_hls_variant_url(playlist_url, text)
             if variant:
-                resp = c_req.get(variant, impersonate="chrome110", timeout=15, headers=headers)
+                resp = c_req.get(variant, impersonate="chrome110", timeout=timeout_seconds, headers=headers)
                 status_code = int(getattr(resp, "status_code", 0) or 0)
                 if status_code >= 400:
                     return True, {"status": status_code, "playlist_url": variant, "reason": "variant_http_error"}
@@ -16885,7 +17038,7 @@ class DownloadManagerApp:
         probe_headers["Range"] = "bytes=0-2047"
         for segment_url in segment_urls:
             try:
-                segment_resp = c_req.get(segment_url, impersonate="chrome110", timeout=15, headers=probe_headers)
+                segment_resp = c_req.get(segment_url, impersonate="chrome110", timeout=timeout_seconds, headers=probe_headers)
                 segment_status = int(getattr(segment_resp, "status_code", 0) or 0)
                 content_type = str((getattr(segment_resp, "headers", {}) or {}).get("content-type", "") or "").lower()
                 segment_body = bytes(getattr(segment_resp, "content", b"") or b"")
@@ -17055,6 +17208,17 @@ class DownloadManagerApp:
             if pending_byterange_length is not None:
                 return None
             if not probe_urls and total_bytes <= 0:
+                return None
+            max_probe_segments = max(int(M3U8_TOTAL_BYTES_MAX_PROBE_SEGMENTS or 0), 0)
+            if max_probe_segments and len(probe_urls) > max_probe_segments:
+                write_error_log(
+                    "m3u8 total bytes probe skipped",
+                    Exception("m3u8 exact total bytes probe skipped for long playlist"),
+                    url=playlist_url,
+                    source_site=_task_source_site_name(task) or None,
+                    probe_segments=len(probe_urls),
+                    max_probe_segments=max_probe_segments,
+                )
                 return None
             executor = None
             try:
@@ -21081,6 +21245,12 @@ class DownloadManagerApp:
             if marker in dominant_host:
                 boost_segment_threshold = int(marker_threshold)
                 break
+        media_host = urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower()
+        boost_worker_cap = int(PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS)
+        for marker, marker_workers in PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS_BY_HOST.items():
+            if marker in dominant_host or marker in media_host:
+                boost_worker_cap = int(marker_workers)
+                break
         boost_applied = False
         if (
             host_peer_count <= 1
@@ -21091,7 +21261,7 @@ class DownloadManagerApp:
             workers = max(
                 workers,
                 min(
-                    int(PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS),
+                    int(boost_worker_cap),
                     int(host_budget),
                     max(len(segments or []), 1),
                 ),
@@ -21106,6 +21276,18 @@ class DownloadManagerApp:
             )
             budget_limited = workers > per_task_budget
             workers = min(workers, per_task_budget)
+        tail_worker_cap = 0
+        tail_worker_shrink_applied = False
+        segment_count = len(segments or [])
+        if segment_count > 0:
+            shrink_factor = max(int(PARALLEL_HLS_TAIL_SHRINK_SEGMENT_FACTOR or 1), 1)
+            tail_worker_cap = max(
+                int(PARALLEL_HLS_TAIL_SHRINK_MIN_WORKERS),
+                int((segment_count + shrink_factor - 1) // shrink_factor),
+            )
+            if tail_worker_cap < workers:
+                tail_worker_shrink_applied = True
+                workers = max(int(PARALLEL_HLS_TAIL_SHRINK_MIN_WORKERS), int(tail_worker_cap))
         return {
             "workers": max(int(workers or 1), 1),
             "requested_workers": requested_workers,
@@ -21118,7 +21300,10 @@ class DownloadManagerApp:
             "per_task_worker_budget": int(per_task_budget),
             "boost_applied": bool(boost_applied),
             "boost_segment_threshold": int(boost_segment_threshold),
+            "boost_worker_cap": int(boost_worker_cap),
             "budget_limited": bool(budget_limited),
+            "tail_worker_cap": int(tail_worker_cap),
+            "tail_worker_shrink_applied": bool(tail_worker_shrink_applied),
         }
 
     def _fragment_workers_with_host_budget(self, desired_workers, media_url):
@@ -22353,6 +22538,7 @@ class DownloadManagerApp:
             pending_segments=pending_segment_count,
             completed_segments_at_start=completed_segments,
             workers=worker_count,
+            route_start_delay_seconds=self._m3u8_route_start_delay_seconds(task),
             requested_workers=int(worker_plan.get("requested_workers", worker_count) or worker_count),
             site_worker_cap=int(worker_plan.get("site_worker_cap", 0) or 0),
             host_worker_cap=int(worker_plan.get("host_worker_cap", 0) or 0),
@@ -22360,6 +22546,9 @@ class DownloadManagerApp:
             per_task_worker_budget=int(worker_plan.get("per_task_worker_budget", hls_host_worker_budget) or hls_host_worker_budget),
             worker_budget_limited=bool(worker_plan.get("budget_limited", False)),
             single_task_boost_applied=bool(worker_plan.get("boost_applied", False)),
+            boost_worker_cap=int(worker_plan.get("boost_worker_cap", 0) or 0),
+            tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
+            tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
             hls_host=hls_host,
             manifest_host=urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower(),
             hls_host_active_downloads=hls_host_active_downloads,
@@ -22603,6 +22792,8 @@ class DownloadManagerApp:
                 hls_host=hls_host,
                 hls_host_active_downloads=hls_host_active_downloads,
                 hls_host_worker_budget=hls_host_worker_budget,
+                tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
+                tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
                 remux_strategy=remux_strategy,
                 elapsed_seconds=round(elapsed_seconds, 3),
                 session_segment_bytes=session_segment_bytes,
@@ -22643,6 +22834,8 @@ class DownloadManagerApp:
                     hls_host=hls_host,
                     hls_host_active_downloads=hls_host_active_downloads,
                     hls_host_worker_budget=hls_host_worker_budget,
+                    tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
+                    tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
                     state=current_state,
                     shutdown_started=bool(self._shutdown_started),
                     progress_path=progress_path,
@@ -22693,6 +22886,8 @@ class DownloadManagerApp:
                             hls_host=hls_host,
                             hls_host_active_downloads=hls_host_active_downloads,
                             hls_host_worker_budget=hls_host_worker_budget,
+                            tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
+                            tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
                             original_error=str(exc)[:240],
                         )
                         return True
@@ -22895,6 +23090,7 @@ class DownloadManagerApp:
             hls_host=native_hls_host,
             hls_host_active_downloads=native_hls_host_active_downloads,
             hls_host_worker_budget=native_hls_host_worker_budget,
+            route_start_delay_seconds=self._m3u8_route_start_delay_seconds(task),
             throttled_rate_bps=ydl_opts.get("throttledratelimit"),
             http_chunk_size=ydl_opts.get("http_chunk_size"),
             buffersize=ydl_opts.get("buffersize"),
@@ -26999,6 +27195,43 @@ class DownloadManagerApp:
             ):
                 raise
             except Exception as ffmpeg_exc:
+                if self._is_retryable_media_download_error(ffmpeg_exc):
+                    source_page_url = self._get_task_source_page(task, fallback_url="")
+                    normalized_source_page = _normalize_download_url(source_page_url)
+                    normalized_target_url = _normalize_download_url(target_url)
+                    source_page_site = self._source_site_from_search_url(normalized_source_page)
+                    source_page_is_refreshable = (
+                        normalized_source_page
+                        and normalized_source_page != normalized_target_url
+                        and bool(source_page_site)
+                        and not _looks_like_manifest_url(normalized_source_page)
+                        and not re.search(r"\.(?:mp4|m4v|webm|mkv|mov|mp3|m4a|aac)(?:[?#]|$)", normalized_source_page, re.IGNORECASE)
+                    )
+                    refresh_history = list(_task_field_value(task, "_manifest_source_refresh_history", []) or [])
+                    refresh_key = f"{normalized_source_page}|{normalized_target_url}"
+                    if source_page_is_refreshable and refresh_key not in refresh_history:
+                        refresh_history.append(refresh_key)
+                        self._set_task_aux_fields(task, _manifest_source_refresh_history=refresh_history[-8:])
+                        write_error_log(
+                            "manifest source page refresh",
+                            ffmpeg_exc,
+                            item_id=item_id,
+                            failed_url=target_url,
+                            source_page=normalized_source_page,
+                            source_site=source_page_site,
+                            fallback_reason=fallback_reason,
+                            refresh_count=len(refresh_history),
+                        )
+                        self._set_cached_resolved_link_state(
+                            task,
+                            resolved_url="",
+                            resolved_url_saved_at=0.0,
+                            page_refresh_candidates=[],
+                            clear_source_refresh_history=True,
+                        )
+                        self._set_task_parse_ui(item_id, message="影片連結已失效，重新解析原始頁面...")
+                        self._download_task_internal(normalized_source_page, item_id, save_dir, use_impersonate, is_mp3)
+                        return True
                 if self._is_retryable_media_download_error(ffmpeg_exc) and _retry_next_page_fallback(
                     fallback_reason,
                     ffmpeg_exc,
