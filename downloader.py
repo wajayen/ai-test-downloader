@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260607-3550"
+APP_BUILD = "20260608-3560"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -80,7 +80,7 @@ TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
 URL_INPUT_HISTORY_LIMIT = 10
 MAX_DOWNLOADS_PER_DOMAIN = 3
 MAX_ACTIVE_DOWNLOADS_GLOBAL = 3
-STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 3
+STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 1
 STARTUP_RESUME_WARMUP_SECONDS = 8.0
 MAX_DOWNLOADS_PER_SOURCE_PAGE = 3
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
@@ -1450,6 +1450,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "resume implausible near-complete reset",
     "resume low speed reanalysis requested",
     "slow source reanalysis requested",
+    "parallel hls no progress reanalysis requested",
     "unsupported url alternate search prompt",
     "unsupported url alternate search declined",
     "cached resolved url startup timeout",
@@ -10207,6 +10208,7 @@ class DownloadManagerApp:
         self._startup_resume_pending = False
         self._startup_resume_scheduled = False
         self._startup_started_at = time.time()
+        self._startup_resume_warmup_active = False
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_ui()
         if self.tree is not None:
@@ -19944,7 +19946,9 @@ class DownloadManagerApp:
             elapsed = time.time() - float(getattr(self, "_startup_started_at", 0.0) or 0.0)
         except Exception:
             elapsed = STARTUP_RESUME_WARMUP_SECONDS
-        if elapsed < STARTUP_RESUME_WARMUP_SECONDS and self._has_startup_resume_workload():
+        warmup_active = elapsed < STARTUP_RESUME_WARMUP_SECONDS and self._has_startup_resume_workload()
+        self._startup_resume_warmup_active = bool(warmup_active)
+        if warmup_active:
             limit = min(limit, int(STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS))
         return max(1, limit)
 
@@ -19954,8 +19958,14 @@ class DownloadManagerApp:
         except Exception:
             save_dir = None
         for task in self.tasks.values():
-            state = str(_task_field_value(task, "state", "") or "")
-            if not (self._is_downloading_state(state) or self._is_queued_state(state)):
+            state = str(_task_field_value(task, "state", "") or "").strip().upper()
+            startup_resume_paused = (
+                state in PAUSED_TASK_STATES
+                and bool(_task_field_value(task, "resume_requested", False))
+                and not bool(_task_field_value(task, "_manual_pause_requested", False))
+            )
+            startup_resume_error = state == "ERROR" and self._is_retryable_persisted_download_error(task)
+            if not (self._is_downloading_state(state) or self._is_queued_state(state) or startup_resume_paused or startup_resume_error):
                 continue
             try:
                 if self._has_resume_artifact_state(
@@ -19997,6 +20007,9 @@ class DownloadManagerApp:
             source_page_limit=min(normalized_limit, int(MAX_DOWNLOADS_PER_SOURCE_PAGE)),
             active_count=active_count,
             queued_count=queued_count,
+            startup_resume_warmup_active=bool(getattr(self, "_startup_resume_warmup_active", False)),
+            startup_resume_warmup_limit=STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS,
+            startup_resume_warmup_seconds=STARTUP_RESUME_WARMUP_SECONDS,
             low_speed_threshold_bps=LOW_SPEED_CONCURRENCY_THRESHOLD_BPS,
             low_speed_max_downloads=LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS,
         )
@@ -22774,6 +22787,8 @@ class DownloadManagerApp:
         session_start_completed_segments = int(completed_segments or 0)
         last_segment_speed_update = time.time()
         last_segment_speed_bytes = int(completed_bytes or 0)
+        last_progress_activity_at = time.time()
+        last_progress_completed_segments = int(completed_segments or 0)
         worker_plan_segments = pending_segments if pending_segments else segments
         worker_plan = self._parallel_hls_worker_plan(
             source_site,
@@ -22826,7 +22841,7 @@ class DownloadManagerApp:
         )
 
         def _download_one(segment):
-            nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes, last_segment_speed_update, last_segment_speed_bytes
+            nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes, last_segment_speed_update, last_segment_speed_bytes, last_progress_activity_at, last_progress_completed_segments
             if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
                 stop_event.set()
                 raise StopDownloadException("shutdown requested")
@@ -22861,6 +22876,8 @@ class DownloadManagerApp:
                 completed_bytes += int(part_size or 0)
                 completed_duration += max(float(segment.get("duration", 0.0) or 0.0), 0.0)
                 completed_segments += 1
+                last_progress_activity_at = now = time.time()
+                last_progress_completed_segments = int(completed_segments or 0)
                 _set_task_aux_fields(
                     task,
                     downloaded_bytes=int(completed_bytes or 0),
@@ -22870,7 +22887,6 @@ class DownloadManagerApp:
                     _parallel_hls_workers=int(worker_count),
                     _parallel_hls_updated_at=time.time(),
                 )
-                now = time.time()
                 elapsed = max(now - started_at, 0.001)
                 session_segment_bytes = max(int(completed_bytes or 0) - int(session_start_completed_bytes or 0), 0)
                 session_completed_segments = max(int(completed_segments or 0) - int(session_start_completed_segments or 0), 0)
@@ -22952,6 +22968,36 @@ class DownloadManagerApp:
                             return_when=concurrent.futures.FIRST_COMPLETED,
                         )
                         if not done:
+                            now = time.time()
+                            try:
+                                stalled_seconds = max(now - float(last_progress_activity_at or started_at), 0.0)
+                            except Exception:
+                                stalled_seconds = 0.0
+                            if stalled_seconds >= min(float(SLOW_SOURCE_REANALYZE_DELAY_SECONDS), float(RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS)):
+                                current_completed = int(completed_segments or 0)
+                                if current_completed <= int(last_progress_completed_segments or 0) and self._should_trigger_resume_low_speed_reanalysis(
+                                    task,
+                                    _normalize_download_url(_task_field_value(task, "url", "")) or media_url,
+                                    os.path.dirname(out_path) or _APP_DIR,
+                                    0.0,
+                                    now=now,
+                                    allow_zero_progress=True,
+                                ):
+                                    stop_event.set()
+                                    for pending_future in in_flight:
+                                        pending_future.cancel()
+                                    write_error_log(
+                                        "parallel hls no progress reanalysis requested",
+                                        Exception("parallel HLS made no segment progress and requested source reanalysis"),
+                                        url=media_url,
+                                        item_id=item_id,
+                                        source_site=_task_source_site_name(task) or None,
+                                        stalled_seconds=round(stalled_seconds, 3),
+                                        completed_segments=current_completed,
+                                        total_segments=total_segments,
+                                        in_flight=len(in_flight),
+                                    )
+                                    raise ResumeLowSpeedReanalysisException("parallel HLS made no progress; reanalyzing source")
                             continue
                         for future in done:
                             if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
@@ -23906,6 +23952,7 @@ class DownloadManagerApp:
         duration_box = {}
         media_bps_box = {}
         total_bytes_box = {}
+        exact_total_probe_allowed = not self._is_resume_download_active(task, save_dir=save_dir, is_mp3=is_mp3)
 
         def probe_metadata():
             for candidate in candidate_urls:
@@ -23922,7 +23969,7 @@ class DownloadManagerApp:
                     pass
                 if self._shutdown_requested():
                     return
-                if _task_source_site_name(task) not in M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES:
+                if exact_total_probe_allowed and _task_source_site_name(task) not in M3U8_EXACT_TOTAL_BYTES_DISABLED_SITES:
                     try:
                         total_bytes = self._get_m3u8_total_bytes(candidate, headers=manifest_headers, task=task)
                         if total_bytes and total_bytes > 0:
@@ -25954,7 +26001,7 @@ class DownloadManagerApp:
                 _low_speed_reanalysis_mode="",
             )
 
-    def _should_trigger_resume_low_speed_reanalysis(self, task, source_url, save_dir, speed_bps, is_mp3=False, now=None):
+    def _should_trigger_resume_low_speed_reanalysis(self, task, source_url, save_dir, speed_bps, is_mp3=False, now=None, allow_zero_progress=False):
         if task is None:
             return False
         if bool(_task_field_value(task, "_resume_low_speed_reanalysis_attempted", False)):
@@ -25972,18 +26019,20 @@ class DownloadManagerApp:
         threshold_bps = RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS if is_resume_mode else SLOW_SOURCE_REANALYZE_THRESHOLD_BPS
         if (now - started_at) < delay_seconds:
             return False
-        if not is_resume_mode:
+        if not is_resume_mode and not allow_zero_progress:
             try:
                 downloaded_bytes = max(int(_task_field_value(task, "downloaded_bytes", 0) or 0), 0)
             except Exception:
                 downloaded_bytes = 0
             if downloaded_bytes < int(SLOW_SOURCE_REANALYZE_MIN_DOWNLOADED_BYTES):
                 return False
+        if speed_bps is None:
+            return False
         try:
-            normalized_speed = max(float(speed_bps or 0.0), 0.0)
+            normalized_speed = max(float(speed_bps), 0.0)
         except Exception:
-            normalized_speed = 0.0
-        if normalized_speed <= 0 or normalized_speed >= threshold_bps:
+            return False
+        if normalized_speed >= threshold_bps:
             return False
         _set_task_aux_fields(
             task,
@@ -26001,13 +26050,20 @@ class DownloadManagerApp:
             speed_bps=normalized_speed,
             threshold_bps=threshold_bps,
             delay_seconds=delay_seconds,
-            min_downloaded_bytes=(0 if is_resume_mode else SLOW_SOURCE_REANALYZE_MIN_DOWNLOADED_BYTES),
+            min_downloaded_bytes=(0 if is_resume_mode or allow_zero_progress else SLOW_SOURCE_REANALYZE_MIN_DOWNLOADED_BYTES),
             elapsed_seconds=max(now - started_at, 0.0),
             is_mp3=bool(is_mp3),
+            allow_zero_progress=bool(allow_zero_progress),
         )
         return True
 
     def _retry_source_after_cached_link_failure(self, task, item_id, source_url, save_dir, use_impersonate, is_mp3, expired=False, failed_resolved_url="", reason_message=None, clear_resume_artifacts=False, preserve_candidates=False):
+        _set_task_aux_fields(
+            task,
+            _resume_low_speed_reanalysis_attempted=False,
+            _resume_low_speed_watch_started_at=0.0,
+            _low_speed_reanalysis_mode="",
+        )
         if failed_resolved_url and clear_resume_artifacts:
             self._clear_resume_artifacts_for_url(task, failed_resolved_url, save_dir, is_mp3=is_mp3)
         elif failed_resolved_url:
@@ -27702,6 +27758,12 @@ class DownloadManagerApp:
             )
 
         def _retry_next_page_fallback(reason, exc=None):
+            def _abort_page_fallback_if_stopped():
+                if self._shutdown_requested():
+                    raise StopDownloadException("shutdown requested")
+                self._ensure_task_can_continue(item_id)
+
+            _abort_page_fallback_if_stopped()
             current_url = _normalize_download_url(url)
             fallback_source_site = _task_source_site_name(task)
             fallback_candidates = _dedupe_download_urls(
@@ -27754,10 +27816,12 @@ class DownloadManagerApp:
                     source_site=fallback_source_site,
                 )
             if not fallback_candidates and fallback_jav_code:
+                _abort_page_fallback_if_stopped()
                 try:
                     source_page_url = _normalize_download_url(_task_field_value(task, "source_page", ""))
                     searched_candidates = []
                     for result in self._google_video_search_results(fallback_jav_code):
+                        _abort_page_fallback_if_stopped()
                         candidate_url = _normalize_download_url(result.get("url", ""))
                         if (
                             candidate_url
@@ -27794,6 +27858,7 @@ class DownloadManagerApp:
             tried_fallbacks = []
             last_fallback_exc = exc
             while fallback_candidates:
+                _abort_page_fallback_if_stopped()
                 next_url = fallback_candidates[0]
                 remaining_fallbacks = fallback_candidates[1:]
                 next_site = self._source_site_from_search_url(next_url) or _task_source_site_name(task)
@@ -27855,6 +27920,7 @@ class DownloadManagerApp:
                 )
                 self._set_task_parse_ui(item_id, message="目前來源解析失敗，改用下一個搜尋結果...")
                 try:
+                    _abort_page_fallback_if_stopped()
                     self._download_task_internal(next_url, item_id, save_dir, use_impersonate, is_mp3)
                     return True
                 except (
