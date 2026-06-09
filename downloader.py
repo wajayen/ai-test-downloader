@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260609-3570"
+APP_BUILD = "20260609-3580"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -117,6 +117,8 @@ SHUTDOWN_BACKGROUND_THREAD_WAIT_SECONDS = 3.0
 SHUTDOWN_BACKGROUND_THREAD_EXTRA_WAIT_SECONDS = 6.0
 SHUTDOWN_DOWNLOAD_THREAD_EXTRA_WAIT_SECONDS = 12.0
 SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS = 6.0
+SHUTDOWN_NEAR_COMPLETE_HLS_FINAL_WAVE_WAIT_SECONDS = 18.0
+SHUTDOWN_NEAR_COMPLETE_HLS_FINAL_WAVE_MAX_PENDING_SEGMENTS = 2
 SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS = 24
 SHUTDOWN_NEAR_COMPLETE_HLS_MIN_RATIO = 0.98
 MEDIA_PROBE_CACHE_TTL_SECONDS = 2.5
@@ -890,7 +892,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "avbebe": 24,
     "bestjavporn": 36,
     "dramasq": 24,
-    "gimy": 24,
+    "gimy": 48,
     "goodav17": 24,
     "hayav": 32,
     "hohoj": 60,
@@ -912,10 +914,10 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "ijycnd.com": 32,
     "huyall.com": 48,
     "qsstvw.com": 48,
-    "qqqrst.com": 48,
-    "qwe132456.cc": 48,
-    "ppqrrs.com": 48,
-    "adfg8.vip": 48,
+    "qqqrst.com": 60,
+    "qwe132456.cc": 60,
+    "ppqrrs.com": 60,
+    "adfg8.vip": 60,
     "yzzy": 48,
     "bdzybf": 24,
     "baisiweiting.com": 48,
@@ -943,7 +945,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "hls.sb-cd.com": 24,
     "cdn77.org": 24,
     "high23-playback.com": 24,
-    "phimgood.com": 24,
+    "phimgood.com": 60,
     "ckzy3.com": 24,
     "bfllvip.com": 24,
     "cdn2020.com": 48,
@@ -974,16 +976,18 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "upload18.org": 72,
     "cdn.usex.tube": 108,
     "baisiweiting.com": 96,
-    "qqqrst.com": 144,
-    "qwe132456.cc": 144,
-    "adfg8.vip": 144,
+    "qqqrst.com": 180,
+    "qwe132456.cc": 180,
+    "adfg8.vip": 180,
+    "ppqrrs.com": 180,
+    "phimgood.com": 180,
     "yzzy": 144,
     "cdnlz": 72,
     "gsuus.com": 72,
     "lz-cdn": 144,
     "olemovienews.com": 72,
 }
-PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX = 120
+PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX = 180
 PARALLEL_HLS_HOST_WORKER_MIN_PER_TASK = 8
 PARALLEL_HLS_IN_FLIGHT_MULTIPLIER = 4
 PARALLEL_HLS_SCHEDULER_POLL_SECONDS = 0.2
@@ -1006,6 +1010,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS_BY_HOST = {
     "qwe132456.cc": 60,
     "ppqrrs.com": 60,
     "adfg8.vip": 60,
+    "phimgood.com": 60,
     "yzzy": 60,
 }
 PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
@@ -1040,8 +1045,22 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
 )
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 6
+PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST = {
+    "qqqrst.com": 12,
+    "qwe132456.cc": 12,
+    "ppqrrs.com": 12,
+    "adfg8.vip": 12,
+    "phimgood.com": 12,
+}
 PARALLEL_HLS_SHUTDOWN_SEGMENT_TIMEOUT_SECONDS = 1.5
 PARALLEL_HLS_SEGMENT_RETRIES = 10
+PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST = {
+    "qqqrst.com": 16,
+    "qwe132456.cc": 16,
+    "ppqrrs.com": 16,
+    "adfg8.vip": 16,
+    "phimgood.com": 16,
+}
 PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES = 20
 PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
@@ -13285,6 +13304,19 @@ class DownloadManagerApp:
                 continue
         return names
 
+    def _active_download_worker_ids_snapshot(self):
+        try:
+            with self._active_download_item_ids_lock:
+                return sorted(str(item_id) for item_id in self._active_download_item_ids)
+        except Exception:
+            return []
+
+    def _split_background_thread_names(self):
+        names = self._active_background_thread_names()
+        download_names = [name for name in names if str(name).startswith("download-")]
+        other_names = [name for name in names if not str(name).startswith("download-")]
+        return download_names, other_names
+
     def _wait_for_download_background_threads(self, timeout_seconds=SHUTDOWN_DOWNLOAD_THREAD_EXTRA_WAIT_SECONDS):
         deadline = time.time() + max(float(timeout_seconds or 0.0), 0.0)
         while time.time() < deadline:
@@ -21588,7 +21620,11 @@ class DownloadManagerApp:
         tail_worker_cap = 0
         tail_worker_shrink_applied = False
         segment_count = len(segments or [])
-        if segment_count > 0:
+        try:
+            resume_tail_batch = int(total_segment_count or 0) > segment_count > 0
+        except Exception:
+            resume_tail_batch = False
+        if segment_count > 0 and not resume_tail_batch:
             shrink_factor = max(int(PARALLEL_HLS_TAIL_SHRINK_SEGMENT_FACTOR or 1), 1)
             tail_worker_cap = max(
                 int(PARALLEL_HLS_TAIL_SHRINK_MIN_WORKERS),
@@ -21614,6 +21650,7 @@ class DownloadManagerApp:
             "budget_limited": bool(budget_limited),
             "tail_worker_cap": int(tail_worker_cap),
             "tail_worker_shrink_applied": bool(tail_worker_shrink_applied),
+            "resume_tail_batch": bool(resume_tail_batch),
         }
 
     def _fragment_workers_with_host_budget(self, desired_workers, media_url):
@@ -22216,6 +22253,32 @@ class DownloadManagerApp:
         parallel_hls_thread_local.session = session
         return session
 
+    def _parallel_hls_segment_timeout(self, segment_url, stop_event=None):
+        if (
+            (stop_event is not None and stop_event.is_set())
+            or getattr(self, "_shutdown_stop_requested", False)
+            or self._shutdown_started
+        ):
+            return PARALLEL_HLS_SHUTDOWN_SEGMENT_TIMEOUT_SECONDS
+        normalized_url = _normalize_download_url(segment_url) or str(segment_url or "")
+        host = urllib.parse.urlsplit(normalized_url).netloc.lower()
+        for marker, timeout_seconds in PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST.items():
+            if marker in host:
+                return max(float(timeout_seconds or 0), float(PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS))
+        return PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS
+
+    def _parallel_hls_segment_retry_count(self, segment_url):
+        normalized_url = _normalize_download_url(segment_url) or str(segment_url or "")
+        host = urllib.parse.urlsplit(normalized_url).netloc.lower()
+        if "googleusercontent.com" in host:
+            return int(PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES)
+        retry_count = int(PARALLEL_HLS_SEGMENT_RETRIES)
+        for marker, host_retries in PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST.items():
+            if marker in host:
+                retry_count = max(retry_count, int(host_retries or 0))
+                break
+        return max(retry_count, 1)
+
     def _fetch_parallel_hls_segment_payload(self, segment_url, request_headers, prefer_curl=False, stop_event=None):
         def _stop_requested():
             return bool(
@@ -22225,9 +22288,7 @@ class DownloadManagerApp:
             )
 
         def _segment_timeout():
-            if _stop_requested():
-                return PARALLEL_HLS_SHUTDOWN_SEGMENT_TIMEOUT_SECONDS
-            return PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS
+            return self._parallel_hls_segment_timeout(segment_url, stop_event=stop_event)
 
         def _fetch_with_curl():
             if _stop_requested():
@@ -22277,9 +22338,7 @@ class DownloadManagerApp:
             )
 
         def _segment_timeout():
-            if _stop_requested():
-                return PARALLEL_HLS_SHUTDOWN_SEGMENT_TIMEOUT_SECONDS
-            return PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS
+            return self._parallel_hls_segment_timeout(segment_url, stop_event=stop_event)
 
         def _content_length_from_headers(headers):
             try:
@@ -22402,7 +22461,7 @@ class DownloadManagerApp:
         segment_url = str(segment.get("url") or "")
         segment_host = urllib.parse.urlsplit(_normalize_download_url(segment_url) or "").netloc.lower()
         is_google_segment = "googleusercontent.com" in segment_host
-        retry_count = PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES if is_google_segment else PARALLEL_HLS_SEGMENT_RETRIES
+        retry_count = self._parallel_hls_segment_retry_count(segment_url)
         last_exc = None
         temp_part_path = f"{part_path}.tmp"
         try:
@@ -22894,6 +22953,7 @@ class DownloadManagerApp:
             boost_worker_cap=int(worker_plan.get("boost_worker_cap", 0) or 0),
             tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
             tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
+            resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
             hls_host=hls_host,
             manifest_host=urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower(),
             hls_host_active_downloads=hls_host_active_downloads,
@@ -23251,6 +23311,7 @@ class DownloadManagerApp:
                 hls_host_worker_budget=hls_host_worker_budget,
                 tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
                 tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
+                resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
                 remux_strategy=remux_strategy,
                 elapsed_seconds=round(elapsed_seconds, 3),
                 session_segment_bytes=session_segment_bytes,
@@ -23294,6 +23355,7 @@ class DownloadManagerApp:
                     hls_host_worker_budget=hls_host_worker_budget,
                     tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
                     tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
+                    resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
                     state=current_state,
                     shutdown_started=bool(self._shutdown_started),
                     progress_path=progress_path,
@@ -23346,6 +23408,7 @@ class DownloadManagerApp:
                             hls_host_worker_budget=hls_host_worker_budget,
                             tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
                             tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
+                            resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
                             original_error=str(exc)[:240],
                         )
                         return True
@@ -25589,27 +25652,67 @@ class DownloadManagerApp:
                 continue
             if total_segments <= 0 or completed_segments <= 0:
                 continue
+            grace_reason = ""
             if pending_segments <= 0:
+                grace_reason = "all_segments_completed"
                 candidates.append(item_id)
-                continue
-            completion_ratio = completed_segments / max(total_segments, 1)
-            pending_limit = max(int(SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS), worker_count * 2)
-            if completion_ratio >= float(SHUTDOWN_NEAR_COMPLETE_HLS_MIN_RATIO) and pending_segments <= pending_limit:
-                candidates.append(item_id)
+            else:
+                completion_ratio = completed_segments / max(total_segments, 1)
+                pending_limit = max(int(SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS), worker_count * 2)
+                pending_within_active_wave = pending_segments <= max(worker_count, int(SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS))
+                if completion_ratio >= float(SHUTDOWN_NEAR_COMPLETE_HLS_MIN_RATIO) and pending_segments <= pending_limit:
+                    grace_reason = "completion_ratio"
+                    candidates.append(item_id)
+                elif pending_within_active_wave and completed_segments >= worker_count:
+                    grace_reason = "active_worker_wave"
+                    candidates.append(item_id)
+            if grace_reason:
+                try:
+                    _set_task_aux_fields(
+                        task,
+                        _parallel_hls_shutdown_grace_reason=grace_reason,
+                        _parallel_hls_shutdown_grace_pending_segments=pending_segments,
+                        _parallel_hls_shutdown_grace_completed_segments=completed_segments,
+                        _parallel_hls_shutdown_grace_total_segments=total_segments,
+                    )
+                except Exception:
+                    pass
         return candidates
 
     def _wait_for_near_complete_shutdown_downloads(self):
         candidate_ids = self._near_complete_shutdown_hls_task_ids()
         if not candidate_ids:
             return False
+        candidate_details = []
+        timeout_seconds = max(float(SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS or 0.0), 0.0)
+        for candidate_id in candidate_ids:
+            candidate_task = self.tasks.get(candidate_id, {})
+            try:
+                pending_segments = int(_task_field_value(candidate_task, "_parallel_hls_shutdown_grace_pending_segments", 0) or 0)
+            except Exception:
+                pending_segments = 0
+            if 0 < pending_segments <= int(SHUTDOWN_NEAR_COMPLETE_HLS_FINAL_WAVE_MAX_PENDING_SEGMENTS):
+                timeout_seconds = max(
+                    timeout_seconds,
+                    float(SHUTDOWN_NEAR_COMPLETE_HLS_FINAL_WAVE_WAIT_SECONDS or 0.0),
+                )
+            candidate_details.append(
+                "{}:{}:{}/{}".format(
+                    candidate_id,
+                    str(_task_field_value(candidate_task, "_parallel_hls_shutdown_grace_reason", "") or "near_complete"),
+                    int(_task_field_value(candidate_task, "_parallel_hls_shutdown_grace_completed_segments", 0) or 0),
+                    int(_task_field_value(candidate_task, "_parallel_hls_shutdown_grace_total_segments", 0) or 0),
+                )
+            )
         started_at = time.time()
-        deadline = started_at + max(float(SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS or 0.0), 0.0)
+        deadline = started_at + timeout_seconds
         try:
             write_error_log(
                 "near complete shutdown grace started",
                 Exception("near complete shutdown grace started"),
                 item_ids=", ".join(candidate_ids),
-                timeout_seconds=SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS,
+                candidate_details=", ".join(candidate_details),
+                timeout_seconds=round(timeout_seconds, 3),
             )
         except Exception:
             pass
@@ -25633,6 +25736,7 @@ class DownloadManagerApp:
                 "near complete shutdown grace result",
                 Exception("near complete shutdown grace result"),
                 item_ids=", ".join(candidate_ids),
+                candidate_details=", ".join(candidate_details),
                 completed=bool(completed),
                 elapsed_seconds=round(time.time() - started_at, 3),
                 remaining_item_ids=", ".join(self._near_complete_shutdown_hls_task_ids()),
@@ -32673,12 +32777,20 @@ class DownloadManagerApp:
                 remaining_threads = self._wait_for_background_threads(timeout_seconds=SHUTDOWN_BACKGROUND_THREAD_EXTRA_WAIT_SECONDS)
             except Exception:
                 pass
-        if remaining_threads > 0 and any(name.startswith("download-") for name in self._active_background_thread_names()):
+        download_thread_names, other_thread_names = self._split_background_thread_names()
+        if remaining_threads > 0 and download_thread_names:
             try:
                 remaining_download_threads = self._wait_for_download_background_threads(timeout_seconds=SHUTDOWN_DOWNLOAD_THREAD_EXTRA_WAIT_SECONDS)
+                try:
+                    self._signal_transfer_stop_events()
+                    self._close_active_network_sessions()
+                except Exception:
+                    pass
                 remaining_threads = max(remaining_download_threads, self._wait_for_background_threads(timeout_seconds=0.5))
             except Exception:
                 pass
+        download_thread_names, other_thread_names = self._split_background_thread_names()
+        active_download_worker_ids = self._active_download_worker_ids_snapshot()
         try:
             with self._resume_progress_lock:
                 self._resume_progress_cache.clear()
@@ -32706,7 +32818,10 @@ class DownloadManagerApp:
                 "app shutdown finalized",
                 Exception("app shutdown finalized"),
                 remaining_background_threads=remaining_threads,
-                remaining_background_thread_names=", ".join(self._active_background_thread_names()),
+                remaining_background_thread_names=", ".join(download_thread_names + other_thread_names),
+                remaining_download_thread_names=", ".join(download_thread_names),
+                remaining_other_thread_names=", ".join(other_thread_names),
+                active_download_worker_ids=", ".join(active_download_worker_ids),
             )
         except Exception:
             pass
