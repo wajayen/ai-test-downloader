@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260609-3590"
+APP_BUILD = "20260610-3600"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -83,6 +83,45 @@ MAX_ACTIVE_DOWNLOADS_GLOBAL = 3
 STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 2
 STARTUP_RESUME_WARMUP_SECONDS = 4.0
 MAX_DOWNLOADS_PER_SOURCE_PAGE = 3
+DIRECT_DOWNLOAD_FILE_EXTENSIONS = (
+    ".7z",
+    ".apk",
+    ".avi",
+    ".bin",
+    ".bz2",
+    ".csv",
+    ".doc",
+    ".docx",
+    ".exe",
+    ".flac",
+    ".gif",
+    ".gz",
+    ".iso",
+    ".jpeg",
+    ".jpg",
+    ".m4a",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".msi",
+    ".pdf",
+    ".png",
+    ".rar",
+    ".tar",
+    ".tgz",
+    ".ts",
+    ".txt",
+    ".wav",
+    ".webm",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".zip",
+)
+DIRECT_MEDIA_FILE_EXTENSIONS = (".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".m4v", ".ts", ".avi", ".mov", ".flac", ".wav")
+DIRECT_IMAGE_FILE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
     "movieffm": 3,
 }
@@ -827,12 +866,14 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "hhuus.com",
     "bfvvs.com",
     "jisuzyv.com",
+    "vip.ffzy-plays.com",
+    "ffzy-plays.com",
+    "ffzy-play",
     "bfikuncdn.com",
     "baisiweiting.com",
     "lz-cdn",
     "lz-cdn.com",
     "yuglf.com",
-    "ffzy-play",
     "cdnlz",
     "gsuus.com",
     "olemovienews.com",
@@ -872,8 +913,10 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "hhuus.com",
     "bfvvs.com",
     "jisuzyv.com",
-    "bfikuncdn.com",
+    "vip.ffzy-plays.com",
+    "ffzy-plays.com",
     "ffzy-play",
+    "bfikuncdn.com",
     "yzzy",
     "bdzybf",
     "dytt-film.com",
@@ -887,7 +930,7 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "85xvideo": 48,
-    "movieffm": 48,
+    "movieffm": 60,
     "18av": 32,
     "avbebe": 24,
     "bestjavporn": 36,
@@ -948,6 +991,9 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "phimgood.com": 60,
     "ckzy3.com": 24,
     "bfllvip.com": 24,
+    "vip.ffzy-plays.com": 60,
+    "ffzy-plays.com": 60,
+    "ffzy-play": 60,
     "cdn2020.com": 48,
     "huabf.com": 48,
     "googleusercontent.com": 1,
@@ -968,6 +1014,9 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "turbovidhls.com": 144,
     "121126.com": 144,
     "cdn2020.com": 144,
+    "vip.ffzy-plays.com": 144,
+    "ffzy-plays.com": 144,
+    "ffzy-play": 144,
     "huabf.com": 144,
     "surrit.com": 90,
     "streamfastpro": 96,
@@ -1013,6 +1062,9 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS_BY_HOST = {
     "phimgood.com": 60,
     "yzzy": 60,
     "surrit.com": 48,
+    "vip.ffzy-plays.com": 60,
+    "ffzy-plays.com": 60,
+    "ffzy-play": 60,
 }
 PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "baisiweiting.com",
@@ -1043,6 +1095,9 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "taopianplay1.com",
     "streamfastpro",
     "surrit.com",
+    "vip.ffzy-plays.com",
+    "ffzy-plays.com",
+    "ffzy-play",
 )
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 6
@@ -1378,6 +1433,7 @@ LOG_ASCII_MIRROR_KEYS = frozenset((
 ))
 TRACE_LOG_CONTEXTS = frozenset((
     "app start",
+    "app peer processes detected",
     "app shutdown finalized",
     "app shutdown started",
     "shutdown wait active downloads timeout",
@@ -1419,6 +1475,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls skipped unsupported edge segments",
     "parallel hls google retry later",
     "parallel hls purged invalid resume segments",
+    "parallel hls purged mismatched resume metadata",
     "parallel hls skipped missing leading resume segments",
     "parallel hls resume segments loaded",
     "ggjav hls exhausted search fallback",
@@ -6033,9 +6090,40 @@ def _infer_media_extension_from_url(url):
     for candidate in candidates:
         decoded_candidate = urllib.parse.unquote(str(candidate or ""))
         lowered_candidate = decoded_candidate.lower()
-        for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mkv", ".webm", ".m4a", ".mp3"):
-            if ext in lowered_candidate:
+        for ext in DIRECT_DOWNLOAD_FILE_EXTENSIONS:
+            if re.search(re.escape(ext) + r"(?:$|[?&#;\"'\s])", lowered_candidate):
                 return ext
+    return ""
+
+
+def _direct_download_filename_from_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized)
+    query_map = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    filename_candidates = []
+    for key in ("response-content-disposition", "content-disposition"):
+        for value in query_map.get(key, []):
+            decoded_value = urllib.parse.unquote(str(value or ""))
+            match = re.search(r"filename\*?=(?:UTF-8''|\"?)([^\";]+)", decoded_value, re.IGNORECASE)
+            if match:
+                filename_candidates.append(match.group(1))
+    for key in ("filename", "file", "name", "download"):
+        filename_candidates.extend(query_map.get(key, []))
+    path_name = os.path.basename(urllib.parse.unquote(parsed.path or ""))
+    if path_name:
+        filename_candidates.append(path_name)
+    inferred_ext = _infer_media_extension_from_url(normalized)
+    for candidate in filename_candidates:
+        filename = os.path.basename(urllib.parse.unquote(str(candidate or "")).strip().strip("\"'"))
+        filename = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", filename).strip(" .-_")
+        if not filename:
+            continue
+        if inferred_ext and not os.path.splitext(filename)[1]:
+            filename = f"{filename}{inferred_ext}"
+        if _infer_media_extension_from_url(filename) or os.path.splitext(filename)[1].lower() in DIRECT_DOWNLOAD_FILE_EXTENSIONS:
+            return filename
     return ""
 
 
@@ -6047,7 +6135,7 @@ def _looks_like_http_media_url(url):
         return True
     parsed = urllib.parse.urlsplit(normalized)
     lower_path = (parsed.path or "").lower()
-    return lower_path.endswith((".mp4", ".mkv", ".webm", ".m4a", ".mp3"))
+    return lower_path.endswith(DIRECT_DOWNLOAD_FILE_EXTENSIONS)
 
 
 def _split_stream_and_direct_candidates(candidate_urls, skip_preview=True, direct_filter=None):
@@ -16275,7 +16363,7 @@ class DownloadManagerApp:
             self._set_task_named_column_text(item_id, "progress", "--")
             return False
         output_ext = os.path.splitext(str(output_path or ""))[1].lower()
-        if output_ext in (".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".m4v", ".ts"):
+        if output_ext in DIRECT_MEDIA_FILE_EXTENSIONS:
             media_info = self._probe_media_info(output_path)
             if not media_info.get("valid"):
                 exc = Exception("download output is not a valid media file")
@@ -18990,20 +19078,24 @@ class DownloadManagerApp:
 
     def _load_resume_progress_info(self, progress_path):
         if not progress_path or not os.path.exists(progress_path):
-            return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": ""}
+            return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": "", "progress_info": {}}
         try:
             data = _load_json_with_backup(progress_path, {})
             if not isinstance(data, dict):
-                return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": ""}
+                return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": "", "progress_info": {}}
+            progress_info = data.get("progress_info", {})
+            if not isinstance(progress_info, dict):
+                progress_info = {}
             return {
                 "seconds": max(float(data.get("seconds", 0) or 0), 0.0),
                 "bytes": max(int(data.get("bytes", 0) or 0), 0),
                 "total_bytes": max(int(data.get("total_bytes", 0) or 0), 0),
                 "source_url": str(data.get("source_url", "") or ""),
                 "resume_id": str(data.get("resume_id", "") or ""),
+                "progress_info": progress_info,
             }
         except Exception:
-            return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": ""}
+            return {"seconds": 0, "bytes": 0, "total_bytes": 0, "source_url": "", "resume_id": "", "progress_info": {}}
 
     def _normalize_resume_match_keys(self, resume_keys):
         keys = []
@@ -19078,6 +19170,7 @@ class DownloadManagerApp:
         min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
         min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
         force=False,
+        progress_info=None,
     ):
         if not progress_path:
             return
@@ -19086,6 +19179,7 @@ class DownloadManagerApp:
         total_bytes_value = max(int(total_bytes or 0), 0)
         source_value = str(source_url or "")
         resume_id_value = self._normalize_resume_state_id(progress_path)
+        progress_info_value = progress_info if isinstance(progress_info, dict) else {}
         min_interval_seconds = max(float(min_interval_seconds or 0.0), 0.0)
         min_bytes_delta = max(int(min_bytes_delta or 0), 0)
         now = time.time()
@@ -19099,6 +19193,7 @@ class DownloadManagerApp:
                     last_total_bytes = int(cached.get("total_bytes", 0) or 0)
                     last_source = str(cached.get("source_url", "") or "")
                     last_resume_id = str(cached.get("resume_id", "") or "")
+                    last_progress_info = cached.get("progress_info", {}) if isinstance(cached.get("progress_info", {}), dict) else {}
                     last_saved_at = float(cached.get("saved_at", 0.0) or 0.0)
                     same_resume_target = (
                         (source_value and source_value == last_source)
@@ -19111,6 +19206,8 @@ class DownloadManagerApp:
                             seconds_value = max(seconds_value, last_seconds)
                             bytes_value = max(bytes_value, last_bytes)
                             total_bytes_value = max(total_bytes_value, last_total_bytes)
+                            if not progress_info_value:
+                                progress_info_value = last_progress_info
                     if (
                         same_resume_target
                         and now - last_saved_at < min_interval_seconds
@@ -19123,6 +19220,7 @@ class DownloadManagerApp:
                             "total_bytes": total_bytes_value,
                             "source_url": source_value,
                             "resume_id": resume_id_value,
+                            "progress_info": progress_info_value,
                             "saved_at": last_saved_at,
                         }
                         return
@@ -19146,12 +19244,15 @@ class DownloadManagerApp:
                     persisted_seconds = float(persisted.get("seconds", 0.0) or 0.0)
                     persisted_bytes = int(persisted.get("bytes", 0) or 0)
                     persisted_total_bytes = int(persisted.get("total_bytes", 0) or 0)
+                    persisted_progress_info = persisted.get("progress_info", {}) if isinstance(persisted.get("progress_info", {}), dict) else {}
                     if self._should_prefer_lower_resume_progress(seconds_value, bytes_value, persisted_seconds, persisted_bytes):
                         pass
                     else:
                         seconds_value = max(seconds_value, persisted_seconds)
                         bytes_value = max(bytes_value, persisted_bytes)
                         total_bytes_value = max(total_bytes_value, persisted_total_bytes)
+                        if not progress_info_value:
+                            progress_info_value = persisted_progress_info
         payload = {
             "seconds": seconds_value,
             "bytes": bytes_value,
@@ -19160,6 +19261,8 @@ class DownloadManagerApp:
             "resume_id": resume_id_value,
             "updated_at": now,
         }
+        if progress_info_value:
+            payload["progress_info"] = progress_info_value
         try:
             _atomic_json_dump(progress_path, payload, keep_backup=False)
             with self._resume_progress_lock:
@@ -19169,6 +19272,7 @@ class DownloadManagerApp:
                     "total_bytes": total_bytes_value,
                     "source_url": source_value,
                     "resume_id": resume_id_value,
+                    "progress_info": progress_info_value,
                     "saved_at": now,
                 }
         except Exception:
@@ -21965,6 +22069,9 @@ class DownloadManagerApp:
             elif line.startswith("#EXT-X-KEY"):
                 attrs = self._parse_hls_attribute_list(line.split(":", 1)[1] if ":" in line else "")
                 method = str(attrs.get("METHOD", "") or "").upper()
+                if method == "NONE":
+                    active_key = None
+                    continue
                 if method and method != "AES-128":
                     raise Exception(f"parallel HLS unsupported key method: {method}")
                 key_uri = attrs.get("URI", "")
@@ -22866,6 +22973,35 @@ class DownloadManagerApp:
         def _part_path(segment):
             return os.path.join(part_dir, f"{int(segment['index']):06d}.ts")
 
+        stored_progress_info = self._load_resume_progress_info(progress_path)
+        stored_hls_info = stored_progress_info.get("progress_info", {}) if isinstance(stored_progress_info.get("progress_info", {}), dict) else {}
+        stored_hls_total_segments = 0
+        if str(stored_hls_info.get("type", "") or "") == "parallel_hls":
+            try:
+                stored_hls_total_segments = max(int(stored_hls_info.get("hls_total_segments", 0) or 0), 0)
+            except Exception:
+                stored_hls_total_segments = 0
+        if stored_hls_total_segments and stored_hls_total_segments != int(total_segments or 0):
+            stale_parts = 0
+            try:
+                stale_parts = len(glob.glob(os.path.join(part_dir, "*.ts")))
+            except Exception:
+                stale_parts = 0
+            shutil.rmtree(part_dir, ignore_errors=True)
+            os.makedirs(part_dir, exist_ok=True)
+            self._remove_artifact_paths(progress_path)
+            write_error_log(
+                "parallel hls purged mismatched resume metadata",
+                Exception("parallel HLS purged mismatched resume metadata"),
+                url=media_url,
+                item_id=item_id,
+                source_site=_task_source_site_name(task) or None,
+                stored_total_segments=stored_hls_total_segments,
+                current_total_segments=int(total_segments or 0),
+                stale_parts=stale_parts,
+                part_dir=part_dir,
+            )
+
         completed_segment_indexes = set()
         existing_segments = []
         for segment in segments:
@@ -22962,9 +23098,15 @@ class DownloadManagerApp:
             self._save_resume_progress(
                 progress_path,
                 completed_duration,
-            source_url=_normalize_download_url(url) or url,
-            bytes_done=completed_bytes,
-        )
+                source_url=_normalize_download_url(url) or url,
+                bytes_done=completed_bytes,
+                progress_info={
+                    "type": "parallel_hls",
+                    "hls_total_segments": int(total_segments or 0),
+                    "hls_completed_segments": int(completed_segments or 0),
+                    "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
+                },
+            )
 
         pending_segments = [segment for segment in segments if int(segment["index"]) not in completed_segment_indexes]
         pending_segment_count = len(pending_segments)
@@ -23116,6 +23258,12 @@ class DownloadManagerApp:
                         completed_duration,
                         source_url=_normalize_download_url(url) or url,
                         bytes_done=completed_bytes,
+                        progress_info={
+                            "type": "parallel_hls",
+                            "hls_total_segments": int(total_segments or 0),
+                            "hls_completed_segments": int(completed_segments or 0),
+                            "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
+                        },
                         min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
                         min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
                     )
@@ -23400,11 +23548,21 @@ class DownloadManagerApp:
                     interrupted_completed_segments = int(completed_segments or 0)
                     interrupted_completed_bytes = int(completed_bytes or 0)
                     interrupted_completed_duration = float(completed_duration or 0.0)
+                interrupted_elapsed_seconds = max(time.time() - started_at, 0.001)
+                interrupted_session_bytes = max(interrupted_completed_bytes - session_start_completed_bytes, 0)
+                interrupted_session_segments = max(interrupted_completed_segments - session_start_completed_segments, 0)
+                interrupted_average_speed_bps = int(interrupted_session_bytes / interrupted_elapsed_seconds) if interrupted_session_bytes > 0 else 0
                 self._save_resume_progress(
                     progress_path,
                     interrupted_completed_duration,
                     source_url=_normalize_download_url(url) or url,
                     bytes_done=interrupted_completed_bytes,
+                    progress_info={
+                        "type": "parallel_hls",
+                        "hls_total_segments": int(total_segments or 0),
+                        "hls_completed_segments": int(interrupted_completed_segments or 0),
+                        "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
+                    },
                     min_interval_seconds=0.0,
                     min_bytes_delta=0,
                     force=True,
@@ -23422,6 +23580,10 @@ class DownloadManagerApp:
                     completed_duration_seconds=round(interrupted_completed_duration, 3),
                     segments=total_segments,
                     workers=worker_count,
+                    elapsed_seconds=round(interrupted_elapsed_seconds, 3),
+                    session_segment_bytes=interrupted_session_bytes,
+                    session_completed_segments=interrupted_session_segments,
+                    session_segment_average_speed_bps=interrupted_average_speed_bps,
                     hls_host=hls_host,
                     hls_host_active_downloads=hls_host_active_downloads,
                     hls_host_worker_budget=hls_host_worker_budget,
@@ -23430,6 +23592,7 @@ class DownloadManagerApp:
                     resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
                     state=current_state,
                     shutdown_started=bool(self._shutdown_started),
+                    resume_progress_saved=os.path.exists(progress_path),
                     progress_path=progress_path,
                 )
             except Exception:
@@ -28186,7 +28349,7 @@ class DownloadManagerApp:
                     for candidate in remaining_fallbacks
                     if self._source_site_from_search_url(candidate)
                     and not _looks_like_manifest_url(candidate)
-                    and not re.search(r"\.(?:mp4|m4v|webm|mkv|mov|mp3|m4a|aac)(?:[?#]|$)", str(candidate or ""), re.IGNORECASE)
+                    and not _infer_media_extension_from_url(candidate)
                 ]
                 preserve_avjoy_source_page = (
                     fallback_source_site == "avjoy"
@@ -29030,10 +29193,10 @@ class DownloadManagerApp:
             return
 
         inferred_direct_media_ext = _infer_media_extension_from_url(url)
-        is_direct_media = bool(inferred_direct_media_ext) or any(parsed_url.path.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mkv", ".webm", ".m4a", ".mp3"))
+        is_direct_media = bool(inferred_direct_media_ext) or any(parsed_url.path.lower().endswith(ext) for ext in DIRECT_DOWNLOAD_FILE_EXTENSIONS)
         if is_direct_media:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
-            filename = os.path.basename(parsed_url.path) or "downloaded_file"
+            filename = _direct_download_filename_from_url(url) or os.path.basename(parsed_url.path) or "downloaded_file"
             source_site_for_name = _task_source_site_name(task)
             current_task_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
             filename_stem = os.path.splitext(filename)[0]
@@ -29048,6 +29211,7 @@ class DownloadManagerApp:
                     current_task_title
                     and not self._output_title_is_suspicious(current_task_title)
                     and (source_site_for_name or opaque_cdn_filename)
+                    and inferred_direct_media_ext in (DIRECT_MEDIA_FILE_EXTENSIONS + DIRECT_IMAGE_FILE_EXTENSIONS)
                 )
             )
             if use_task_title_filename and inferred_direct_media_ext:
@@ -32909,6 +33073,89 @@ class DownloadManagerApp:
                 pass
 
 
+def _iter_downloader_peer_processes(limit: int = 8):
+    peers = []
+    try:
+        import psutil  # type: ignore
+    except Exception:
+        return peers
+    try:
+        current_pid = os.getpid()
+        current_ppid = os.getppid()
+        current_exe = os.path.abspath(sys.executable) if getattr(sys, "executable", "") else ""
+        app_dir = os.path.abspath(_APP_DIR)
+        for proc in psutil.process_iter(["pid", "ppid", "name", "exe", "cmdline", "create_time"]):
+            try:
+                info = proc.info or {}
+                pid = int(info.get("pid") or 0)
+                if not pid or pid == current_pid:
+                    continue
+                ppid = int(info.get("ppid") or 0)
+                name = str(info.get("name") or "")
+                exe_path = str(info.get("exe") or "")
+                exe_name = os.path.basename(exe_path or name).lower()
+                if not exe_name.startswith("downloader"):
+                    continue
+                if exe_path:
+                    try:
+                        exe_path_abs = os.path.abspath(exe_path)
+                        if os.path.abspath(os.path.dirname(exe_path_abs)) != app_dir:
+                            continue
+                    except Exception:
+                        continue
+                else:
+                    exe_path_abs = ""
+                parent_of_current = pid == current_ppid
+                child_of_current = ppid == current_pid
+                same_executable = bool(current_exe and exe_path_abs and os.path.normcase(exe_path_abs) == os.path.normcase(current_exe))
+                if parent_of_current and same_executable:
+                    role = "wrapper_parent"
+                elif child_of_current and same_executable:
+                    role = "wrapper_child"
+                else:
+                    role = "independent"
+                peers.append({
+                    "pid": pid,
+                    "ppid": ppid,
+                    "name": name,
+                    "exe": exe_path,
+                    "cmdline": info.get("cmdline") or [],
+                    "role": role,
+                    "parent_of_current": parent_of_current,
+                    "child_of_current": child_of_current,
+                    "same_executable": same_executable,
+                    "create_time": info.get("create_time"),
+                })
+                if len(peers) >= max(1, int(limit)):
+                    break
+            except Exception:
+                continue
+    except Exception:
+        return peers
+    return peers
+
+
+def _log_downloader_peer_processes():
+    try:
+        peers = _iter_downloader_peer_processes()
+        if not peers:
+            return
+        independent_count = sum(1 for peer in peers if str(peer.get("role") or "") == "independent")
+        wrapper_count = len(peers) - independent_count
+        write_error_log(
+            "app peer processes detected",
+            Exception("app peer processes detected"),
+            current_pid=os.getpid(),
+            current_ppid=os.getppid(),
+            peer_count=len(peers),
+            independent_peer_count=independent_count,
+            wrapper_peer_count=wrapper_count,
+            peer_processes=json.dumps(peers, ensure_ascii=False, default=str),
+        )
+    except Exception:
+        pass
+
+
 def main():
     try:
         lock_acquired, recovered_after_retry = wait_for_single_instance_lock()
@@ -32948,6 +33195,7 @@ def main():
             )
         except Exception:
             pass
+        _log_downloader_peer_processes()
 
         if TkinterDnD is not None:
             try:
