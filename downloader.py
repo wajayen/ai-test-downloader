@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260609-3580"
+APP_BUILD = "20260609-3590"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -80,8 +80,8 @@ TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
 URL_INPUT_HISTORY_LIMIT = 10
 MAX_DOWNLOADS_PER_DOMAIN = 3
 MAX_ACTIVE_DOWNLOADS_GLOBAL = 3
-STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 1
-STARTUP_RESUME_WARMUP_SECONDS = 8.0
+STARTUP_RESUME_WARMUP_MAX_ACTIVE_DOWNLOADS = 2
+STARTUP_RESUME_WARMUP_SECONDS = 4.0
 MAX_DOWNLOADS_PER_SOURCE_PAGE = 3
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
     "movieffm": 3,
@@ -892,14 +892,14 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "avbebe": 24,
     "bestjavporn": 36,
     "dramasq": 24,
-    "gimy": 48,
+    "gimy": 60,
     "goodav17": 24,
     "hayav": 32,
     "hohoj": 60,
     "ikanbot": 24,
     "javdock": 48,
     "jable": 24,
-    "missav": 30,
+    "missav": 45,
     "njav": 36,
     "njavtv": 24,
     "nnyy": 24,
@@ -939,7 +939,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "turbovidhls.com": 48,
     "121126.com": 48,
     "ggjav.com": 60,
-    "surrit.com": 30,
+    "surrit.com": 45,
     "streamfastpro": 32,
     "mushroomtrack.com": 24,
     "hls.sb-cd.com": 24,
@@ -1012,6 +1012,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS_BY_HOST = {
     "adfg8.vip": 60,
     "phimgood.com": 60,
     "yzzy": 60,
+    "surrit.com": 48,
 }
 PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "baisiweiting.com",
@@ -1088,7 +1089,7 @@ YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE = {
     "av01": 24,
     "bestjavporn": 24,
     "javdock": 24,
-    "gimy": 32,
+    "gimy": 48,
     "goodav17": 24,
     "hohoj": 32,
     "ikanbot": 24,
@@ -1120,7 +1121,7 @@ YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE = {
     "18jav": 18,
     "bilibili": 12,
     "facebook": 8,
-    "gimy": 24,
+    "gimy": 40,
     "hohoj": 24,
     "instagram": 8,
     "missav": 24,
@@ -1184,13 +1185,13 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "18jav": 20,
     "anime1": 10,
     "avjoy": 12,
-    "gimy": 32,
-    "goodav17": 32,
+    "gimy": 48,
+    "goodav17": 48,
     "hohoj": 20,
     "jable": 12,
     "mixdrop": 18,
-    "movieffm": 32,
-    "missav": 32,
+    "movieffm": 48,
+    "missav": 48,
     "njav": 24,
     "njavtv": 24,
     "tktube": 12,
@@ -1221,8 +1222,10 @@ HTTP_MULTIPART_LARGE_FILE_IMMEDIATE_MIN_BYTES = 128 * 1024 * 1024
 HTTP_STREAM_CHUNK_SIZE = 16 * 1024 * 1024
 HTTP_RANGE_CHUNK_SIZE = 16 * 1024 * 1024
 HTTP_FILE_COPY_CHUNK_SIZE = 16 * 1024 * 1024
-HTTP_RANGE_PART_MAX_ATTEMPTS = 6
+HTTP_RANGE_PART_MAX_ATTEMPTS = 8
 HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS = 0.6
+HTTP_RANGE_PART_RETRY_MAX_DELAY_SECONDS = 10.0
+HTTP_RANGE_PART_RATE_LIMIT_RETRY_MAX_DELAY_SECONDS = 15.0
 HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS = 6
 HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS_BY_HOST_MARKER = {
     "tktube.com": 20,
@@ -9083,6 +9086,31 @@ def _http_range_part_timeout_for_url(url):
     return max(float(HTTP_RANGE_PART_REQUEST_TIMEOUT_SECONDS), 1.0)
 
 
+def _http_range_part_retry_delay(exc, url, attempt):
+    try:
+        attempt_index = max(int(attempt or 0), 0)
+    except Exception:
+        attempt_index = 0
+    delay = min(
+        float(HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS) * (2 ** attempt_index),
+        float(HTTP_RANGE_PART_RETRY_MAX_DELAY_SECONDS),
+    )
+    error_text = str(exc or "").lower()
+    try:
+        host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+    except Exception:
+        host = ""
+    if "http 429" in error_text or "too many requests" in error_text or "rate limit" in error_text:
+        delay = min(2.0 * (attempt_index + 1), float(HTTP_RANGE_PART_RATE_LIMIT_RETRY_MAX_DELAY_SECONDS))
+    elif "http 503" in error_text or "http 502" in error_text or "http 504" in error_text:
+        delay = min(1.5 * (attempt_index + 1), float(HTTP_RANGE_PART_RATE_LIMIT_RETRY_MAX_DELAY_SECONDS))
+    elif "timed out" in error_text or "timeout" in error_text:
+        delay = min(max(delay, 1.2 * (attempt_index + 1)), float(HTTP_RANGE_PART_RETRY_MAX_DELAY_SECONDS))
+    if "media-cdn" in host and ("http 503" in error_text or "http 429" in error_text):
+        delay = min(max(delay, 2.0 * (attempt_index + 1)), 12.0)
+    return max(float(delay), 0.1)
+
+
 def _apply_ytdlp_route_options(ydl_opts, route_options):
     route_options = dict(route_options or {})
     throttled_rate = route_options.pop("throttled_rate_bps", None)
@@ -9346,12 +9374,12 @@ def _site_tuning_value(site, values_by_site, default_value):
 
 def _ytdlp_native_concurrency_for_site(site):
     value = _site_tuning_value(site, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS_BY_SITE, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS)
-    return _clamp_positive_int(value, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS, max_value=32)
+    return _clamp_positive_int(value, YTDLP_HLS_NATIVE_CONCURRENT_FRAGMENTS, max_value=64)
 
 
 def _ytdlp_generic_concurrency_for_site(site):
     value = _site_tuning_value(site, YTDLP_GENERIC_CONCURRENT_FRAGMENTS_BY_SITE, YTDLP_GENERIC_CONCURRENT_FRAGMENTS)
-    return _clamp_positive_int(value, YTDLP_GENERIC_CONCURRENT_FRAGMENTS, max_value=32)
+    return _clamp_positive_int(value, YTDLP_GENERIC_CONCURRENT_FRAGMENTS, max_value=64)
 
 
 def _ytdlp_http_chunk_size_for_site(site):
@@ -19540,21 +19568,21 @@ class DownloadManagerApp:
                 last_exc = exc
                 if stop_event.is_set() or self._shutdown_started or attempt >= HTTP_RANGE_PART_MAX_ATTEMPTS - 1:
                     break
+                retry_delay = _http_range_part_retry_delay(exc, url, attempt)
+                host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
                 write_error_log(
                     "http range part retry",
                     exc,
                     url=url,
+                    host=host,
                     part_start=start_byte,
                     part_end=end_byte,
                     part_path=part_path,
                     attempt=attempt + 1,
                     max_attempts=HTTP_RANGE_PART_MAX_ATTEMPTS,
+                    request_timeout_seconds=_http_range_part_timeout_for_url(url),
+                    retry_delay_seconds=round(float(retry_delay), 3),
                 )
-                retry_delay = min(HTTP_RANGE_PART_RETRY_BASE_DELAY_SECONDS * (2 ** attempt), 6.0)
-                error_text = str(exc or "").lower()
-                host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
-                if ("http 503" in error_text or "http 429" in error_text) and "media-cdn" in host:
-                    retry_delay = min(2.0 * (attempt + 1), 12.0)
                 if stop_event.wait(retry_delay) or self._shutdown_started:
                     return
         if last_exc is not None:
@@ -20986,6 +21014,22 @@ class DownloadManagerApp:
             )
         except Exception:
             output_is_task_file = False
+        _set_task_aux_fields(
+            task,
+            _last_http_media_download_host=final_download_host,
+            _last_http_media_host_active_downloads=self._active_hls_downloads_for_host(final_download_host),
+            _last_http_media_host_worker_budget=self._hls_host_worker_budget(final_download_host),
+            _last_http_media_used_multipart=bool(switched_to_multipart),
+            _last_http_media_multipart_part_count=(multipart_part_count or 0),
+            _last_http_media_multipart_segment_count=(multipart_segment_count or 0),
+            _last_http_media_source_active_downloads=(multipart_source_active_downloads or 0),
+            _last_http_media_source_worker_budget=(multipart_source_worker_budget or 0),
+            _last_http_media_elapsed_seconds=round(elapsed_seconds, 3),
+            _last_http_media_session_downloaded_bytes=session_downloaded_bytes,
+            _last_http_media_session_average_speed_bps=session_average_speed_bps,
+            _last_http_media_output_effective_average_speed_bps=output_effective_average_speed_bps,
+            _last_http_media_output_full_file_average_speed_bps=output_full_file_average_speed_bps,
+        )
         write_error_log(
             "http media download finished",
             Exception("http media download finished"),
@@ -21051,8 +21095,21 @@ class DownloadManagerApp:
             item_id=item_id,
             url=media_url,
             source_site=_task_source_site_name(task) or None,
+            download_host=_task_field_value(task, "_last_http_media_download_host", "") or None,
+            host_active_downloads=(_task_field_value(task, "_last_http_media_host_active_downloads", 0) or None),
+            host_worker_budget=(_task_field_value(task, "_last_http_media_host_worker_budget", 0) or None),
+            used_multipart=bool(_task_field_value(task, "_last_http_media_used_multipart", False)),
+            multipart_part_count=(_task_field_value(task, "_last_http_media_multipart_part_count", 0) or None),
+            multipart_segment_count=(_task_field_value(task, "_last_http_media_multipart_segment_count", 0) or None),
+            source_active_downloads=(_task_field_value(task, "_last_http_media_source_active_downloads", 0) or None),
+            source_worker_budget=(_task_field_value(task, "_last_http_media_source_worker_budget", 0) or None),
             output=final_output_path,
             bytes=self._get_existing_file_size(final_output_path),
+            elapsed_seconds=(_task_field_value(task, "_last_http_media_elapsed_seconds", 0) or None),
+            session_downloaded_bytes=(_task_field_value(task, "_last_http_media_session_downloaded_bytes", 0) or None),
+            session_average_speed_bps=(_task_field_value(task, "_last_http_media_session_average_speed_bps", 0) or None),
+            output_effective_average_speed_bps=(_task_field_value(task, "_last_http_media_output_effective_average_speed_bps", 0) or None),
+            output_full_file_average_speed_bps=(_task_field_value(task, "_last_http_media_output_full_file_average_speed_bps", 0) or None),
         )
         return final_output_path
 
@@ -21796,8 +21853,15 @@ class DownloadManagerApp:
                 int(source_worker_budget) // max(source_active_downloads, 1),
             )
             part_count = min(part_count, per_task_source_budget)
+        max_part_count = max(
+            32,
+            min(
+                int(source_worker_budget or HTTP_MULTIPART_SOURCE_WORKER_BUDGET_DEFAULT),
+                48,
+            ),
+        )
         return (
-            min(max(2, int(part_count)), 32),
+            min(max(2, int(part_count)), int(max_part_count)),
             host_active_downloads,
             host_worker_budget,
             host_marker,
@@ -22923,6 +22987,12 @@ class DownloadManagerApp:
         )
         hls_host_active_downloads = self._active_hls_downloads_for_host(hls_host)
         hls_host_worker_budget = self._hls_host_worker_budget(hls_host)
+        try:
+            representative_segment_url = str((worker_plan_segments or segments or [{}])[0].get("url") or media_url)
+        except Exception:
+            representative_segment_url = media_url
+        segment_timeout_seconds = self._parallel_hls_segment_timeout(representative_segment_url, stop_event=stop_event)
+        segment_retry_count = self._parallel_hls_segment_retry_count(representative_segment_url)
         _set_task_aux_fields(
             task,
             _parallel_hls_total_segments=int(total_segments),
@@ -22956,6 +23026,8 @@ class DownloadManagerApp:
             resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
             hls_host=hls_host,
             manifest_host=urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower(),
+            segment_timeout_seconds=round(float(segment_timeout_seconds or 0.0), 3),
+            segment_retry_count=int(segment_retry_count or 0),
             hls_host_active_downloads=hls_host_active_downloads,
             hls_host_worker_budget=hls_host_worker_budget,
             total_duration=total_duration,
