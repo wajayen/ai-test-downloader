@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260610-3600"
+APP_BUILD = "20260610-3610"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1117,6 +1117,7 @@ PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST = {
     "adfg8.vip": 16,
     "phimgood.com": 16,
 }
+PARALLEL_HLS_RESUME_VALIDATION_VERSION = 2
 PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES = 20
 PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
@@ -1476,6 +1477,9 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls google retry later",
     "parallel hls purged invalid resume segments",
     "parallel hls purged mismatched resume metadata",
+    "parallel hls purged orphan resume segments",
+    "parallel hls resume progress corrected from parts",
+    "parallel hls resume metadata differs from parts",
     "parallel hls skipped missing leading resume segments",
     "parallel hls resume segments loaded",
     "ggjav hls exhausted search fallback",
@@ -22869,6 +22873,7 @@ class DownloadManagerApp:
         raise Exception(f"parallel HLS concat remux failed: {' | '.join(errors)[:360]}")
 
     def _try_parallel_hls_segment_download(self, item_id, url, out_path, temp_out_path, progress_path, headers, ffmpeg_path, ffmpeg_version=""):
+        parallel_hls_entered_at = time.time()
         task = self.tasks.get(item_id, {})
         task = self._ensure_task_active_transfer_state(item_id, task, reason="parallel_hls")
         if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
@@ -22878,6 +22883,7 @@ class DownloadManagerApp:
         if bool(_task_field_value(task, "is_mp3", False)):
             return False
         media_url, playlist_text = self._resolve_parallel_hls_media_playlist(url, headers)
+        playlist_resolved_at = time.time()
         if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
             raise StopDownloadException("shutdown requested")
         if "#EXT-X-MAP" in str(playlist_text or "").upper():
@@ -22903,6 +22909,7 @@ class DownloadManagerApp:
             )
             return False
         segments, skipped_leading_segments, skipped_trailing_segments = self._drop_unsupported_edge_parallel_hls_segments(segments, headers)
+        segments_ready_at = time.time()
         if skipped_leading_segments or skipped_trailing_segments:
             write_error_log(
                 "parallel hls skipped unsupported edge segments",
@@ -22966,6 +22973,7 @@ class DownloadManagerApp:
         merged_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.mp4"
         concat_list_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ffconcat"
         total_segments = len(segments)
+        total_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in segments)
         hls_host, representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
         if representative_segment_url:
             self._set_task_active_media_url(task, representative_segment_url)
@@ -22976,12 +22984,31 @@ class DownloadManagerApp:
         stored_progress_info = self._load_resume_progress_info(progress_path)
         stored_hls_info = stored_progress_info.get("progress_info", {}) if isinstance(stored_progress_info.get("progress_info", {}), dict) else {}
         stored_hls_total_segments = 0
+        stored_hls_total_duration = 0.0
+        stored_hls_completed_segments = 0
+        stored_hls_resume_validation_version = 0
         if str(stored_hls_info.get("type", "") or "") == "parallel_hls":
             try:
                 stored_hls_total_segments = max(int(stored_hls_info.get("hls_total_segments", 0) or 0), 0)
             except Exception:
                 stored_hls_total_segments = 0
-        if stored_hls_total_segments and stored_hls_total_segments != int(total_segments or 0):
+            try:
+                stored_hls_total_duration = max(float(stored_hls_info.get("hls_total_duration_seconds", 0.0) or 0.0), 0.0)
+            except Exception:
+                stored_hls_total_duration = 0.0
+            try:
+                stored_hls_completed_segments = max(int(stored_hls_info.get("hls_completed_segments", 0) or 0), 0)
+            except Exception:
+                stored_hls_completed_segments = 0
+            try:
+                stored_hls_resume_validation_version = max(int(stored_hls_info.get("hls_resume_validation_version", 0) or 0), 0)
+            except Exception:
+                stored_hls_resume_validation_version = 0
+        hls_total_duration_mismatch = False
+        if stored_hls_total_duration > 0.0 and total_duration > 0.0:
+            duration_tolerance = max(2.0, float(total_duration or 0.0) * 0.005)
+            hls_total_duration_mismatch = abs(stored_hls_total_duration - float(total_duration or 0.0)) > duration_tolerance
+        if (stored_hls_total_segments and stored_hls_total_segments != int(total_segments or 0)) or hls_total_duration_mismatch:
             stale_parts = 0
             try:
                 stale_parts = len(glob.glob(os.path.join(part_dir, "*.ts")))
@@ -22998,17 +23025,197 @@ class DownloadManagerApp:
                 source_site=_task_source_site_name(task) or None,
                 stored_total_segments=stored_hls_total_segments,
                 current_total_segments=int(total_segments or 0),
+                stored_total_duration_seconds=round(stored_hls_total_duration, 3),
+                current_total_duration_seconds=round(float(total_duration or 0.0), 3),
+                duration_mismatch=bool(hls_total_duration_mismatch),
                 stale_parts=stale_parts,
                 part_dir=part_dir,
             )
 
         completed_segment_indexes = set()
         existing_segments = []
+        existing_segment_sizes = {}
+        resume_scan_started_at = time.time()
+        try:
+            existing_part_file_names = {
+                name
+                for name in os.listdir(part_dir)
+                if str(name or "").lower().endswith(".ts")
+            }
+        except OSError:
+            existing_part_file_names = set()
+        expected_part_file_names = set()
         for segment in segments:
-            if self._is_valid_parallel_hls_part_file(_part_path(segment)):
+            try:
+                expected_part_file_names.add(f"{int(segment['index']):06d}.ts")
+            except Exception:
+                continue
+        orphan_part_file_names = sorted(existing_part_file_names - expected_part_file_names)
+        if orphan_part_file_names:
+            removed_orphan_parts = 0
+            failed_orphan_parts = 0
+            removed_orphan_part_names = []
+            for part_name in orphan_part_file_names:
+                part_path = os.path.join(part_dir, part_name)
+                try:
+                    os.remove(part_path)
+                    removed_orphan_parts += 1
+                    removed_orphan_part_names.append(part_name)
+                except OSError:
+                    failed_orphan_parts += 1
+                    continue
+            if removed_orphan_parts:
+                write_error_log(
+                    "parallel hls purged orphan resume segments",
+                    Exception("parallel HLS purged orphan resume segments"),
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    removed_orphan_parts=removed_orphan_parts,
+                    failed_orphan_parts=failed_orphan_parts,
+                    orphan_sample=", ".join(orphan_part_file_names[:8]),
+                    part_dir=part_dir,
+                )
+                existing_part_file_names.difference_update(removed_orphan_part_names)
+        resume_fast_scan_used = False
+        present_expected_part_file_names = existing_part_file_names.intersection(expected_part_file_names)
+        resume_metadata_matches = (
+            stored_hls_total_segments == int(total_segments or 0)
+            and not hls_total_duration_mismatch
+        )
+        resume_fast_scan_allowed = (
+            resume_metadata_matches
+            and stored_hls_resume_validation_version >= PARALLEL_HLS_RESUME_VALIDATION_VERSION
+            and stored_hls_completed_segments > 0
+            and len(present_expected_part_file_names) == stored_hls_completed_segments
+        )
+        if resume_fast_scan_allowed:
+            fast_scan_empty_part = False
+            for segment in segments:
+                try:
+                    part_name = f"{int(segment['index']):06d}.ts"
+                except Exception:
+                    continue
+                if part_name not in present_expected_part_file_names:
+                    continue
+                part_path = os.path.join(part_dir, part_name)
+                part_size = self._get_existing_file_size(part_path)
+                if part_size <= 0:
+                    fast_scan_empty_part = True
+                    break
                 existing_segments.append(segment)
-                completed_segment_indexes.add(int(segment["index"]))
+                segment_index = int(segment["index"])
+                completed_segment_indexes.add(segment_index)
+                existing_segment_sizes[segment_index] = part_size
+            resume_fast_scan_used = (
+                not fast_scan_empty_part
+                and len(existing_segments) == stored_hls_completed_segments
+            )
+            if not resume_fast_scan_used:
+                existing_segments.clear()
+                completed_segment_indexes.clear()
+                existing_segment_sizes.clear()
+        if not resume_fast_scan_used:
+            invalid_part_file_names = []
+            for segment in segments:
+                try:
+                    part_name = f"{int(segment['index']):06d}.ts"
+                except Exception:
+                    continue
+                part_path = os.path.join(part_dir, part_name)
+                if part_name not in existing_part_file_names:
+                    continue
+                if self._is_valid_parallel_hls_part_file(part_path):
+                    existing_segments.append(segment)
+                    segment_index = int(segment["index"])
+                    completed_segment_indexes.add(segment_index)
+                    existing_segment_sizes[segment_index] = self._get_existing_file_size(part_path)
+                else:
+                    invalid_part_file_names.append(part_name)
+            if invalid_part_file_names:
+                removed_invalid_parts = 0
+                failed_invalid_parts = 0
+                removed_invalid_part_names = []
+                for part_name in invalid_part_file_names:
+                    part_path = os.path.join(part_dir, part_name)
+                    try:
+                        os.remove(part_path)
+                        removed_invalid_parts += 1
+                        removed_invalid_part_names.append(part_name)
+                    except OSError:
+                        failed_invalid_parts += 1
+                        continue
+                if removed_invalid_parts:
+                    write_error_log(
+                        "parallel hls purged invalid resume segments",
+                        Exception("parallel HLS purged invalid resume segments"),
+                        url=media_url,
+                        item_id=item_id,
+                        source_site=_task_source_site_name(task) or None,
+                        removed_invalid_parts=removed_invalid_parts,
+                        failed_invalid_parts=failed_invalid_parts,
+                        invalid_sample=", ".join(invalid_part_file_names[:8]),
+                        part_dir=part_dir,
+                    )
+                    existing_part_file_names.difference_update(removed_invalid_part_names)
         resume_existing_segment_count = len(existing_segments)
+        if stored_hls_total_segments and stored_hls_total_segments == int(total_segments or 0):
+            if stored_hls_completed_segments and stored_hls_completed_segments != resume_existing_segment_count:
+                actual_completed_bytes = 0
+                actual_completed_duration = 0.0
+                try:
+                    actual_completed_bytes = sum(
+                        int(existing_segment_sizes.get(int(segment["index"]), 0) or 0)
+                        for segment in existing_segments
+                    )
+                    actual_completed_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in existing_segments)
+                except Exception:
+                    actual_completed_bytes = 0
+                    actual_completed_duration = 0.0
+                if resume_existing_segment_count > 0:
+                    self._save_resume_progress(
+                        progress_path,
+                        actual_completed_duration,
+                        source_url=_normalize_download_url(url) or url,
+                        bytes_done=actual_completed_bytes,
+                        progress_info={
+                            "type": "parallel_hls",
+                            "hls_total_segments": int(total_segments or 0),
+                            "hls_completed_segments": int(resume_existing_segment_count or 0),
+                            "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
+                            "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
+                        },
+                        min_interval_seconds=0.0,
+                        min_bytes_delta=0,
+                        force=True,
+                    )
+                else:
+                    self._remove_artifact_paths(progress_path)
+                write_error_log(
+                    "parallel hls resume metadata differs from parts",
+                    Exception("parallel HLS resume metadata differs from actual part files"),
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    stored_completed_segments=stored_hls_completed_segments,
+                    existing_part_segments=resume_existing_segment_count,
+                    total_segments=int(total_segments or 0),
+                    part_dir=part_dir,
+                )
+                write_error_log(
+                    "parallel hls resume progress corrected from parts",
+                    Exception("parallel HLS resume progress corrected from actual part files"),
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    stored_completed_segments=stored_hls_completed_segments,
+                    corrected_completed_segments=resume_existing_segment_count,
+                    corrected_bytes=actual_completed_bytes,
+                    corrected_duration_seconds=round(actual_completed_duration, 3),
+                    progress_path=progress_path,
+                    progress_removed=resume_existing_segment_count <= 0,
+                )
+        resume_scan_finished_at = time.time()
         has_google_segments = any(
             "googleusercontent.com" in urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower()
             for segment in segments
@@ -23039,6 +23246,7 @@ class DownloadManagerApp:
             "xiaoyakankan",
         )
         try:
+            preflight_started_at = time.time()
             if any((segment.get("key") or {}).get("uri") for segment in segments) and CryptoAES is None:
                 return False
             key_cache = self._fetch_parallel_hls_keys(segments, headers, stop_event=stop_event)
@@ -23053,6 +23261,7 @@ class DownloadManagerApp:
             )
             if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False) or stop_event.is_set():
                 raise StopDownloadException("shutdown requested")
+            preflight_finished_at = time.time()
         except ParallelHlsUnsupportedSegmentContentException as exc:
             write_error_log(
                 "parallel hls unsupported segment content",
@@ -23064,7 +23273,6 @@ class DownloadManagerApp:
                 google_segments=has_google_segments,
             )
             raise
-        total_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in segments)
         completed_bytes = 0
         completed_duration = 0.0
         completed_segments = 0
@@ -23073,7 +23281,10 @@ class DownloadManagerApp:
         last_segment_ui_bytes = 0
         completed_lock = threading.Lock()
         if existing_segments:
-            completed_bytes = sum(self._get_existing_file_size(_part_path(segment)) for segment in existing_segments)
+            completed_bytes = sum(
+                int(existing_segment_sizes.get(int(segment["index"]), 0) or 0)
+                for segment in existing_segments
+            )
             completed_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in existing_segments)
             completed_segments = len(existing_segments)
             write_error_log(
@@ -23086,6 +23297,8 @@ class DownloadManagerApp:
                 total_segments=total_segments,
                 loaded_bytes=completed_bytes,
                 loaded_duration_seconds=round(completed_duration, 3),
+                resume_fast_scan_used=bool(resume_fast_scan_used),
+                resume_validation_version=int(stored_hls_resume_validation_version or 0),
                 part_dir=part_dir,
             )
             if total_duration > 0:
@@ -23105,6 +23318,7 @@ class DownloadManagerApp:
                     "hls_total_segments": int(total_segments or 0),
                     "hls_completed_segments": int(completed_segments or 0),
                     "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
+                    "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
                 },
             )
 
@@ -23143,6 +23357,11 @@ class DownloadManagerApp:
             _parallel_hls_workers=int(worker_count),
             _parallel_hls_updated_at=time.time(),
         )
+        parallel_start_logged_at = time.time()
+        try:
+            route_selected_at = float(_task_field_value(task, "_m3u8_route_selected_at", 0.0) or 0.0)
+        except Exception:
+            route_selected_at = 0.0
         self._log_ffmpeg_event(
             "parallel hls download started",
             Exception("parallel hls started"),
@@ -23154,6 +23373,14 @@ class DownloadManagerApp:
             completed_segments_at_start=completed_segments,
             workers=worker_count,
             route_start_delay_seconds=self._m3u8_route_start_delay_seconds(task),
+            route_selected_to_parallel_entry_seconds=(round(max(parallel_hls_entered_at - route_selected_at, 0.0), 3) if route_selected_at > 0 else 0.0),
+            parallel_entry_to_download_start_seconds=round(max(parallel_start_logged_at - parallel_hls_entered_at, 0.0), 3),
+            playlist_resolve_seconds=round(max(playlist_resolved_at - parallel_hls_entered_at, 0.0), 3),
+            segment_parse_seconds=round(max(segments_ready_at - playlist_resolved_at, 0.0), 3),
+            resume_scan_seconds=round(max(resume_scan_finished_at - resume_scan_started_at, 0.0), 3),
+            resume_fast_scan_used=bool(resume_fast_scan_used),
+            resume_validation_version=int(stored_hls_resume_validation_version or 0),
+            preflight_seconds=round(max(preflight_finished_at - preflight_started_at, 0.0), 3),
             requested_workers=int(worker_plan.get("requested_workers", worker_count) or worker_count),
             site_worker_cap=int(worker_plan.get("site_worker_cap", 0) or 0),
             host_worker_cap=int(worker_plan.get("host_worker_cap", 0) or 0),
@@ -23263,6 +23490,7 @@ class DownloadManagerApp:
                             "hls_total_segments": int(total_segments or 0),
                             "hls_completed_segments": int(completed_segments or 0),
                             "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
+                            "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
                         },
                         min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
                         min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
@@ -23562,6 +23790,7 @@ class DownloadManagerApp:
                         "hls_total_segments": int(total_segments or 0),
                         "hls_completed_segments": int(interrupted_completed_segments or 0),
                         "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
+                        "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
                     },
                     min_interval_seconds=0.0,
                     min_bytes_delta=0,
