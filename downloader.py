@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260610-3620"
+APP_BUILD = "20260610-3630"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -122,6 +122,7 @@ DIRECT_DOWNLOAD_FILE_EXTENSIONS = (
 )
 DIRECT_MEDIA_FILE_EXTENSIONS = (".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".m4v", ".ts", ".avi", ".mov", ".flac", ".wav")
 DIRECT_IMAGE_FILE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+CHAT_PLATFORM_DIRECT_FILE_SITES = frozenset(("discord", "line", "telegram"))
 MAX_DOWNLOADS_PER_SOURCE_PAGE_BY_SITE = {
     "movieffm": 3,
 }
@@ -136,6 +137,8 @@ RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 64 * 1024
 SLOW_SOURCE_REANALYZE_DELAY_SECONDS = 30.0
 SLOW_SOURCE_REANALYZE_THRESHOLD_BPS = 256 * 1024
 SLOW_SOURCE_REANALYZE_MIN_DOWNLOADED_BYTES = 2 * 1024 * 1024
+PARALLEL_HLS_SHORT_PLAYLIST_NO_PROGRESS_SEGMENTS = 80
+PARALLEL_HLS_SHORT_PLAYLIST_NO_PROGRESS_DELAY_SECONDS = 90.0
 CACHED_RESOLVED_LINK_START_TIMEOUT_SECONDS = 5.0
 CACHED_RESOLVED_LINK_FRESH_SKIP_PROBE_SECONDS = 120.0
 HAYAV_RESOLVED_URL_CACHE_TTL_SECONDS = 8 * 60
@@ -492,6 +495,32 @@ def _is_javninja_video_page_url(url):
     return "jav.ninja" in parsed.netloc.lower() and "/videos/" in (parsed.path or "").lower()
 
 
+def _is_getav_video_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    return "getav.net" in parsed.netloc.lower() and "/videos/" in (parsed.path or "").lower()
+
+
+def _is_getav_embed_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    return "getav.net" in parsed.netloc.lower() and "/embed/" in (parsed.path or "").lower()
+
+
+def _is_getav_index_playlist_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    host = parsed.netloc.lower()
+    path = (parsed.path or "").lower()
+    return "worldstatic.com" in host and path.endswith("/index.txt") and "/cdn/assets/deliveries/" in path
+
+
 def _is_bestjavporn_transient_media_url(url):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -786,6 +815,7 @@ JAV_DUPLICATE_SOURCE_SITES = frozenset((
     "avbebe",
     "avjoy",
     "bestjavporn",
+    "getav",
     "goodav17",
     "jable",
     "javdock",
@@ -801,6 +831,7 @@ JAV_DUPLICATE_HOST_MARKERS = {
     "avbebe.com": "avbebe",
     "avjoy.me": "avjoy",
     "bestjavporn.com": "bestjavporn",
+    "getav.net": "getav",
     "goodav17.com": "goodav17",
     "jable.tv": "jable",
     "javdock.com": "javdock",
@@ -873,7 +904,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("85xvideo", "18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "javninja", "javdock", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "supjav", "thanju", "tinyavideo", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("85xvideo", "18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "getav", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "javninja", "javdock", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "supjav", "thanju", "tinyavideo", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -918,6 +949,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "streamfastpro",
     "mushroomtrack.com",
     "hls.sb-cd.com",
+    "worldstatic.com",
     "cdn77.org",
     "high23-playback.com",
     "phimgood.com",
@@ -928,7 +960,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "streamhls.click",
     "ts2ff6yms.com",
 )
-PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com",)
+PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com")
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "ijycnd.com",
     "huyall.com",
@@ -963,6 +995,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "avbebe": 24,
     "bestjavporn": 36,
     "dramasq": 24,
+    "getav": 48,
     "gimy": 60,
     "goodav17": 24,
     "hayav": 32,
@@ -1014,6 +1047,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "streamfastpro": 32,
     "mushroomtrack.com": 24,
     "hls.sb-cd.com": 24,
+    "worldstatic.com": 48,
     "cdn77.org": 24,
     "high23-playback.com": 24,
     "phimgood.com": 60,
@@ -1046,13 +1080,14 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "ffzy-plays.com": 144,
     "ffzy-play": 144,
     "huabf.com": 144,
+    "worldstatic.com": 144,
     "surrit.com": 90,
     "streamfastpro": 96,
     "tiktokcdn.com": 108,
     "ts2ff6yms.com": 144,
     "upload18.org": 72,
     "cdn.usex.tube": 108,
-    "baisiweiting.com": 96,
+    "baisiweiting.com": 144,
     "qqqrst.com": 180,
     "qwe132456.cc": 180,
     "adfg8.vip": 180,
@@ -1093,6 +1128,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_WORKERS_BY_HOST = {
     "vip.ffzy-plays.com": 60,
     "ffzy-plays.com": 60,
     "ffzy-play": 60,
+    "worldstatic.com": 48,
 }
 PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "baisiweiting.com",
@@ -1130,6 +1166,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 6
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST = {
+    "worldstatic.com": 4,
     "qqqrst.com": 12,
     "qwe132456.cc": 12,
     "ppqrrs.com": 12,
@@ -1139,6 +1176,7 @@ PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST = {
 PARALLEL_HLS_SHUTDOWN_SEGMENT_TIMEOUT_SECONDS = 1.5
 PARALLEL_HLS_SEGMENT_RETRIES = 10
 PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST = {
+    "worldstatic.com": 4,
     "qqqrst.com": 16,
     "qwe132456.cc": 16,
     "ppqrrs.com": 16,
@@ -1146,6 +1184,12 @@ PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST = {
     "phimgood.com": 16,
 }
 PARALLEL_HLS_RESUME_VALIDATION_VERSION = 2
+PARALLEL_HLS_SLOW_CANDIDATE_RETRY_THRESHOLD_BPS_BY_SITE = {
+    "getav": 6 * 1024 * 1024,
+}
+PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SECONDS = 180.0
+PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_BYTES = 256 * 1024 * 1024
+PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SEGMENTS = 64
 PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES = 20
 PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
@@ -1399,7 +1443,7 @@ GIMY_SOURCE_PAGE_REFRESH_LIMIT = 12
 GIMY_SAME_PAGE_SOURCE_REFRESH_LIMIT = 1
 TERMINAL_TASK_STATES = frozenset(("FINISHED", "DELETED", "DELETE_REQUESTED"))
 PAUSED_TASK_STATES = frozenset(("PAUSED", "PAUSE_REQUESTED"))
-IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "avjoy", "bestjavporn", "javdock", "supjav", "tktube", "bilibili", "ikanbot")
+IMPERSONATION_SITE_MARKERS = ("missav", "gimy", "movieffm", "xiaoyakankan", "jable", "njav", "njavtv", "anime1", "avbebe", "avjoy", "bestjavporn", "getav", "javdock", "supjav", "tktube", "bilibili", "ikanbot")
 DELETE_CLEANUP_TASK_STATES = frozenset(("PAUSED", "QUEUED"))
 CLOSE_WARNING_TASK_STATES = frozenset(("DOWNLOADING", "PAUSE_REQUESTED", "DELETE_REQUESTED"))
 DELETE_REQUEST_TASK_STATES = frozenset(("DOWNLOADING", "PAUSED", "PAUSE_REQUESTED", "QUEUED"))
@@ -2786,6 +2830,11 @@ def _infer_source_site_from_task_urls(*urls):
             return "bestjavporn"
         if "jav.ninja" in host:
             return "javninja"
+        if "getav.net" in host or "worldstatic.com" in host:
+            return "getav"
+        chat_platform_site = _chat_platform_file_site_from_url(candidate)
+        if chat_platform_site:
+            return chat_platform_site
         if "javdock.com" in host or "video1.javdock.com" in host:
             return "javdock"
         if "supjav.com" in host:
@@ -4114,6 +4163,10 @@ def _site_hls_candidate_priority(source_site, url):
             return 0
         if "masukestin.com" in host:
             return 50
+    if site == "getav":
+        text = urllib.parse.unquote(str(url or "")).lower()
+        match = re.search(r"/deliveries/v2/([a-f0-9]{8,})/", text, re.IGNORECASE)
+        return -len(match.group(1)) if match else 0
     return 0
 
 
@@ -4124,6 +4177,9 @@ def _order_site_hls_candidates(primary_url, fallback_urls=(), source_site=""):
     if not ordered:
         return []
     site = str(source_site or "").strip().lower()
+    if site == "getav":
+        # GetAV candidates are already ranked by probing real segment sizes.
+        return ordered
     if site in ("goodav17", "hohoj"):
         ordered = _filter_secondary_ggjav_media_groups(ordered)
     indexed_candidates = list(enumerate(ordered))
@@ -5752,6 +5808,16 @@ def _clean_javninja_title(raw_title, page_url="", fallback_title="JavNinja"):
     return code or str(fallback_title or "JavNinja").strip() or "JavNinja"
 
 
+def _clean_getav_title(raw_title, page_url="", fallback_title="GetAV"):
+    cleaned = html.unescape(str(raw_title or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*[-|]\s*GetAV.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    code = _extract_jav_code(cleaned) or _extract_jav_code(page_url) or _extract_jav_code(fallback_title)
+    if cleaned and not _output_title_is_suspicious_value(cleaned) and not _looks_like_garbled_text(cleaned) and not _contains_mojibake_noise(cleaned):
+        return cleaned
+    return code or str(fallback_title or "GetAV").strip() or "GetAV"
+
+
 def _clean_85xvideo_title(raw_title, page_url="", fallback_title="85xvideo"):
     cleaned = html.unescape(str(raw_title or "")).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -6087,6 +6153,8 @@ def _looks_like_manifest_url(url):
     normalized = _normalize_download_url(url)
     if not normalized:
         return False
+    if _is_getav_index_playlist_url(normalized):
+        return True
     lower = normalized.lower()
     return ".m3u8" in lower or ".mpd" in lower or ("upload18.org" in lower and "/play/token_hash" in lower)
 
@@ -6141,6 +6209,72 @@ def _infer_media_extension_from_url(url):
             if re.search(re.escape(ext) + r"(?:$|[?&#;\"'\s])", lowered_candidate):
                 return ext
     return ""
+
+
+def _chat_platform_file_site_from_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    path = (parsed.path or "").lower()
+    if host in {"cdn.discordapp.com", "media.discordapp.net"} and (
+        "/attachments/" in path or "/ephemeral-attachments/" in path
+    ):
+        return "discord"
+    if host.endswith(".discordapp.com") and (
+        "/attachments/" in path or "/ephemeral-attachments/" in path
+    ):
+        return "discord"
+    if host == "api.telegram.org" and path.startswith("/file/bot"):
+        return "telegram"
+    if (
+        host == "telegram.org"
+        or host.endswith(".telegram.org")
+        or host == "cdn-telegram.org"
+        or host.endswith(".cdn-telegram.org")
+    ) and "/file/" in path:
+        return "telegram"
+    if host == "api-data.line.me" and re.search(r"/v\d+/bot/message/[^/]+/content/?$", path):
+        return "line"
+    if (
+        host == "dl-stickershop.line.naver.jp"
+        or host.endswith(".line-scdn.net")
+        or host.endswith(".line-apps.com")
+    ):
+        return "line"
+    return ""
+
+
+def _chat_platform_default_extension_from_url(url):
+    inferred_ext = _infer_media_extension_from_url(url)
+    if inferred_ext:
+        return inferred_ext
+    parsed = urllib.parse.urlsplit(_normalize_download_url(url) or str(url or ""))
+    host = parsed.netloc.lower()
+    path = (parsed.path or "").lower()
+    if "sticker" in host or "sticker" in path:
+        return ".png"
+    return ".bin"
+
+
+def _chat_platform_filename_from_url(url):
+    filename = _direct_download_filename_from_url(url)
+    if filename:
+        return filename
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized)
+    path_name = os.path.basename(urllib.parse.unquote(parsed.path or ""))
+    site = _chat_platform_file_site_from_url(normalized)
+    fallback_stem = site or "chat_file"
+    if path_name and path_name.lower() not in {"content", "file"}:
+        fallback_stem = path_name
+    fallback_stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", fallback_stem).strip(" .-_") or "chat_file"
+    if os.path.splitext(fallback_stem)[1].lower() in DIRECT_DOWNLOAD_FILE_EXTENSIONS:
+        return fallback_stem
+    return f"{fallback_stem}{_chat_platform_default_extension_from_url(normalized)}"
 
 
 def _direct_download_filename_from_url(url):
@@ -6261,6 +6395,55 @@ def _extract_javninja_player_urls(page_text):
             if candidate:
                 candidates.append(candidate)
     return _dedupe_download_urls(candidates)
+
+
+def _extract_getav_embed_urls(page_text, base_url="https://getav.net/zh/"):
+    text = str(page_text or "")
+    candidates = []
+    for raw_url in re.findall(r'<iframe\b[^>]+\bsrc=["\']([^"\']+)["\']', text, re.IGNORECASE | re.DOTALL):
+        candidate = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(raw_url)))
+        if candidate and _is_getav_embed_page_url(candidate):
+            candidates.append(candidate)
+    for raw_url in re.findall(r'\b(?:data-src|data-embed|data-url)=["\']([^"\']*/embed/[^"\']+)["\']', text, re.IGNORECASE | re.DOTALL):
+        candidate = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(raw_url)))
+        if candidate and _is_getav_embed_page_url(candidate):
+            candidates.append(candidate)
+    return _dedupe_download_urls(candidates)
+
+
+def _extract_getav_index_urls(page_text):
+    text = html.unescape(str(page_text or ""))
+    text = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u0026", "&")
+    candidates = []
+    for raw_url in re.findall(r'https?://static\.worldstatic\.com/[^\s"\'<>\\]+/index\.txt[^\s"\'<>\\]*', text, re.IGNORECASE):
+        candidate = _normalize_download_url(raw_url.rstrip("\\").rstrip(",;"))
+        if candidate and _is_getav_index_playlist_url(candidate):
+            candidates.append(candidate)
+    return _dedupe_download_urls(candidates)
+
+
+def _extract_getav_video_results(page_text, base_url="https://getav.net/zh/"):
+    results = []
+    seen = set()
+    text = str(page_text or "")
+    for match in re.finditer(r'<a\b[^>]+href=["\']([^"\']*/(?:zh/)?videos/[^"\']+)["\'][^>]*>', text, re.IGNORECASE | re.DOTALL):
+        raw_url = html.unescape(match.group(1))
+        url = _normalize_download_url(urllib.parse.urljoin(base_url, raw_url))
+        if not url or url in seen or not _is_getav_video_page_url(url):
+            continue
+        seen.add(url)
+        window = text[max(0, match.start() - 800):match.end() + 1800]
+        title_match = re.search(r'\btitle=["\']([^"\']+)["\']', match.group(0), re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r'\balt=["\']([^"\']+)["\']', window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r"<h[1-6][^>]*>(.*?)</h[1-6]>", window, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            title_match = re.search(r"<span[^>]*>(.*?)</span>", window, re.IGNORECASE | re.DOTALL)
+        title = re.sub(r"<[^>]+>", " ", title_match.group(1)) if title_match else ""
+        title = _clean_getav_title(title, url, _extract_jav_code(url) or "GetAV")
+        results.append({"url": url, "title": title, "snippet": "getav site search", "quality": 720})
+    return results
 
 
 def _validate_tktube_media_candidates(candidates, session=None, referer="", origin="", item_id=None):
@@ -6640,6 +6823,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "missav",
     "avjoy",
     "bestjavporn.com",
+    "getav.net",
     "jav.ninja",
     "javdock.com",
     "supjav.com",
@@ -6717,6 +6901,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "avbebe.com",
     "avjoy.me",
     "bestjavporn.com",
+    "getav.net",
     "jav.ninja",
     "javdock.com",
     "supjav.com",
@@ -6775,6 +6960,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "hayav.com": 18,
     "85xvideo.com": 18,
     "bestjavporn.com": 19,
+    "getav.net": 19,
     "javdock.com": 19,
     "tinyavideo.com": 19,
     "avjoy.me": 20,
@@ -8599,6 +8785,7 @@ def _video_search_result_is_downloadable(result):
         "avjoy.me",
         "avhd101.com",
         "bestjavporn.com",
+        "getav.net",
         "javdock.com",
         "supjav.com",
         "tinyavideo.com",
@@ -13897,6 +14084,7 @@ class DownloadManagerApp:
             "avbebe.com": "avbebe",
             "avjoy.me": "avjoy",
             "bestjavporn.com": "bestjavporn",
+            "getav.net": "getav",
             "jav.ninja": "javninja",
             "javdock.com": "javdock",
             "supjav.com": "supjav",
@@ -14378,6 +14566,27 @@ class DownloadManagerApp:
                     result["downloadable_probe_failed"] = True
                     result["probe_rejected_reason"] = "javdock_player_resolve_failed"
                     return result
+            if not candidates and "getav.net" in search_host and _is_getav_video_page_url(url):
+                try:
+                    page_title, getav_candidates, embed_url = self._fetch_getav_media_candidates(
+                        url,
+                        fallback_name=result.get("title") or query_text or "GetAV",
+                    )
+                    if page_title:
+                        result["title"] = page_title
+                    if embed_url:
+                        result["resolver_page"] = embed_url
+                    candidates = getav_candidates
+                    result["_getav_resolved_player"] = True
+                except Exception as getav_exc:
+                    write_error_log(
+                        "getav search player resolve failed",
+                        getav_exc,
+                        source_page=url,
+                    )
+                    result["downloadable_probe_failed"] = True
+                    result["probe_rejected_reason"] = "getav_player_resolve_failed"
+                    return result
             if not candidates and "xiaoyakankan." in search_host:
                 result["title"] = _clean_xiaoyakankan_title(result.get("title") or _extract_html_title(page_text, query_text))
                 play_urls = []
@@ -14485,7 +14694,7 @@ class DownloadManagerApp:
                 )
         except Exception:
             result_site = _video_search_site_for_url(result.get("url", ""))
-            parser_resolvable_sites = {"missav", "movieffm.net", "85xvideo.com", "bestjavporn.com", "jav.ninja", "javdock.com", "supjav.com", "tinyavideo.com", "avbebe.com"}
+            parser_resolvable_sites = {"missav", "movieffm.net", "85xvideo.com", "bestjavporn.com", "getav.net", "jav.ninja", "javdock.com", "supjav.com", "tinyavideo.com", "avbebe.com"}
             if "jav code pattern" in str(result.get("snippet") or "").lower() and result_site not in parser_resolvable_sites:
                 result["downloadable_probe_failed"] = True
         if not result.get("quality"):
@@ -14682,6 +14891,47 @@ class DownloadManagerApp:
                     )
                 except Exception:
                     pass
+            return collected
+
+        def fetch_getav_results():
+            collected = []
+            if jav_code:
+                code_slug = jav_code.lower()
+                append_unique_results(
+                    collected,
+                    [
+                        {
+                            "url": f"https://getav.net/zh/videos/{code_slug}",
+                            "title": f"{jav_code} GetAV",
+                            "snippet": "getav jav code permalink seed",
+                            "quality": 720,
+                        }
+                    ],
+                )
+            for variant in search_variants:
+                query = str(variant or "").strip()
+                if not query:
+                    continue
+                for search_url in (
+                    "https://getav.net/zh/search?" + urllib.parse.urlencode({"q": query}),
+                    "https://getav.net/zh/search?" + urllib.parse.urlencode({"keyword": query}),
+                ):
+                    try:
+                        resp = c_req.get(
+                            search_url,
+                            impersonate="chrome120",
+                            timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
+                            headers=_make_ytdlp_http_headers(referer="https://getav.net/zh/"),
+                        )
+                        append_unique_results(
+                            collected,
+                            _extract_getav_video_results(
+                                _response_text_utf8(resp),
+                                base_url=str(getattr(resp, "url", search_url)),
+                            ),
+                        )
+                    except Exception:
+                        pass
             return collected
 
         def fetch_tinyavideo_results():
@@ -15186,6 +15436,7 @@ class DownloadManagerApp:
                 ("avhd101.com", ("/search", "/vodplay", "/video")),
                 ("85xvideo.com", ("/",)),
                 ("bestjavporn.com", ("/zh/video/", "/video/")),
+                ("getav.net", ("/zh/videos/", "/videos/")),
                 ("javdock.com", ("/zh/video/", "/video/")),
                 ("supjav.com", ("/zh/", "/en/", "/ja/")),
                 ("tinyavideo.com", ("/video/",)),
@@ -15266,6 +15517,7 @@ class DownloadManagerApp:
                 ("hayav", fetch_hayav_results),
                 ("missav", fetch_missav_results),
                 ("bestjavporn", fetch_bestjavporn_results),
+                ("getav", fetch_getav_results),
                 ("javdock", fetch_javdock_results),
                 ("supjav", fetch_supjav_results),
                 ("tinyavideo", fetch_tinyavideo_results),
@@ -15294,6 +15546,7 @@ class DownloadManagerApp:
                     ("avjoy", fetch_avjoy_results),
                     ("85xvideo", fetch_85xvideo_results),
                     ("bestjavporn", fetch_bestjavporn_results),
+                    ("getav", fetch_getav_results),
                     ("javdock", fetch_javdock_results),
                     ("supjav", fetch_supjav_results),
                     ("tinyavideo", fetch_tinyavideo_results),
@@ -15380,6 +15633,7 @@ class DownloadManagerApp:
                 ("hohoj", fetch_hohoj_results),
                 ("hayav", fetch_hayav_results),
                 ("supjav", fetch_supjav_results),
+                ("getav", fetch_getav_results),
                 ("tinyavideo", fetch_tinyavideo_results),
                 ("missav", fetch_missav_results),
                 ("njav", fetch_njav_results),
@@ -21463,6 +21717,140 @@ class DownloadManagerApp:
             raise last_exc
         raise Exception("TinyAVideo page fetch failed")
 
+    def _fetch_getav_page_text(self, page_url, origin=None, referer=None, timeout=20):
+        c_req = get_curl_cffi_requests()
+        origin = origin or _url_origin(page_url) or "https://getav.net"
+        referer = referer or origin.rstrip("/") + "/"
+        last_exc = None
+        for browser in ("chrome124", "chrome120", "chrome110", "edge101"):
+            session = None
+            try:
+                session = self._track_network_session(c_req.Session(impersonate=browser))
+                resp = session.get(
+                    page_url,
+                    timeout=timeout,
+                    headers=_make_browser_page_headers(referer=referer, origin=origin),
+                )
+                status_code = int(getattr(resp, "status_code", 0) or 0)
+                page_text = _response_text_utf8(resp)
+                if status_code >= 400:
+                    raise DownloadSourceUnavailableException(f"GetAV page HTTP {status_code}")
+                if _is_cloudflare_challenge_page(page_text, status_code=status_code):
+                    raise DownloadSourceUnavailableException("GetAV browser verification blocked page parsing")
+                if page_text and ("<html" in page_text.lower() or "worldstatic.com" in page_text.lower()):
+                    return page_text, str(getattr(resp, "url", page_url) or page_url)
+                raise DownloadSourceUnavailableException("GetAV empty page response")
+            except Exception as exc:
+                last_exc = exc
+                continue
+            finally:
+                self._close_network_session(session)
+        if last_exc is not None:
+            raise last_exc
+        raise DownloadSourceUnavailableException("GetAV page fetch failed")
+
+    def _score_getav_index_playlist(self, playlist_url, referer="", origin="", sample_limit=3):
+        playlist_url = _normalize_download_url(playlist_url)
+        if not playlist_url:
+            return (0, 0, 0)
+        headers = _make_hls_http_headers(referer=referer or "https://getav.net/", origin=origin or "https://getav.net")
+        try:
+            playlist_text = self._fetch_hls_text_for_parallel(playlist_url, headers)
+        except Exception:
+            return (0, 0, 0)
+        segment_urls = []
+        for line in str(playlist_text or "").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            segment_urls.append(urllib.parse.urljoin(playlist_url, stripped))
+            if len(segment_urls) >= max(int(sample_limit or 0), 1):
+                break
+        total_bytes = 0
+        sampled = 0
+        for segment_url in segment_urls:
+            try:
+                req = urllib.request.Request(segment_url, headers=headers, method="HEAD")
+                with urllib.request.urlopen(req, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                    content_length = int(resp.headers.get("Content-Length") or 0)
+            except Exception:
+                content_length = 0
+            if content_length > 0:
+                total_bytes += content_length
+                sampled += 1
+        return (int(total_bytes / sampled) if sampled else 0, sampled, len(playlist_text or ""))
+
+    def _order_getav_index_candidates(self, candidates, referer="", origin=""):
+        ordered = _dedupe_download_urls(candidates)
+        if len(ordered) <= 1:
+            return ordered
+        scored = []
+        for index, candidate in enumerate(ordered):
+            avg_segment_bytes, sampled_segments, playlist_bytes = self._score_getav_index_playlist(
+                candidate,
+                referer=referer,
+                origin=origin,
+                sample_limit=3,
+            )
+            scored.append((avg_segment_bytes, sampled_segments, playlist_bytes, -index, candidate))
+        if not any(item[0] for item in scored):
+            return _order_site_hls_candidates(ordered[0], ordered[1:], source_site="getav")
+        scored.sort(reverse=True)
+        return [item[-1] for item in scored]
+
+    def _fetch_getav_media_candidates(self, page_url, fallback_name="GetAV"):
+        normalized_page_url = _normalize_download_url(page_url)
+        if not normalized_page_url or not _is_getav_video_page_url(normalized_page_url):
+            raise DownloadSourceUnavailableException("GetAV video page URL invalid")
+        origin = _url_origin(normalized_page_url) or "https://getav.net"
+        page_text, final_page_url = self._fetch_getav_page_text(normalized_page_url, origin=origin, referer=origin + "/")
+        page_title = _clean_getav_title(
+            _extract_html_title(page_text, fallback_name or "GetAV"),
+            page_url=final_page_url,
+            fallback_title=fallback_name or "GetAV",
+        )
+        candidates = _extract_getav_index_urls(page_text)
+        embed_urls = _extract_getav_embed_urls(page_text, base_url=final_page_url)
+        embed_url = embed_urls[0] if embed_urls else ""
+        embed_attempts = []
+        for candidate_embed_url in embed_urls[:3]:
+            try:
+                embed_text, final_embed_url = self._fetch_getav_page_text(
+                    candidate_embed_url,
+                    origin=origin,
+                    referer=final_page_url,
+                    timeout=20,
+                )
+                embed_candidates = _extract_getav_index_urls(embed_text)
+                if not embed_url:
+                    embed_url = final_embed_url
+                candidates.extend(embed_candidates)
+                embed_attempts.append({"url": final_embed_url, "index_count": len(embed_candidates)})
+            except Exception as embed_exc:
+                embed_attempts.append({"url": candidate_embed_url, "error": _summarize_log_exception(embed_exc)})
+        candidates = _dedupe_download_urls(candidates)
+        candidates = self._order_getav_index_candidates(
+            candidates,
+            referer=embed_url or final_page_url,
+            origin=origin,
+        )
+        if not candidates:
+            write_error_log(
+                "getav media candidates missing",
+                DownloadSourceUnavailableException("GetAV page did not expose worldstatic HLS index playlists"),
+                source_page=final_page_url,
+                source_site="getav",
+                embed_urls=embed_urls[:3],
+                embed_attempts=embed_attempts,
+                preview_candidates=[
+                    candidate
+                    for candidate in _extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
+                    if "preview" in str(candidate or "").lower()
+                ][:3],
+            )
+            raise DownloadSourceUnavailableException("GetAV media URL missing")
+        return page_title, candidates, embed_url or final_page_url
+
     def _fetch_avjoy_media_candidates(self, page_url, fallback_name="AVJOY"):
         parsed = urllib.parse.urlsplit(str(page_url or ""))
         site_root = f"{parsed.scheme or 'https'}://{parsed.netloc or 'avjoy.me'}/"
@@ -21976,7 +22364,9 @@ class DownloadManagerApp:
             resume_tail_batch = int(total_segment_count or 0) > segment_count > 0
         except Exception:
             resume_tail_batch = False
-        if segment_count > 0 and not resume_tail_batch:
+        if segment_count > 0 and resume_tail_batch:
+            tail_worker_cap = int(workers)
+        elif segment_count > 0:
             shrink_factor = max(int(PARALLEL_HLS_TAIL_SHRINK_SEGMENT_FACTOR or 1), 1)
             tail_worker_cap = max(
                 int(PARALLEL_HLS_TAIL_SHRINK_MIN_WORKERS),
@@ -22628,7 +23018,8 @@ class DownloadManagerApp:
         host = urllib.parse.urlsplit(normalized_url).netloc.lower()
         for marker, timeout_seconds in PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST.items():
             if marker in host:
-                return max(float(timeout_seconds or 0), float(PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS))
+                host_timeout = float(timeout_seconds or 0)
+                return host_timeout if host_timeout > 0 else PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS
         return PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS
 
     def _parallel_hls_segment_retry_count(self, segment_url):
@@ -22636,12 +23027,10 @@ class DownloadManagerApp:
         host = urllib.parse.urlsplit(normalized_url).netloc.lower()
         if "googleusercontent.com" in host:
             return int(PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES)
-        retry_count = int(PARALLEL_HLS_SEGMENT_RETRIES)
         for marker, host_retries in PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST.items():
             if marker in host:
-                retry_count = max(retry_count, int(host_retries or 0))
-                break
-        return max(retry_count, 1)
+                return max(int(host_retries or 0), 1)
+        return max(int(PARALLEL_HLS_SEGMENT_RETRIES), 1)
 
     def _fetch_parallel_hls_segment_payload(self, segment_url, request_headers, prefer_curl=False, stop_event=None):
         def _stop_requested():
@@ -23418,6 +23807,7 @@ class DownloadManagerApp:
             "85xvideo",
             "bestjavporn",
             "dramasq",
+            "getav",
             "gimy",
             "goodav17",
             "hayav",
@@ -23592,6 +23982,43 @@ class DownloadManagerApp:
             **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
         )
 
+        def _should_retry_slow_parallel_candidate(speed_bps, session_bytes, session_segments, now):
+            source_site = _task_source_site_name(task)
+            threshold_bps = int(PARALLEL_HLS_SLOW_CANDIDATE_RETRY_THRESHOLD_BPS_BY_SITE.get(source_site, 0) or 0)
+            if threshold_bps <= 0 or float(speed_bps or 0.0) >= threshold_bps:
+                return False
+            if bool(_task_field_value(task, "_parallel_hls_slow_candidate_retry_attempted", False)):
+                return False
+            if max(float(now or time.time()) - float(started_at or 0.0), 0.0) < PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SECONDS:
+                return False
+            if int(session_bytes or 0) < PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_BYTES:
+                return False
+            if int(session_segments or 0) < PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SEGMENTS:
+                return False
+            alternate_candidates = _dedupe_download_urls(
+                list(_task_field_value(task, "fallback_urls", []) or [])
+                + list(_task_field_value(task, "page_refresh_candidates", []) or []),
+                primary_url=media_url,
+            )
+            if not alternate_candidates:
+                return False
+            _set_task_aux_fields(task, _parallel_hls_slow_candidate_retry_attempted=True)
+            write_error_log(
+                "parallel hls slow candidate retry requested",
+                ResumeLowSpeedReanalysisException("parallel HLS candidate stayed below site speed threshold"),
+                url=media_url,
+                item_id=item_id,
+                source_site=source_site or None,
+                hls_host=hls_host,
+                speed_bps=int(speed_bps or 0),
+                threshold_bps=threshold_bps,
+                elapsed_seconds=round(max(float(now or time.time()) - float(started_at or 0.0), 0.0), 3),
+                session_segment_bytes=int(session_bytes or 0),
+                session_completed_segments=int(session_segments or 0),
+                alternate_candidate_count=len(alternate_candidates),
+            )
+            return True
+
         def _download_one(segment):
             nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes, last_segment_speed_update, last_segment_speed_bytes, last_progress_activity_at, last_progress_completed_segments
             if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
@@ -23643,6 +24070,9 @@ class DownloadManagerApp:
                 session_segment_bytes = max(int(completed_bytes or 0) - int(session_start_completed_bytes or 0), 0)
                 session_completed_segments = max(int(completed_segments or 0) - int(session_start_completed_segments or 0), 0)
                 speed_bps = session_segment_bytes / elapsed if session_segment_bytes > 0 else 0.0
+                if _should_retry_slow_parallel_candidate(speed_bps, session_segment_bytes, session_completed_segments, now):
+                    stop_event.set()
+                    raise ResumeLowSpeedReanalysisException("parallel HLS candidate too slow; trying next candidate")
                 is_complete = completed_segments >= total_segments
                 should_refresh_progress_ui = (
                     is_complete
@@ -23773,7 +24203,20 @@ class DownloadManagerApp:
                                 stalled_seconds = max(now - float(last_progress_activity_at or started_at), 0.0)
                             except Exception:
                                 stalled_seconds = 0.0
-                            if stalled_seconds >= min(float(SLOW_SOURCE_REANALYZE_DELAY_SECONDS), float(RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS)):
+                            no_progress_reanalysis_delay = min(
+                                float(SLOW_SOURCE_REANALYZE_DELAY_SECONDS),
+                                float(RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS),
+                            )
+                            short_playlist_grace_applied = False
+                            if 0 < int(total_segments or 0) <= int(PARALLEL_HLS_SHORT_PLAYLIST_NO_PROGRESS_SEGMENTS):
+                                short_playlist_grace_applied = True
+                                # Let segment-level retries finish first; short playlists otherwise
+                                # reanalyze too early and lose useful resume progress.
+                                no_progress_reanalysis_delay = max(
+                                    no_progress_reanalysis_delay,
+                                    float(PARALLEL_HLS_SHORT_PLAYLIST_NO_PROGRESS_DELAY_SECONDS),
+                                )
+                            if stalled_seconds >= no_progress_reanalysis_delay:
                                 current_completed = int(completed_segments or 0)
                                 if current_completed <= int(last_progress_completed_segments or 0) and self._should_trigger_resume_low_speed_reanalysis(
                                     task,
@@ -23793,6 +24236,8 @@ class DownloadManagerApp:
                                         item_id=item_id,
                                         source_site=_task_source_site_name(task) or None,
                                         stalled_seconds=round(stalled_seconds, 3),
+                                        no_progress_reanalysis_delay_seconds=round(float(no_progress_reanalysis_delay), 3),
+                                        short_playlist_grace_applied=bool(short_playlist_grace_applied),
                                         completed_segments=current_completed,
                                         total_segments=total_segments,
                                         in_flight=len(in_flight),
@@ -24110,6 +24555,20 @@ class DownloadManagerApp:
                         return True
             except Exception:
                 pass
+            if isinstance(exc, ResumeLowSpeedReanalysisException):
+                write_error_log(
+                    "parallel hls slow candidate retry next",
+                    exc,
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    segments=total_segments,
+                    workers=worker_count,
+                    hls_host=hls_host,
+                    fallback_count=len(_task_field_value(task, "fallback_urls", []) or []),
+                    page_refresh_candidate_count=len(_task_field_value(task, "page_refresh_candidates", []) or []),
+                )
+                return False
             log_title = "parallel hls google retry later" if has_google_segments else "parallel hls fallback to ffmpeg"
             write_error_log(
                 log_title,
@@ -24519,6 +24978,16 @@ class DownloadManagerApp:
             if source_site == "gimy"
             else _dedupe_download_urls(stored_page_refresh_candidates + [candidate for candidate in raw_fallback_urls if candidate not in direct_fallback_urls])
         )
+        if source_site == "getav" and page_refresh_candidates:
+            direct_fallback_urls = _dedupe_download_urls(
+                direct_fallback_urls
+                + [
+                    candidate
+                    for candidate in page_refresh_candidates
+                    if _looks_like_manifest_url(candidate)
+                ],
+                primary_url=url,
+            )
         gimy_failed_stream_urls = _task_gimy_failed_stream_urls(task) if source_site == "gimy" else []
         gimy_failed_stream_hosts = _task_gimy_failed_stream_hosts(task) if source_site == "gimy" else []
         detail_refresh_done = bool(_task_field_value(task, "_gimy_detail_refresh_done", False))
@@ -24913,7 +25382,7 @@ class DownloadManagerApp:
         parallel_unsupported_segment_url = ""
         parallel_unsupported_segment_error = None
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("85xvideo", "18av", "bestjavporn", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("85xvideo", "18av", "bestjavporn", "getav", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -24931,7 +25400,7 @@ class DownloadManagerApp:
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("85xvideo", "18av", "bestjavporn", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("85xvideo", "18av", "bestjavporn", "getav", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -29690,11 +30159,24 @@ class DownloadManagerApp:
             )
             return
 
+        chat_platform_file_site = _chat_platform_file_site_from_url(url)
         inferred_direct_media_ext = _infer_media_extension_from_url(url)
-        is_direct_media = bool(inferred_direct_media_ext) or any(parsed_url.path.lower().endswith(ext) for ext in DIRECT_DOWNLOAD_FILE_EXTENSIONS)
+        if chat_platform_file_site and not inferred_direct_media_ext:
+            inferred_direct_media_ext = _chat_platform_default_extension_from_url(url)
+        is_direct_media = (
+            bool(inferred_direct_media_ext)
+            or any(parsed_url.path.lower().endswith(ext) for ext in DIRECT_DOWNLOAD_FILE_EXTENSIONS)
+            or bool(chat_platform_file_site)
+        )
         if is_direct_media:
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
-            filename = _direct_download_filename_from_url(url) or os.path.basename(parsed_url.path) or "downloaded_file"
+            if chat_platform_file_site:
+                _set_task_identity(source_site=chat_platform_file_site, source_page=url, fallback_urls=[])
+            filename = (
+                _chat_platform_filename_from_url(url)
+                if chat_platform_file_site
+                else (_direct_download_filename_from_url(url) or os.path.basename(parsed_url.path) or "downloaded_file")
+            )
             source_site_for_name = _task_source_site_name(task)
             current_task_title = str(_task_field_value(task, "short_name") or _task_field_value(task, "name") or "").strip()
             filename_stem = os.path.splitext(filename)[0]
@@ -32431,6 +32913,53 @@ class DownloadManagerApp:
             if self._alternate_site_search_was_declined(task):
                 return
             raise javninja_exc
+
+        if _is_getav_video_page_url(url):
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="Parsing GetAV page...")
+            try:
+                page_title, candidates, embed_url = self._fetch_getav_media_candidates(url, fallback_name=short_name or "GetAV")
+            except Exception as getav_fetch_exc:
+                _set_task_identity(name=short_name or _extract_jav_code(url) or "GetAV", source_site="getav", source_page=url, fallback_urls=[])
+                self._set_task_parse_ui(item_id, error="GetAV media URL missing")
+                write_error_log(
+                    "getav media resolve failed",
+                    getav_fetch_exc,
+                    item_id=item_id,
+                    url=url,
+                    source_site="getav",
+                    jav_code=_extract_jav_code(url) or None,
+                )
+                if _retry_next_page_fallback("GetAV media resolve failed; retrying same-code source", getav_fetch_exc):
+                    return
+                if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, getav_fetch_exc, is_mp3=is_mp3):
+                    self._mark_task_error_state(item_id, getav_fetch_exc, "GetAV 找不到下載檔案，已開始搜尋其他支援網站")
+                    return
+                if self._alternate_site_search_was_declined(task):
+                    return
+                raise
+            media_url, fallback_urls = _pick_primary_with_fallbacks(candidates, source_site="getav")
+            if not media_url:
+                raise DownloadSourceUnavailableException("GetAV media URL missing")
+            _set_task_identity(name=page_title, source_site="getav", source_page=url, fallback_urls=fallback_urls)
+            getav_origin = _url_origin(url) or "https://getav.net"
+            media_referer = embed_url or url
+            self._download_routed_media_url(
+                task,
+                item_id,
+                media_url,
+                save_dir,
+                page_title,
+                is_mp3=is_mp3,
+                source_site="getav",
+                fallback_urls=fallback_urls,
+                referer=media_referer,
+                origin=getav_origin,
+                manifest_downloader=_download_manifest_with_site_strategy,
+                manifest_default_route="ffmpeg",
+                headers=_make_hls_http_headers(referer=media_referer, origin=getav_origin),
+                default_ext=".mp4",
+            )
+            return
 
         if _is_tinyavideo_video_page_url(url):
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 TinyAVideo 影片...")
