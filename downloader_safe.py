@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260610-3610"
+APP_BUILD = "20260610-3620"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -155,8 +155,8 @@ FINAL_SHUTDOWN_EXIT_DELAY_SECONDS = 0.35
 SHUTDOWN_BACKGROUND_THREAD_WAIT_SECONDS = 3.0
 SHUTDOWN_BACKGROUND_THREAD_EXTRA_WAIT_SECONDS = 6.0
 SHUTDOWN_DOWNLOAD_THREAD_EXTRA_WAIT_SECONDS = 12.0
-SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS = 6.0
-SHUTDOWN_NEAR_COMPLETE_HLS_FINAL_WAVE_WAIT_SECONDS = 18.0
+SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS = 30.0
+SHUTDOWN_NEAR_COMPLETE_HLS_FINAL_WAVE_WAIT_SECONDS = 45.0
 SHUTDOWN_NEAR_COMPLETE_HLS_FINAL_WAVE_MAX_PENDING_SEGMENTS = 2
 SHUTDOWN_NEAR_COMPLETE_HLS_MAX_PENDING_SEGMENTS = 24
 SHUTDOWN_NEAR_COMPLETE_HLS_MIN_RATIO = 0.98
@@ -185,6 +185,7 @@ FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "hayav",
     "hohoj",
     "ikanbot",
+    "javninja",
     "javdock",
     "jable",
     "missav",
@@ -216,6 +217,7 @@ STRICT_HLS_ARTIFACT_SITES = frozenset((
     "hayav",
     "hohoj",
     "ikanbot",
+    "javninja",
     "javdock",
     "movieffm",
     "missav",
@@ -482,6 +484,14 @@ def _is_bestjavporn_video_page_url(url):
     return "bestjavporn.com" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
 
 
+def _is_javninja_video_page_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    return "jav.ninja" in parsed.netloc.lower() and "/videos/" in (parsed.path or "").lower()
+
+
 def _is_bestjavporn_transient_media_url(url):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -503,6 +513,24 @@ def _is_bestjavporn_transient_media_url(url):
 
 def _is_dood_family_transient_media_url(url):
     return _is_bestjavporn_transient_media_url(url)
+
+
+def _is_javninja_external_player_url(url):
+    normalized = _normalize_download_url(url)
+    if not normalized:
+        return False
+    parsed = urllib.parse.urlparse(normalized)
+    host = (parsed.netloc or "").lower()
+    return _is_dood_family_transient_media_url(normalized) or any(
+        marker in host
+        for marker in (
+            "filemoon.",
+            "streamtape.",
+            "streamtape.com",
+            "vinovo.",
+            "vinovo.to",
+        )
+    )
 
 
 def _search_result_uses_dood_family_media(result):
@@ -845,7 +873,7 @@ def _task_jav_duplicate_key(task=None, url="", name="", source_site="", is_mp3=F
     return ""
 
 
-PARALLEL_HLS_SEGMENT_SITES = frozenset(("85xvideo", "18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "javdock", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "supjav", "thanju", "tinyavideo", "xiaoyakankan"))
+PARALLEL_HLS_SEGMENT_SITES = frozenset(("85xvideo", "18av", "movieffm", "avbebe", "bestjavporn", "dramasq", "gimy", "goodav17", "hayav", "hohoj", "ikanbot", "javninja", "javdock", "jable", "missav", "njav", "njavtv", "nnyy", "olevod", "supjav", "thanju", "tinyavideo", "xiaoyakankan"))
 PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "xluuss",
     "xlzyd.com",
@@ -1360,7 +1388,7 @@ STARTUP_RESUME_BATCH_SIZE = 12
 STARTUP_RESUME_BATCH_DELAY_MS = 250
 STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS = 1200
 SHUTDOWN_ACTIVE_DOWNLOAD_WAIT_SECONDS = 7.5
-SHUTDOWN_PARALLEL_HLS_ACTIVE_DOWNLOAD_WAIT_SECONDS = 18.0
+SHUTDOWN_PARALLEL_HLS_ACTIVE_DOWNLOAD_WAIT_SECONDS = 45.0
 SHUTDOWN_RESUME_ARTIFACT_WAIT_SECONDS = 0.8
 SHUTDOWN_PROCESS_TERMINATE_TIMEOUT_SECONDS = 0.8
 SHUTDOWN_PROCESS_KILL_TIMEOUT_SECONDS = 0.8
@@ -1437,6 +1465,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "app peer processes detected",
     "app shutdown finalized",
     "app shutdown started",
+    "shutdown non-grace downloads stop requested",
     "shutdown wait active downloads timeout",
     "single instance lock denied",
     "single instance lock file denied",
@@ -1454,8 +1483,10 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls output already finalized",
     "parallel hls concat remux fallback to transport",
     "parallel hls resume complete before download",
+    "parallel hls remux deferred during shutdown",
     "parallel hls completed remux finalizing during shutdown",
     "parallel hls shutdown finalize guard activated",
+    "tktube media candidate rejected",
     "download task duplicate worker skipped",
     "download worker skipped during shutdown",
     "download task active transfer state repaired",
@@ -2753,6 +2784,8 @@ def _infer_source_site_from_task_urls(*urls):
             return "85xvideo"
         if "bestjavporn.com" in host:
             return "bestjavporn"
+        if "jav.ninja" in host:
+            return "javninja"
         if "javdock.com" in host or "video1.javdock.com" in host:
             return "javdock"
         if "supjav.com" in host:
@@ -5709,6 +5742,16 @@ def _clean_javdock_title(raw_title, page_url="", fallback_title="JavDock"):
     return code or str(fallback_title or "JavDock").strip() or "JavDock"
 
 
+def _clean_javninja_title(raw_title, page_url="", fallback_title="JavNinja"):
+    cleaned = html.unescape(str(raw_title or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*[-|]\s*JavNinja.*$", "", cleaned, flags=re.IGNORECASE).strip(" -|/")
+    code = _extract_jav_code(cleaned) or _extract_jav_code(page_url) or _extract_jav_code(fallback_title)
+    if cleaned and not _output_title_is_suspicious_value(cleaned) and not _looks_like_garbled_text(cleaned) and not _contains_mojibake_noise(cleaned):
+        return cleaned
+    return code or str(fallback_title or "JavNinja").strip() or "JavNinja"
+
+
 def _clean_85xvideo_title(raw_title, page_url="", fallback_title="85xvideo"):
     cleaned = html.unescape(str(raw_title or "")).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -6188,8 +6231,101 @@ def _extract_tktube_media_candidates(page_text):
             continue
         if any(marker in lowered for marker in ("preview", "screenshot", ".jpg", ".jpeg", ".png", ".webp")):
             continue
+        quality = _video_search_quality_score(lowered)
+        if quality and quality < VIDEO_SEARCH_MIN_QUALITY:
+            continue
         candidates.append(candidate)
     return sorted(_dedupe_download_urls(candidates), key=_tktube_media_priority)
+
+
+def _extract_javninja_embed_urls(page_text, base_url="https://jav.ninja/"):
+    text = str(page_text or "")
+    candidates = []
+    for raw_url in re.findall(r'<iframe\b[^>]+\bsrc=["\']([^"\']+)["\']', text, re.IGNORECASE | re.DOTALL):
+        candidate = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(raw_url)))
+        if candidate:
+            candidates.append(candidate)
+    for raw_url in re.findall(r'\bdata-(?:src|embed|url)=["\']([^"\']+)["\']', text, re.IGNORECASE | re.DOTALL):
+        candidate = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(raw_url)))
+        if candidate:
+            candidates.append(candidate)
+    return _dedupe_download_urls(candidates)
+
+
+def _extract_javninja_player_urls(page_text):
+    text = str(page_text or "")
+    candidates = []
+    for key in ("streamtapeUrl", "vinovoUrl", "doodstreamUrl", "filemoonUrl"):
+        for raw_url in re.findall(rf'\b{re.escape(key)}\s*:\s*"([^"]+)"', text, re.IGNORECASE):
+            candidate = _normalize_download_url(html.unescape(raw_url))
+            if candidate:
+                candidates.append(candidate)
+    return _dedupe_download_urls(candidates)
+
+
+def _validate_tktube_media_candidates(candidates, session=None, referer="", origin="", item_id=None):
+    valid_candidates = []
+    rejected_candidates = []
+    headers = _make_ytdlp_http_headers(referer=referer or "https://tktube.com/", origin=origin or "https://tktube.com")
+    for candidate in _dedupe_download_urls(candidates):
+        status = None
+        content_type = ""
+        final_url = candidate
+        reason = ""
+        try:
+            probe_session = session
+            if probe_session is None:
+                c_req = get_curl_cffi_requests()
+                probe_session = c_req.Session(impersonate="chrome120")
+            resp = probe_session.head(candidate, timeout=12, headers=headers, allow_redirects=True)
+            status = int(getattr(resp, "status_code", 0) or 0)
+            final_url = str(getattr(resp, "url", "") or candidate)
+            content_type = str(_response_header_value(getattr(resp, "headers", {}) or {}, "Content-Type") or "").lower()
+            content_length = str(_response_header_value(getattr(resp, "headers", {}) or {}, "Content-Length") or "").strip()
+            if 200 <= status < 300 and "text/html" not in content_type and content_length != "0":
+                valid_candidates.append(candidate)
+                continue
+            reason = f"HEAD status={status or 'unknown'} content_type={content_type or 'unknown'}"
+            if status in (404, 410):
+                rejected_candidates.append((candidate, reason, final_url))
+                continue
+            try:
+                range_resp = probe_session.get(
+                    candidate,
+                    timeout=12,
+                    headers=_make_range_http_headers(headers, "bytes=0-0"),
+                    allow_redirects=True,
+                    stream=True,
+                )
+                try:
+                    status = int(getattr(range_resp, "status_code", 0) or 0)
+                    final_url = str(getattr(range_resp, "url", "") or candidate)
+                    content_type = str(_response_header_value(getattr(range_resp, "headers", {}) or {}, "Content-Type") or "").lower()
+                    if status in (200, 206) and "text/html" not in content_type:
+                        valid_candidates.append(candidate)
+                        continue
+                    reason = f"Range status={status or 'unknown'} content_type={content_type or 'unknown'}"
+                finally:
+                    close = getattr(range_resp, "close", None)
+                    if callable(close):
+                        close()
+            except Exception as range_exc:
+                reason = f"{reason}; range_probe={range_exc}"
+        except Exception as exc:
+            reason = str(exc)
+        rejected_candidates.append((candidate, reason, final_url))
+    if rejected_candidates:
+        write_error_log(
+            "tktube media candidate rejected",
+            Exception("TKTube media candidate probe rejected unusable direct URLs"),
+            item_id=item_id,
+            rejected_count=len(rejected_candidates),
+            valid_count=len(valid_candidates),
+            first_rejected=rejected_candidates[0][0],
+            first_reason=rejected_candidates[0][1],
+            first_final_url=rejected_candidates[0][2],
+        )
+    return valid_candidates
 
 
 def _extract_tktube_video_page_urls(page_text, base_url="https://tktube.com/"):
@@ -6504,6 +6640,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "missav",
     "avjoy",
     "bestjavporn.com",
+    "jav.ninja",
     "javdock.com",
     "supjav.com",
     "hanime1.me",
@@ -6580,6 +6717,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "avbebe.com",
     "avjoy.me",
     "bestjavporn.com",
+    "jav.ninja",
     "javdock.com",
     "supjav.com",
     "tinyavideo.com",
@@ -8328,6 +8466,35 @@ def _video_search_download_speed_score(result):
     return site_rank + direct_bonus
 
 
+def _video_search_jav_source_reliability_score(result):
+    site = _video_search_site_for_url((result or {}).get("url", ""))
+    candidates = [_normalize_download_url(candidate) or str(candidate or "") for candidate in (result or {}).get("candidate_urls", []) or []]
+    if any(_looks_like_manifest_url(candidate) for candidate in candidates):
+        return 0
+    if site == "missav":
+        return 1
+    if site in {"avjoy.me", "hayav.com", "85xvideo.com", "javdock.com", "supjav.com"}:
+        return 3
+    if site == "jav.ninja":
+        return 7
+    if site == "tktube.com":
+        return 6
+    if site in {"bestjavporn.com", "tinyavideo.com"}:
+        return 8
+    return 5
+
+
+def _video_search_jav_seed_fallback_urls(query_text):
+    jav_code = _normalize_jav_code_for_compare(query_text)
+    if not jav_code:
+        return []
+    slug = jav_code.lower().replace("_", "-")
+    return [
+        f"https://missav.ws/{slug}-chinese-subtitle",
+        f"https://missav.ws/{slug}",
+    ]
+
+
 def _video_search_popularity_score(result):
     text = _video_search_result_text(result).lower()
     score = VIDEO_SEARCH_SITE_PRIORITY.get(_video_search_site_for_url((result or {}).get("url", "")), 999)
@@ -8367,9 +8534,10 @@ def _video_search_result_rank(result, query_text=""):
     preview_risk_rank = 1 if _video_search_site_for_url((result or {}).get("url", "")) == "bestjavporn.com" and not (result or {}).get("candidate_urls") else 0
     transient_media_rank = 1 if _search_result_uses_dood_family_media(result) else 0
     has_hls_candidate_rank = 0 if any(_looks_like_manifest_url(candidate) for candidate in (result or {}).get("candidate_urls", []) or []) else 1
+    source_reliability_rank = _video_search_jav_source_reliability_score(result) if _normalize_jav_code_for_compare(query_text) else 0
     if _looks_like_actress_name_search(query_text):
-        return (match_rank, preview_risk_rank, transient_media_rank, popularity_rank, has_hls_candidate_rank, subtitle_rank, search_order, -quality, speed_rank, len(str((result or {}).get("url", ""))))
-    return (match_rank, preview_risk_rank, transient_media_rank, -quality, has_hls_candidate_rank, subtitle_rank, speed_rank, search_order, len(str((result or {}).get("url", ""))))
+        return (match_rank, preview_risk_rank, transient_media_rank, popularity_rank, source_reliability_rank, has_hls_candidate_rank, subtitle_rank, search_order, -quality, speed_rank, len(str((result or {}).get("url", ""))))
+    return (match_rank, preview_risk_rank, transient_media_rank, source_reliability_rank, has_hls_candidate_rank, subtitle_rank, -quality, speed_rank, search_order, len(str((result or {}).get("url", ""))))
 
 
 def _video_search_matches_query(result, query_text):
@@ -13729,6 +13897,7 @@ class DownloadManagerApp:
             "avbebe.com": "avbebe",
             "avjoy.me": "avjoy",
             "bestjavporn.com": "bestjavporn",
+            "jav.ninja": "javninja",
             "javdock.com": "javdock",
             "supjav.com": "supjav",
             "tinyavideo.com": "tinyavideo",
@@ -14316,7 +14485,7 @@ class DownloadManagerApp:
                 )
         except Exception:
             result_site = _video_search_site_for_url(result.get("url", ""))
-            parser_resolvable_sites = {"missav", "movieffm.net", "85xvideo.com", "bestjavporn.com", "javdock.com", "supjav.com", "tinyavideo.com", "avbebe.com"}
+            parser_resolvable_sites = {"missav", "movieffm.net", "85xvideo.com", "bestjavporn.com", "jav.ninja", "javdock.com", "supjav.com", "tinyavideo.com", "avbebe.com"}
             if "jav code pattern" in str(result.get("snippet") or "").lower() and result_site not in parser_resolvable_sites:
                 result["downloadable_probe_failed"] = True
         if not result.get("quality"):
@@ -15254,6 +15423,8 @@ class DownloadManagerApp:
                     f'"{primary}" site:85xvideo.com',
                     f'"{primary}" "bestjavporn.com/zh/video"',
                     f'"{primary}" site:bestjavporn.com/zh/video',
+                    f'"{primary}" "jav.ninja"',
+                    f'"{primary}" site:jav.ninja/videos',
                     f'"{primary}" "javdock.com/zh/video"',
                     f'"{primary}" site:javdock.com/zh/video',
                     f'"{primary}" "supjav.com/zh"',
@@ -15286,6 +15457,8 @@ class DownloadManagerApp:
                     f'"{primary}" site:85xvideo.com',
                     f'"{primary}" "bestjavporn.com/zh/video"',
                     f'"{primary}" site:bestjavporn.com/zh/video',
+                    f'"{primary}" "jav.ninja"',
+                    f'"{primary}" site:jav.ninja/videos',
                     f'"{primary}" "javdock.com/zh/video"',
                     f'"{primary}" site:javdock.com/zh/video',
                     f'"{primary}" "supjav.com/zh"',
@@ -15425,6 +15598,15 @@ class DownloadManagerApp:
         source_page = target_url
         fallback_urls = []
         page_refresh_candidates = []
+        selected_source_site = _video_search_site_for_url(target_url)
+        if _normalize_jav_code_for_compare(query_text):
+            for seed_url in _video_search_jav_seed_fallback_urls(query_text):
+                normalized_seed = _normalize_download_url(seed_url)
+                if not normalized_seed or normalized_seed == target_url:
+                    continue
+                if selected_source_site == "missav" and _video_search_site_for_url(normalized_seed) == "missav":
+                    continue
+                page_refresh_candidates.append(normalized_seed)
         for index, result in enumerate(results):
             if index == selected_index:
                 continue
@@ -15435,6 +15617,11 @@ class DownloadManagerApp:
             if _is_slow_external_fallback_url_for_site(fallback_url, fallback_site):
                 continue
             page_refresh_candidates.append(fallback_url)
+        if _normalize_jav_code_for_compare(query_text):
+            page_refresh_candidates = sorted(
+                _dedupe_download_urls(page_refresh_candidates, primary_url=source_page),
+                key=lambda candidate: _video_search_jav_source_reliability_score({"url": candidate}),
+            )
         if playlist_entries:
             source_page = target_url
             target_url = playlist_entries[0]["url"]
@@ -21837,16 +22024,18 @@ class DownloadManagerApp:
     def _hls_host_worker_budget(self, host):
         normalized_host = str(host or "").strip().lower()
         configured_budget = int(PARALLEL_HLS_HOST_WORKER_BUDGET)
+        explicit_budget_matched = False
         for marker, budget in PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST.items():
             if marker in normalized_host:
                 configured_budget = int(budget)
+                explicit_budget_matched = True
                 break
         host_worker_cap = 0
         for marker, host_workers in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST.items():
             if marker in normalized_host:
                 host_worker_cap = int(host_workers)
                 break
-        if host_worker_cap > 0:
+        if host_worker_cap > 0 and not explicit_budget_matched:
             concurrent_host_slots = max(1, min(int(MAX_DOWNLOADS_PER_SOURCE_SITE), int(MAX_DOWNLOADS_PER_DOMAIN)))
             auto_budget = min(
                 int(PARALLEL_HLS_HOST_WORKER_AUTO_BUDGET_MAX),
@@ -23656,6 +23845,49 @@ class DownloadManagerApp:
                     part_dir=part_dir,
                     **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
                 )
+            current_task_state_before_remux = str(_task_field_value(self.tasks.get(item_id, task), "state", "") or "")
+            if (
+                _all_segments_ready_for_finalization()
+                and (
+                    getattr(self, "_shutdown_stop_requested", False)
+                    or getattr(self, "_shutdown_started", False)
+                    or stop_event.is_set()
+                )
+                and not self._is_delete_requested_state(current_task_state_before_remux)
+            ):
+                with completed_lock:
+                    deferred_completed_segments = int(completed_segments or 0)
+                    deferred_completed_bytes = int(completed_bytes or 0)
+                    deferred_completed_duration = float(completed_duration or 0.0)
+                self._save_resume_progress(
+                    progress_path,
+                    deferred_completed_duration,
+                    source_url=_normalize_download_url(url) or url,
+                    bytes_done=deferred_completed_bytes,
+                    progress_info={
+                        "type": "parallel_hls",
+                        "hls_total_segments": int(total_segments or 0),
+                        "hls_completed_segments": int(deferred_completed_segments or 0),
+                        "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
+                        "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
+                    },
+                    min_interval_seconds=0.0,
+                    min_bytes_delta=0,
+                    force=True,
+                )
+                self._log_ffmpeg_event(
+                    "parallel hls remux deferred during shutdown",
+                    Exception("parallel HLS remux deferred until next startup"),
+                    task,
+                    item_id,
+                    media_url,
+                    completed_segments=deferred_completed_segments,
+                    total_segments=total_segments,
+                    completed_bytes=deferred_completed_bytes,
+                    completed_duration_seconds=round(deferred_completed_duration, 3),
+                    progress_path=progress_path,
+                )
+                raise StopDownloadException("shutdown requested before remux")
             ordered_part_paths = []
             for segment in segments:
                 part_path = _part_path(segment)
@@ -26147,6 +26379,10 @@ class DownloadManagerApp:
         candidate_ids = self._near_complete_shutdown_hls_task_ids()
         if not candidate_ids:
             return False
+        stopped_item_ids = self._request_shutdown_stop_for_active_tasks(
+            exclude_item_ids=set(candidate_ids),
+            reason="near_complete_shutdown_grace",
+        )
         candidate_details = []
         timeout_seconds = max(float(SHUTDOWN_NEAR_COMPLETE_HLS_WAIT_SECONDS or 0.0), 0.0)
         for candidate_id in candidate_ids:
@@ -26176,6 +26412,7 @@ class DownloadManagerApp:
                 Exception("near complete shutdown grace started"),
                 item_ids=", ".join(candidate_ids),
                 candidate_details=", ".join(candidate_details),
+                stopped_non_grace_item_ids=", ".join(stopped_item_ids),
                 timeout_seconds=round(timeout_seconds, 3),
             )
         except Exception:
@@ -26397,22 +26634,41 @@ class DownloadManagerApp:
             except Exception:
                 pass
 
-    def _request_shutdown_stop_for_active_tasks(self):
+    def _request_shutdown_stop_for_active_tasks(self, exclude_item_ids=None, reason="shutdown"):
+        excluded_ids = {str(item_id) for item_id in (exclude_item_ids or set()) if item_id}
         try:
             with self._active_download_item_ids_lock:
-                active_worker_ids = set(self._active_download_item_ids)
+                active_worker_ids = {str(item_id) for item_id in self._active_download_item_ids}
         except Exception:
             active_worker_ids = set()
-        self._signal_transfer_stop_events(active_worker_ids)
+        requested_stop_ids = set()
+        signal_ids = active_worker_ids - excluded_ids
+        self._signal_transfer_stop_events(signal_ids)
         for item_id, task in self.tasks.items():
+            item_id = str(item_id)
+            if item_id in excluded_ids:
+                continue
             state = str(_task_field_value(task, "state", "") or "")
             proc = _task_field_value(task, "_proc", None)
             if item_id in active_worker_ids or state in ("DOWNLOADING", "PAUSE_REQUESTED") or self._process_handle_is_running(proc):
                 _set_task_aux_fields(task, state="PAUSE_REQUESTED", _stop_reason=STOP_REASON_PAUSE, resume_requested=True, _manual_pause_requested=False)
                 self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                requested_stop_ids.add(item_id)
             elif state == "QUEUED":
                 _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, resume_requested=True, _manual_pause_requested=False)
                 self._set_task_status_mode_ui(item_id, self._paused_status_text())
+        if requested_stop_ids and excluded_ids:
+            try:
+                write_error_log(
+                    "shutdown non-grace downloads stop requested",
+                    Exception("shutdown non-grace downloads stop requested"),
+                    reason=reason,
+                    stopped_item_ids=", ".join(sorted(requested_stop_ids)),
+                    grace_item_ids=", ".join(sorted(excluded_ids)),
+                )
+            except Exception:
+                pass
+        return sorted(requested_stop_ids)
 
     def _force_kill_child_processes(self):
         tracked_processes = list(self._iter_active_process_handles())
@@ -28501,6 +28757,13 @@ class DownloadManagerApp:
             )
             if fallback_source_site in ("goodav17", "hohoj") and fallback_jav_code:
                 fallback_candidates = _prefer_ggjav_media_group_matching_code(fallback_candidates, fallback_jav_code)
+            if fallback_jav_code:
+                seed_fallback_candidates = [
+                    candidate
+                    for candidate in _video_search_jav_seed_fallback_urls(fallback_jav_code)
+                    if candidate and candidate != current_url and candidate not in tried_urls
+                ]
+                fallback_candidates = _dedupe_download_urls(seed_fallback_candidates + fallback_candidates, primary_url=current_url)
             fallback_candidates = _filter_unnecessary_ggjav_direct_mp4_candidates(
                 _prefer_primary_ggjav_media_group(fallback_candidates)
             )
@@ -28520,11 +28783,17 @@ class DownloadManagerApp:
                     if not _is_movieffm_url(candidate)
                 ]
             if fallback_candidates:
-                fallback_candidates = _order_site_hls_candidates(
-                    fallback_candidates[0],
-                    fallback_candidates[1:],
-                    source_site=fallback_source_site,
-                )
+                if fallback_jav_code:
+                    fallback_candidates = sorted(
+                        _dedupe_download_urls(fallback_candidates, primary_url=current_url),
+                        key=lambda candidate: _video_search_jav_source_reliability_score({"url": candidate}),
+                    )
+                else:
+                    fallback_candidates = _order_site_hls_candidates(
+                        fallback_candidates[0],
+                        fallback_candidates[1:],
+                        source_site=fallback_source_site,
+                    )
             if not fallback_candidates and fallback_jav_code:
                 _abort_page_fallback_if_stopped()
                 try:
@@ -32088,6 +32357,81 @@ class DownloadManagerApp:
             raise DownloadSourceUnavailableException(message)
             self._set_task_parse_ui(item_id, fallback="正在解析 EYNY 影片...")
 
+        if _is_javninja_video_page_url(url):
+            self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 JavNinja 影片...")
+            c_req = get_curl_cffi_requests()
+            javninja_origin = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'jav.ninja'}"
+            page_headers = _make_browser_page_headers(referer=javninja_origin + "/", origin=javninja_origin)
+            page_resp = c_req.get(url, impersonate="chrome120", timeout=25, headers=page_headers)
+            page_text = _response_text_utf8(page_resp)
+            final_page_url = str(getattr(page_resp, "url", url) or url)
+            page_title = _clean_javninja_title(
+                _extract_html_title(page_text, short_name or "JavNinja"),
+                page_url=final_page_url,
+                fallback_title=short_name or "JavNinja",
+            )
+            all_media_candidates = _dedupe_download_urls(
+                _extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            )
+            direct_candidates = [
+                candidate
+                for candidate in all_media_candidates
+                if not _is_javninja_external_player_url(candidate)
+            ]
+            media_url, fallback_urls = _pick_primary_with_fallbacks(direct_candidates, source_site="javninja")
+            if media_url:
+                _set_task_identity(name=page_title, source_site="javninja", source_page=final_page_url, fallback_urls=fallback_urls)
+                self._download_routed_media_url(
+                    task,
+                    item_id,
+                    media_url,
+                    save_dir,
+                    page_title,
+                    is_mp3=is_mp3,
+                    source_site="javninja",
+                    fallback_urls=fallback_urls,
+                    referer=final_page_url,
+                    origin=javninja_origin,
+                    manifest_downloader=_download_manifest_with_site_strategy,
+                    manifest_default_route="ffmpeg",
+                    headers=_make_hls_http_headers(referer=final_page_url, origin=javninja_origin),
+                    default_ext=".mp4",
+                )
+                return
+            external_player_urls = _dedupe_download_urls(
+                _extract_javninja_player_urls(page_text)
+                + _extract_javninja_embed_urls(page_text, base_url=final_page_url)
+                + [
+                    candidate
+                    for candidate in all_media_candidates
+                    if _is_javninja_external_player_url(candidate)
+                ]
+            )
+            ytdlp_player_urls = [candidate for candidate in external_player_urls if not _is_javninja_external_player_url(candidate)]
+            _set_task_identity(name=page_title, source_site="javninja", source_page=final_page_url, fallback_urls=external_player_urls)
+            if ytdlp_player_urls:
+                _run_yt_dlp(ytdlp_player_urls[0])
+                return
+            javninja_exc = DownloadSourceUnavailableException("JavNinja only exposes unsupported external player pages")
+            write_error_log(
+                "javninja external player unsupported",
+                javninja_exc,
+                item_id=item_id,
+                url=url,
+                source_site="javninja",
+                external_player_urls=external_player_urls[:4],
+                jav_code=_extract_jav_code(page_title) or _extract_jav_code(final_page_url) or None,
+            )
+            self._set_task_parse_ui(item_id, error="JavNinja 原頁只有不支援的外部播放器，將改用同番號搜尋")
+            if _retry_next_page_fallback("JavNinja external player unsupported; retrying same-code source", javninja_exc):
+                return
+            if self._prompt_alternate_site_search_after_url_failure(task, item_id, url, javninja_exc, is_mp3=is_mp3):
+                self._mark_task_error_state(item_id, javninja_exc, "原網址找不到下載檔案，已開始搜尋其他支援網站")
+                return
+            if self._alternate_site_search_was_declined(task):
+                return
+            raise javninja_exc
+
         if _is_tinyavideo_video_page_url(url):
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 TinyAVideo 影片...")
             tiny_origin = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'tinyavideo.com'}"
@@ -32550,7 +32894,22 @@ class DownloadManagerApp:
                 if unpacked:
                     media_candidates = _extract_tktube_media_candidates(unpacked)
             if not media_candidates:
-                raise Exception("TKTube media URL missing")
+                tktube_exc = DownloadSourceUnavailableException("TKTube media URL missing")
+                if _retry_next_page_fallback("TKTube media URL missing; retrying same-code source", tktube_exc):
+                    return
+                raise tktube_exc
+            media_candidates = _validate_tktube_media_candidates(
+                media_candidates,
+                session=tktube_session,
+                referer=url,
+                origin=tktube_origin,
+                item_id=item_id,
+            )
+            if not media_candidates:
+                tktube_exc = DownloadSourceUnavailableException("TKTube media URL unavailable after probe")
+                if _retry_next_page_fallback("TKTube media URL unavailable; retrying same-code source", tktube_exc):
+                    return
+                raise tktube_exc
             page_title = _clean_tktube_title(
                 _extract_html_title(page_text, short_name or "TKTube"),
                 page_url=url,
