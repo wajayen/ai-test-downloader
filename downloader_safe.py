@@ -25215,10 +25215,15 @@ class DownloadManagerApp:
             _task_field_value(task, "resolved_url", ""),
         )
         if source_site == "javdock":
-            if not referer or "video.javdock.com" not in referer:
-                referer = "https://video.javdock.com/"
-            if not origin or "video.javdock.com" not in origin:
-                origin = "https://video.javdock.com"
+            player_url_stored = _task_field_value(task, "_javdock_player_url", "")
+            if player_url_stored:
+                referer = player_url_stored
+                origin = _url_origin(player_url_stored) or "https://video.javdock.com"
+            else:
+                if not referer or "video.javdock.com" not in referer:
+                    referer = "https://video.javdock.com/"
+                if not origin or "video.javdock.com" not in origin:
+                    origin = "https://video.javdock.com"
         probe_task = self._parallel_hls_probe_task(task, source_site)
         active_reason = "parallel_hls" if (not is_mp3 and self._should_try_parallel_hls_segments(url, probe_task)) else "ffmpeg_hls"
         task = self._ensure_task_active_transfer_state(item_id, task, reason=active_reason)
@@ -33713,6 +33718,7 @@ class DownloadManagerApp:
                 self._set_task_parse_ui(item_id, error="JavDock 找不到可下載影片檔案")
                 raise DownloadSourceUnavailableException("JavDock media URL missing")
             _set_task_identity(name=page_title, source_site="javdock", source_page=url, fallback_urls=fallback_urls)
+            _set_task_aux_fields(task, _javdock_player_url=player_url)
             media_referer = player_url or url
             media_origin = _url_origin(media_referer) or f"{parsed_url.scheme}://{parsed_url.netloc}"
             try:
