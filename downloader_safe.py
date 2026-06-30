@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260630-3670"
+APP_BUILD = "20260630-3680"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -961,7 +961,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "ts2ff6yms.com",
     "vdcdn.top",
 )
-PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com")
+PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top")
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "ijycnd.com",
     "huyall.com",
