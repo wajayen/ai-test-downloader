@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260630-3650"
+APP_BUILD = "20260630-3660"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1645,6 +1645,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "facebook yt-dlp route selected",
     "instagram yt-dlp route selected",
     "youtube yt-dlp route selected",
+    "youtube yt-dlp fallback route selected",
     "youtube cached component reset",
     "youtube multipart component download started",
     "youtube yt-dlp output accepted",
@@ -1744,6 +1745,10 @@ NATIVE_HLS_PREFERRED_HOSTS = frozenset((
 GIMY_RESOLVED_URL_CACHE_TTL_SECONDS = 180
 
 RE_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+RE_JABLE_M3U8_1 = re.compile(r'(https?:[\\/]+[^\s"\'\\]+\.m3u8[^\s"\'\\]*)')
+RE_JABLE_M3U8_2 = re.compile(r'hlsUrl\s*=\s*["\']([^"\']+\.m3u8.*?)["\']')
+RE_JABLE_M3U8_3 = re.compile(r'["\'](https?[^"\']+\.m3u8[^"\']*)["\']')
+RE_JABLE_TITLE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 state_lock = threading.RLock()
 log_file_lock = threading.RLock()
 parallel_hls_thread_local = threading.local()
@@ -2788,10 +2793,14 @@ def _find_megacmd_get_command():
 
 
 def _dedupe_download_urls(candidates, primary_url=None):
+    if not candidates:
+        return []
     primary_normalized = _normalize_download_url(primary_url) if primary_url else ""
     deduped = []
     seen = set()
-    for candidate in candidates or []:
+    for candidate in candidates:
+        if not candidate:
+            continue
         normalized = _normalize_download_url(candidate)
         if not normalized or normalized == primary_normalized or normalized in seen:
             continue
@@ -6162,7 +6171,13 @@ def _looks_like_manifest_url(url):
     if _is_getav_index_playlist_url(normalized):
         return True
     lower = normalized.lower()
-    return ".m3u8" in lower or ".mpd" in lower or ("upload18.org" in lower and "/play/token_hash" in lower)
+    return (
+        ".m3u8" in lower
+        or ".mpd" in lower
+        or "master.php" in lower
+        or "hls.php" in lower
+        or ("upload18.org" in lower and "/play/token_hash" in lower)
+    )
 
 
 def _resolve_forced_m3u8_site(normalized_url, task):
@@ -8677,14 +8692,7 @@ def _video_search_jav_source_reliability_score(result):
 
 
 def _video_search_jav_seed_fallback_urls(query_text):
-    jav_code = _normalize_jav_code_for_compare(query_text)
-    if not jav_code:
-        return []
-    slug = jav_code.lower().replace("_", "-")
-    return [
-        f"https://missav.com/{slug}-chinese-subtitle",
-        f"https://missav.com/{slug}",
-    ]
+    return []
 
 
 def _video_search_popularity_score(result):
@@ -9621,7 +9629,6 @@ def _build_youtube_ytdlp_route_options(parsed_url):
         "format_sort_force": True,
         "merge_output_format": "mkv",
         "extractor_args": {"youtube": {"player_client": ["ios", "web_creator", "web", "android"]}},
-        "js_runtimes": {"node": {}, "quickjs": {}, "deno": {}},
         "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
         **_build_ytdlp_route_profile("youtube"),
     }
@@ -17186,17 +17193,38 @@ class DownloadManagerApp:
             try:
                 with ytdl_init_lock:
                     import yt_dlp
-                    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "nocheckcertificate": True}) as ydl:
-                        video_info = ydl.extract_info(source_url, download=False)
-                        all_formats = video_info.get("formats") or []
-                        max_available_height = 0
-                        for fmt in all_formats:
-                            if fmt.get("vcodec") != "none":
-                                fmt_height = int(fmt.get("height") or 0)
-                                if fmt_height > max_available_height:
-                                    max_available_height = fmt_height
-                        if max_available_height > 0 and height >= max_available_height:
-                            return False
+                    cookie_sources = _preferred_browser_cookie_sources()
+                    attempt_sources = [None]
+                    for source in cookie_sources or []:
+                        if source not in attempt_sources:
+                            attempt_sources.append(source)
+                    max_available_height = 0
+                    success = False
+                    for source in attempt_sources:
+                        ydl_opts = {
+                            "quiet": True,
+                            "no_warnings": True,
+                            "skip_download": True,
+                            "nocheckcertificate": True,
+                            "extractor_args": {"youtube": {"player_client": ["ios", "web_creator", "web", "android"]}},
+                        }
+                        if source:
+                            ydl_opts["cookiesfrombrowser"] = source
+                        try:
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                video_info = ydl.extract_info(source_url, download=False)
+                                all_formats = video_info.get("formats") or []
+                                for fmt in all_formats:
+                                    if fmt.get("vcodec") != "none":
+                                        fmt_height = int(fmt.get("height") or 0)
+                                        if fmt_height > max_available_height:
+                                            max_available_height = fmt_height
+                                success = True
+                                break
+                        except Exception:
+                            continue
+                    if success and max_available_height > 0 and height >= max_available_height:
+                        return False
             except Exception:
                 pass
             return True
@@ -21280,6 +21308,7 @@ class DownloadManagerApp:
             resume_bytes = 0
         switched_to_multipart = False
         multipart_part_count = 0
+        multipart_resume_part_bytes = 0
         multipart_host_marker = ""
         multipart_remaining_size = 0
         multipart_source_active_downloads = 0
@@ -22149,6 +22178,10 @@ class DownloadManagerApp:
                 final_page_url = str(getattr(resp, "url", page_url) or page_url)
                 player_match = re.search(r'id=["\']player-wrapper["\'][^>]*', page_text, re.IGNORECASE | re.DOTALL)
                 player_html = player_match.group(0) if player_match else ""
+                if not player_html:
+                    # Fallback to any tag containing data-ts-id
+                    tag_match = re.search(r'<[^>]*\bdata-ts-id=["\'][^"\']+(?:[^>]*>)?', page_text, re.IGNORECASE)
+                    player_html = tag_match.group(0) if tag_match else ""
                 video_id_match = re.search(r'\bdata-ts-id=["\']([^"\']+)', player_html, re.IGNORECASE)
                 data_live_match = re.search(r'\bdata-ts-live=["\']([^"\']+)', player_html, re.IGNORECASE | re.DOTALL)
                 data_ep_match = re.search(r'\bdata-ts-ep=["\']([^"\']+)', player_html, re.IGNORECASE)
@@ -22221,7 +22254,31 @@ class DownloadManagerApp:
                 if session is not None:
                     self._close_network_session(session)
         if last_exc is not None:
+            try:
+                with ytdl_init_lock:
+                    import yt_dlp
+                    ydl_opts = {
+                        "quiet": True,
+                        "no_warnings": True,
+                        "skip_download": True,
+                        "nocheckcertificate": True,
+                    }
+                    cookie_sources = _preferred_browser_cookie_sources()
+                    for src in cookie_sources or []:
+                        ydl_opts["cookiesfrombrowser"] = src
+                        break
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(page_url, download=False)
+                        if info:
+                            formats = info.get("formats") or []
+                            urls = [f.get("url") for f in formats if f.get("url")]
+                            title = info.get("title") or fallback_name
+                            if urls:
+                                return title, urls, page_url
+            except Exception:
+                pass
             raise last_exc
+        return fallback_name, [], ""
         return fallback_name, [], ""
 
     def _select_avjoy_media_candidate(self, candidates, failed_urls=None):
@@ -22378,9 +22435,36 @@ class DownloadManagerApp:
                     default_route=manifest_default_route,
                 )
 
-        if _looks_like_manifest_url(media_url):
-            _handoff_manifest(media_url, fallbacks)
-            return
+        # 對所有串流候選網址進行排序與去重，確保 media_url 和 fallbacks 一致
+        all_candidates = _order_site_hls_candidates(media_url, fallbacks, source_site=site)
+        if all_candidates:
+            media_url = all_candidates[0]
+            fallbacks = [c for c in all_candidates[1:] if c != media_url]
+
+        last_handoff_error = None
+        while _looks_like_manifest_url(media_url):
+            try:
+                _handoff_manifest(media_url, fallbacks)
+                return
+            except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException, ParallelHlsRetryLaterException, ParallelHlsUnsupportedSegmentContentException):
+                raise
+            except Exception as h_exc:
+                last_handoff_error = h_exc
+                if not fallbacks or not self._is_retryable_media_download_error(h_exc):
+                    raise h_exc
+                write_error_log(
+                    "manifest handoff failed; trying next fallback",
+                    h_exc,
+                    item_id=item_id,
+                    source_site=site,
+                    url=media_url,
+                    next_url=fallbacks[0],
+                )
+                media_url = fallbacks[0]
+                fallbacks = [c for c in fallbacks[1:] if c != media_url]
+        if last_handoff_error:
+            raise last_handoff_error
+
         task = self._ensure_task_can_continue(item_id)
         self._set_task_parse_ui(item_id, key="eta_found_media", fallback=self._ui_text("eta_found_media", "已取得媒體網址，準備下載"))
         if persist_direct_output and not (is_mp3 and allow_audio_extract):
@@ -23990,6 +24074,7 @@ class DownloadManagerApp:
             "hohoj",
             "ikanbot",
             "jable",
+            "javdock",
             "missav",
             "njav",
             "njavtv",
@@ -25301,7 +25386,7 @@ class DownloadManagerApp:
                 raise DownloadSourceUnavailableException("BestJavPorn HLS source contains placeholder or preview-length segments")
             candidate_urls = valid_candidate_urls
             url = candidate_urls[0]
-        if source_site in ("gimy", "missav", "movieffm", "xiaoyakankan", "nnyy") and candidate_urls:
+        if source_site in ("gimy", "missav", "movieffm", "xiaoyakankan", "nnyy", "javdock") and candidate_urls:
             selected_manifest_url = candidate_urls[0]
             if _normalize_download_url(selected_manifest_url) != _normalize_download_url(url):
                 remaining_manifest_urls = [
@@ -30595,13 +30680,15 @@ class DownloadManagerApp:
             self._set_task_parse_ui(item_id, key="eta_site_jable", fallback="正在解析 Jable...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=15)
-            m = re.search(r'(https://[^\s"\'\\]+\.m3u8[^\s"\'\\]*)', resp.text)
+            m = RE_JABLE_M3U8_1.search(resp.text)
             if not m:
-                m = re.search(r'hlsUrl\s*=\s*["\']([^"\']+\.m3u8.*?)["\']', resp.text)
+                m = RE_JABLE_M3U8_2.search(resp.text)
+            if not m:
+                m = RE_JABLE_M3U8_3.search(resp.text.replace(r'\/', '/'))
             if not m:
                 raise Exception("Failed to locate hlsUrl on the Jable page")
-            url = html.unescape(m.group(1)).strip()
-            title_m = re.search(r"<title>(.*?)</title>", resp.text, re.IGNORECASE | re.DOTALL)
+            url = html.unescape(m.group(1)).strip().replace(r'\/', '/')
+            title_m = RE_JABLE_TITLE.search(resp.text)
             clean_title = short_name
             if title_m:
                 raw_title = html.unescape(title_m.group(1)).strip()
