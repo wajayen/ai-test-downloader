@@ -959,6 +959,7 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "huabf.com",
     "streamhls.click",
     "ts2ff6yms.com",
+    "vdcdn.top",
 )
 PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com")
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
@@ -10682,6 +10683,7 @@ class DownloadManagerApp:
         self.root.rowconfigure(2, weight=1)
         self.tasks = {}
         self._m3u8_total_bytes_cache = {}
+        self._javdock_cookies_cache = {}
         self._last_reported_domain_limit = None
         self._resume_artifact_locks = {}
         self._resume_artifact_locks_guard = threading.Lock()
@@ -22246,6 +22248,10 @@ class DownloadManagerApp:
                 candidates = _dedupe_download_urls(expanded_candidates)
                 title = _clean_javdock_title(_extract_html_title(page_text, fallback_name), final_page_url, fallback_name)
                 if candidates:
+                    cookies_dict = session.cookies.get_dict()
+                    if cookies_dict:
+                        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies_dict.items())
+                        self._javdock_cookies_cache[page_url] = cookie_str
                     return title, candidates, final_player_url
                 raise Exception("JavDock media URL missing")
             except Exception as exc:
@@ -23089,12 +23095,13 @@ class DownloadManagerApp:
             segment_host = urllib.parse.urlsplit(segment_url).netloc.lower()
             probe_headers = dict(request_headers)
             segment_has_key = bool((segment.get("key") or {}).get("uri"))
-            if not segment_has_key:
+            is_javdock = "video.javdock.com" in probe_headers.get("Referer", "")
+            if not segment_has_key and not is_javdock:
                 probe_headers.setdefault("Range", "bytes=0-511")
             try:
                 with urllib.request.urlopen(urllib.request.Request(segment_url, headers=probe_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
                     content_type = str(resp.headers.get("Content-Type") or "").lower()
-                    data = resp.read() if segment_has_key else resp.read(512)
+                    data = resp.read() if (segment_has_key or is_javdock) else resp.read(512)
             except Exception:
                 if not prefer_curl:
                     continue
@@ -23105,7 +23112,7 @@ class DownloadManagerApp:
                         prefer_curl=True,
                         stop_event=stop_event,
                     )
-                    if not segment_has_key:
+                    if not segment_has_key and not is_javdock:
                         data = bytes(data or b"")[:512]
                 except Exception:
                     continue
@@ -23155,11 +23162,13 @@ class DownloadManagerApp:
             return False
         request_headers = dict(headers or {})
         request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
-        request_headers.setdefault("Range", "bytes=0-511")
+        is_javdock = "video.javdock.com" in request_headers.get("Referer", "")
+        if not is_javdock:
+            request_headers.setdefault("Range", "bytes=0-511")
         try:
             with urllib.request.urlopen(urllib.request.Request(segment_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
                 content_type = str(resp.headers.get("Content-Type") or "").lower()
-                data = resp.read(512)
+                data = resp.read() if is_javdock else resp.read(512)
         except Exception:
             return False
         return self._is_unsupported_parallel_hls_segment_payload(data, content_type)
@@ -25205,6 +25214,11 @@ class DownloadManagerApp:
             _task_field_value(task, "source_page", ""),
             _task_field_value(task, "resolved_url", ""),
         )
+        if source_site == "javdock":
+            if not referer or "video.javdock.com" not in referer:
+                referer = "https://video.javdock.com/"
+            if not origin or "video.javdock.com" not in origin:
+                origin = "https://video.javdock.com"
         probe_task = self._parallel_hls_probe_task(task, source_site)
         active_reason = "parallel_hls" if (not is_mp3 and self._should_try_parallel_hls_segments(url, probe_task)) else "ffmpeg_hls"
         task = self._ensure_task_active_transfer_state(item_id, task, reason=active_reason)
@@ -25276,7 +25290,7 @@ class DownloadManagerApp:
             if any(
                 token in _normalize_download_url(candidate).lower()
                 for token in (".m3u8", ".mpd", ".mp4", ".mkv", ".webm", ".mp3", ".m4a")
-            )
+            ) or _looks_like_manifest_url(candidate)
         ]
         stored_page_refresh_candidates = _dedupe_download_urls(_task_field_value(task, "page_refresh_candidates", []))
         page_refresh_candidates = (
@@ -25322,6 +25336,12 @@ class DownloadManagerApp:
             ]
         if source_site == "njav" or "upload18.org" in _normalize_download_url(url).lower():
             manifest_headers = _make_njav_hls_http_headers(referer=referer, origin=origin)
+        elif source_site == "javdock":
+            manifest_headers = _make_hls_http_headers(referer=referer, origin=origin)
+            source_page = _task_field_value(task, "source_page", "") or url
+            cookie_val = self._javdock_cookies_cache.get(source_page)
+            if cookie_val:
+                manifest_headers["Cookie"] = cookie_val
         else:
             manifest_headers = _make_hls_http_headers(referer=referer, origin=origin)
         candidate_urls = _order_site_hls_candidates(url, direct_fallback_urls, source_site=source_site)
@@ -26948,6 +26968,18 @@ class DownloadManagerApp:
                     _native_fallback_done=_native_fallback_done,
                     _audio_transcode_retry=True,
                 )
+            
+            # 如果還有其他候選網址，且當前遭遇非終斷的下載失敗（如 5xx 等），我們繼續嘗試下一個候選網址
+            if candidate_url != ffmpeg_candidate_urls[-1]:
+                write_error_log(
+                    "ffmpeg candidate failed; trying next fallback",
+                    last_error,
+                    item_id=item_id,
+                    url=candidate_url,
+                    source_site=source_site,
+                )
+                continue
+
         if last_error and source_site == "gimy":
             refreshed = _gimy_refresh_after_stream_failure(last_error)
             if refreshed is not None:
@@ -29330,7 +29362,7 @@ class DownloadManagerApp:
                     refresh_key = f"{normalized_source_page}|{normalized_target_url}"
                     if source_page_is_refreshable and refresh_key not in refresh_history:
                         refresh_history.append(refresh_key)
-                        self._set_task_aux_fields(task, _manifest_source_refresh_history=refresh_history[-8:])
+                        _set_task_aux_fields(task, _manifest_source_refresh_history=refresh_history[-8:])
                         write_error_log(
                             "manifest source page refresh",
                             ffmpeg_exc,
