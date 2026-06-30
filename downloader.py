@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260610-3630"
+APP_BUILD = "20260630-3640"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1166,7 +1166,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 6
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST = {
-    "worldstatic.com": 4,
+    "worldstatic.com": 2,
     "qqqrst.com": 12,
     "qwe132456.cc": 12,
     "ppqrrs.com": 12,
@@ -1176,7 +1176,7 @@ PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST = {
 PARALLEL_HLS_SHUTDOWN_SEGMENT_TIMEOUT_SECONDS = 1.5
 PARALLEL_HLS_SEGMENT_RETRIES = 10
 PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST = {
-    "worldstatic.com": 4,
+    "worldstatic.com": 1,
     "qqqrst.com": 16,
     "qwe132456.cc": 16,
     "ppqrrs.com": 16,
@@ -1184,6 +1184,7 @@ PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST = {
     "phimgood.com": 16,
 }
 PARALLEL_HLS_RESUME_VALIDATION_VERSION = 2
+PARALLEL_HLS_FAST_TRANSPORT_REMUX_MIN_SEGMENTS = 256
 PARALLEL_HLS_SLOW_CANDIDATE_RETRY_THRESHOLD_BPS_BY_SITE = {
     "getav": 6 * 1024 * 1024,
 }
@@ -1312,7 +1313,7 @@ HTTP_MULTIPART_MEDIUM_FILE_MAX_PARTS = 16
 HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "18jav": 20,
     "anime1": 10,
-    "avjoy": 12,
+    "avjoy": 16,
     "gimy": 48,
     "goodav17": 48,
     "hohoj": 20,
@@ -1326,7 +1327,7 @@ HTTP_MULTIPART_PART_COUNT_BY_SITE = {
     "youtube": 20,
 }
 HTTP_MULTIPART_PART_COUNT_BY_HOST_MARKER = {
-    "media-cdn": 12,
+    "media-cdn": 16,
     "mxcontent.net": 16,
 }
 HTTP_MULTIPART_SOURCE_WORKER_BUDGET_DEFAULT = 36
@@ -1513,6 +1514,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "shutdown wait active downloads timeout",
     "single instance lock denied",
     "single instance lock file denied",
+    "single instance peer denied",
     "single instance lock recovered after retry",
     "m3u8 route selected",
     "preferred native hls route selected",
@@ -1525,7 +1527,9 @@ TRACE_LOG_CONTEXTS = frozenset((
     "parallel hls download finished",
     "parallel hls download interrupted",
     "parallel hls output already finalized",
+    "parallel hls candidate failed retry next",
     "parallel hls concat remux fallback to transport",
+    "parallel hls transport remux fallback to concat",
     "parallel hls resume complete before download",
     "parallel hls remux deferred during shutdown",
     "parallel hls completed remux finalizing during shutdown",
@@ -1546,6 +1550,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "ggjav ffmpeg skipped failed hls candidates",
     "ffmpeg direct media handoff",
     "ggjav hls exhausted page fallback",
+    "getav hls exhausted source refresh",
     "parallel hls skipped fmp4 playlist",
     "parallel hls skipped huge playlist",
     "parallel hls skipped unsupported edge segments",
@@ -1583,6 +1588,7 @@ TRACE_LOG_CONTEXTS = frozenset((
     "http multipart download started",
     "http multipart fallback to single stream",
     "http multipart parts preserved for resume",
+    "http media resume state preserved",
     "http range part retry",
     "http media output incomplete",
     "state save skipped disk full",
@@ -1678,8 +1684,8 @@ FORCED_M3U8_SITE_RULES = {
     },
     "missav": {
         "hosts": (),
-        "origin": "https://missav.ws",
-        "referer": "https://missav.ws/",
+        "origin": "https://missav.com",
+        "referer": "https://missav.com/",
     },
     "njav": {
         "hosts": ("upload18.org", "321watch.workers.dev"),
@@ -2832,7 +2838,7 @@ def _infer_source_site_from_task_urls(*urls):
             return "javninja"
         if "getav.net" in host or "worldstatic.com" in host:
             return "getav"
-        chat_platform_site = _chat_platform_file_site_from_url(candidate)
+        chat_platform_site = _chat_platform_file_site_from_url(raw_url)
         if chat_platform_site:
             return chat_platform_site
         if "javdock.com" in host or "video1.javdock.com" in host:
@@ -7991,7 +7997,7 @@ def _known_video_search_seed_results(query_text):
                     "quality": 720,
                 },
                 {
-                    "url": f"https://missav.ws/{code_slug}",
+                    "url": f"https://missav.com/{code_slug}",
                     "title": f"{jav_code} MissAV",
                     "snippet": "missav jav code pattern seed",
                     "quality": 720,
@@ -8009,7 +8015,7 @@ def _known_video_search_seed_results(query_text):
                     "quality": 720,
                 },
                 {
-                    "url": f"https://missav.ws/{code_slug}-chinese-subtitle",
+                    "url": f"https://missav.com/{code_slug}-chinese-subtitle",
                     "title": f"{jav_code} MissAV 中文字幕",
                     "snippet": "missav jav code pattern seed",
                     "quality": 720,
@@ -8676,8 +8682,8 @@ def _video_search_jav_seed_fallback_urls(query_text):
         return []
     slug = jav_code.lower().replace("_", "-")
     return [
-        f"https://missav.ws/{slug}-chinese-subtitle",
-        f"https://missav.ws/{slug}",
+        f"https://missav.com/{slug}-chinese-subtitle",
+        f"https://missav.com/{slug}",
     ]
 
 
@@ -9181,7 +9187,7 @@ def _extract_generic_site_search_results(page_text, base_url, path_markers=(), s
     return results
 
 
-def _extract_missav_search_results(page_text, base_url="https://missav.ws/"):
+def _extract_missav_search_results(page_text, base_url="https://missav.com/"):
     return _extract_generic_site_search_results(
         page_text,
         base_url,
@@ -13418,10 +13424,11 @@ class DownloadManagerApp:
             return
         if state == "PAUSE_REQUESTED":
             self._set_task_status_mode_ui(item_id, self._paused_status_text())
-            _set_task_aux_fields(task, state="PAUSED", _stop_reason=None, _last_error_status="", _last_error_message="", _last_speed_bps=0.0, _last_speed_updated_at=0.0)
+            _set_task_aux_fields(task, state="PAUSED", resume_requested=True, _stop_reason=None, _last_error_status="", _last_error_message="", _last_speed_bps=0.0, _last_speed_updated_at=0.0)
             self._update_task_state_entry(
                 task,
                 state="PAUSED",
+                resume_requested=True,
                 _last_error_status="",
                 _last_error_message="",
             )
@@ -13994,7 +14001,13 @@ class DownloadManagerApp:
                     source_page=self._get_task_source_page(released_task, fallback_url="") if released_task else "",
                     source_site=_task_source_site_name(released_task) or None,
                     state=str(_task_field_value(released_task, "state", "") or ""),
+                    display_name=str(_task_field_value(released_task, "short_name") or _task_field_value(released_task, "name") or ""),
                     filename=str(_task_field_value(released_task, "filename", "") or ""),
+                    temp_filename=str(_task_field_value(released_task, "temp_filename", "") or ""),
+                    resume_requested=bool(_task_field_value(released_task, "resume_requested", False)),
+                    manual_pause_requested=bool(_task_field_value(released_task, "_manual_pause_requested", False)),
+                    downloaded_bytes=(_task_field_value(released_task, "downloaded_bytes", 0) or None),
+                    total_bytes=(_task_field_value(released_task, "total_bytes", 0) or None),
                 )
             except Exception:
                 pass
@@ -15244,12 +15257,12 @@ class DownloadManagerApp:
             collected = []
             for variant in search_variants:
                 try:
-                    search_url = "https://missav.ws/search/" + urllib.parse.quote(variant.strip("/"))
+                    search_url = "https://missav.com/search/" + urllib.parse.quote(variant.strip("/"))
                     resp = c_req.get(
                         search_url,
                         impersonate="chrome120",
                         timeout=VIDEO_SEARCH_SITE_TIMEOUT_SECONDS,
-                        headers=_make_ytdlp_http_headers(referer="https://missav.ws/"),
+                        headers=_make_ytdlp_http_headers(referer="https://missav.com/"),
                     )
                     append_unique_results(collected, _extract_missav_search_results(_response_text_utf8(resp), str(getattr(resp, "url", search_url))))
                 except Exception:
@@ -15258,8 +15271,8 @@ class DownloadManagerApp:
                 slug = jav_code.lower()
                 collected.extend(
                     [
-                        {"url": f"https://missav.ws/{slug}", "title": f"{jav_code} MissAV", "snippet": "missav jav code pattern", "quality": 720},
-                        {"url": f"https://missav.ws/{slug}-chinese-subtitle", "title": f"{jav_code} MissAV 中文字幕", "snippet": "missav jav code pattern", "quality": 720},
+                        {"url": f"https://missav.com/{slug}", "title": f"{jav_code} MissAV", "snippet": "missav jav code pattern", "quality": 720},
+                        {"url": f"https://missav.com/{slug}-chinese-subtitle", "title": f"{jav_code} MissAV 中文字幕", "snippet": "missav jav code pattern", "quality": 720},
                     ]
                 )
             return collected
@@ -17343,6 +17356,66 @@ class DownloadManagerApp:
             self.persist_unfinished_state(force=True)
         except Exception:
             pass
+
+    def _preserve_http_media_resume_state(self, task, item_id, out_path, downloaded=0, total_size=0, reason="pause requested"):
+        clean_out_path = str(out_path or "").strip()
+        if not clean_out_path:
+            return
+        try:
+            downloaded_bytes = max(int(downloaded or 0), self._get_existing_file_size(clean_out_path))
+        except Exception:
+            downloaded_bytes = max(int(downloaded or 0), 0)
+        try:
+            total_bytes = max(int(total_size or 0), 0)
+        except Exception:
+            total_bytes = 0
+        filename_value = str(_task_field_value(task, "filename", "") or "").strip() or clean_out_path
+        reason_text = str(reason or "").strip().lower()
+        is_manual_pause = (
+            bool(_task_field_value(task, "_manual_pause_requested", False))
+            and "shutdown" not in reason_text
+            and "disk" not in reason_text
+        )
+        _set_task_aux_fields(
+            task,
+            state="PAUSED",
+            filename=filename_value,
+            temp_filename=clean_out_path,
+            resume_requested=True,
+            downloaded_bytes=downloaded_bytes,
+            total_bytes=(total_bytes if total_bytes > 0 else None),
+            _stop_reason=None,
+            _manual_pause_requested=bool(is_manual_pause),
+        )
+        self._update_task_state_entry(
+            task,
+            state="PAUSED",
+            filename=filename_value,
+            temp_filename=clean_out_path,
+            resume_requested=True,
+            downloaded_bytes=downloaded_bytes,
+            total_bytes=(total_bytes if total_bytes > 0 else None),
+            _stop_reason=None,
+            _manual_pause_requested=bool(is_manual_pause),
+        )
+        self._set_task_named_column_text(item_id, "name", os.path.basename(filename_value) or os.path.basename(clean_out_path))
+        self._set_task_status_mode_ui(item_id, self._paused_status_text())
+        try:
+            self.persist_unfinished_state(force=True)
+        except Exception:
+            pass
+        write_error_log(
+            "http media resume state preserved",
+            Exception("HTTP media resume state preserved"),
+            item_id=item_id,
+            source_site=_task_source_site_name(task) or None,
+            output=clean_out_path,
+            filename=filename_value,
+            downloaded_bytes=downloaded_bytes,
+            total_bytes=(total_bytes or None),
+            reason=reason,
+            manual_pause_requested=bool(is_manual_pause),
+        )
 
     def _task_output_path_or_default(self, task, default_path=""):
         primary_value = str(_task_field_value(task, "filename") or "").strip()
@@ -21178,8 +21251,14 @@ class DownloadManagerApp:
                 while True:
                     state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                     if state == "PAUSE_REQUESTED":
-                        _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                        self._set_task_status_mode_ui(item_id, self._paused_status_text())
+                        self._preserve_http_media_resume_state(
+                            self.tasks[item_id],
+                            item_id,
+                            out_path,
+                            downloaded=downloaded,
+                            total_size=total_size,
+                            reason="single stream pause requested",
+                        )
                         try:
                             if res is not None:
                                 res.close()
@@ -21192,6 +21271,14 @@ class DownloadManagerApp:
                         raise KeyboardInterrupt()
                     required_bytes = max(total_size - downloaded, 0) if total_size > 0 else None
                     if self._maybe_auto_pause_for_disk_space(item_id, out_path, required_bytes=required_bytes, note=pause_note):
+                        self._preserve_http_media_resume_state(
+                            self.tasks.get(item_id, task),
+                            item_id,
+                            out_path,
+                            downloaded=downloaded,
+                            total_size=total_size,
+                            reason="single stream disk space pause",
+                        )
                         try:
                             if res is not None:
                                 res.close()
@@ -21309,6 +21396,12 @@ class DownloadManagerApp:
                 self._remove_stale_http_multipart_parts(out_path, part_paths)
                 multipart_resume_part_bytes = self._http_multipart_existing_part_bytes_for_specs(part_specs)
                 multipart_session_start_bytes = max(int(resume_bytes or 0) + int(multipart_resume_part_bytes or 0), 0)
+
+                def _multipart_persisted_downloaded_bytes() -> int:
+                    # Preserve only bytes already present on disk; in-flight buffers may be discarded on pause.
+                    part_bytes = self._http_multipart_existing_part_bytes_for_specs(part_specs)
+                    return max(int(downloaded or 0) + int(part_bytes or 0), 0)
+
                 write_error_log(
                     "http multipart download started",
                     Exception("http multipart download started"),
@@ -21345,6 +21438,15 @@ class DownloadManagerApp:
                     last_multipart_update_bytes = max(downloaded + sum(box["bytes"] for box in progress_boxes), multipart_session_start_bytes)
                     while futures:
                         if self._shutdown_started:
+                            current_downloaded = _multipart_persisted_downloaded_bytes()
+                            self._preserve_http_media_resume_state(
+                                self.tasks.get(item_id, task),
+                                item_id,
+                                out_path,
+                                downloaded=current_downloaded,
+                                total_size=total_size,
+                                reason="multipart shutdown pause",
+                            )
                             stop_event.set()
                             for future in futures:
                                 future.cancel()
@@ -21356,8 +21458,14 @@ class DownloadManagerApp:
                             for future in futures:
                                 future.cancel()
                             if current_task_state == "PAUSE_REQUESTED":
-                                _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                                self._set_task_named_column_text(item_id, "status", self._paused_status_text())
+                                self._preserve_http_media_resume_state(
+                                    self.tasks[item_id],
+                                    item_id,
+                                    out_path,
+                                    downloaded=_multipart_persisted_downloaded_bytes(),
+                                    total_size=total_size,
+                                    reason="multipart pause requested",
+                                )
                                 skip_session_close_on_stop = True
                                 raise StopDownloadException("pause requested")
                             skip_session_close_on_stop = True
@@ -21365,6 +21473,14 @@ class DownloadManagerApp:
                         multi_downloaded = downloaded + sum(box["bytes"] for box in progress_boxes)
                         required_bytes = max(total_size - multi_downloaded, 0) if total_size > 0 else None
                         if self._maybe_auto_pause_for_disk_space(item_id, out_path, required_bytes=required_bytes, note=pause_note):
+                            self._preserve_http_media_resume_state(
+                                self.tasks.get(item_id, task),
+                                item_id,
+                                out_path,
+                                downloaded=_multipart_persisted_downloaded_bytes(),
+                                total_size=total_size,
+                                reason="multipart disk space pause",
+                            )
                             stop_event.set()
                             for future in futures:
                                 future.cancel()
@@ -21379,11 +21495,27 @@ class DownloadManagerApp:
                                     future.cancel()
                                 stop_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                                 if self._shutdown_started:
+                                    current_downloaded = _multipart_persisted_downloaded_bytes()
+                                    self._preserve_http_media_resume_state(
+                                        self.tasks.get(item_id, task),
+                                        item_id,
+                                        out_path,
+                                        downloaded=current_downloaded,
+                                        total_size=total_size,
+                                        reason="multipart worker shutdown pause",
+                                    )
                                     skip_session_close_on_stop = True
                                     raise StopDownloadException("application is shutting down")
                                 if stop_state == "PAUSE_REQUESTED":
-                                    _set_task_aux_fields(self.tasks[item_id], state="PAUSED")
-                                    self._set_task_named_column_text(item_id, "status", self._paused_status_text())
+                                    current_downloaded = _multipart_persisted_downloaded_bytes()
+                                    self._preserve_http_media_resume_state(
+                                        self.tasks[item_id],
+                                        item_id,
+                                        out_path,
+                                        downloaded=current_downloaded,
+                                        total_size=total_size,
+                                        reason="multipart worker pause requested",
+                                    )
                                     skip_session_close_on_stop = True
                                     raise StopDownloadException("pause requested")
                                 if stop_state in {"DELETE_REQUESTED", "DELETED"}:
@@ -23909,16 +24041,17 @@ class DownloadManagerApp:
         last_segment_speed_bytes = int(completed_bytes or 0)
         last_progress_activity_at = time.time()
         last_progress_completed_segments = int(completed_segments or 0)
-        worker_plan_segments = pending_segments if pending_segments else segments
+        worker_plan_segments = pending_segments
         worker_plan = self._parallel_hls_worker_plan(
             source_site,
             media_url,
             worker_plan_segments,
             total_segment_count=total_segments,
         )
-        worker_count = min(
-            int(worker_plan.get("workers", 1)),
-            max(pending_segment_count, 1),
+        worker_count = (
+            min(int(worker_plan.get("workers", 1)), pending_segment_count)
+            if pending_segment_count > 0
+            else 0
         )
         hls_host_active_downloads = self._active_hls_downloads_for_host(hls_host)
         hls_host_worker_budget = self._hls_host_worker_budget(hls_host)
@@ -23941,46 +24074,47 @@ class DownloadManagerApp:
             route_selected_at = float(_task_field_value(task, "_m3u8_route_selected_at", 0.0) or 0.0)
         except Exception:
             route_selected_at = 0.0
-        self._log_ffmpeg_event(
-            "parallel hls download started",
-            Exception("parallel hls started"),
-            task,
-            item_id,
-            media_url,
-            segments=total_segments,
-            pending_segments=pending_segment_count,
-            completed_segments_at_start=completed_segments,
-            workers=worker_count,
-            route_start_delay_seconds=self._m3u8_route_start_delay_seconds(task),
-            route_selected_to_parallel_entry_seconds=(round(max(parallel_hls_entered_at - route_selected_at, 0.0), 3) if route_selected_at > 0 else 0.0),
-            parallel_entry_to_download_start_seconds=round(max(parallel_start_logged_at - parallel_hls_entered_at, 0.0), 3),
-            playlist_resolve_seconds=round(max(playlist_resolved_at - parallel_hls_entered_at, 0.0), 3),
-            segment_parse_seconds=round(max(segments_ready_at - playlist_resolved_at, 0.0), 3),
-            resume_scan_seconds=round(max(resume_scan_finished_at - resume_scan_started_at, 0.0), 3),
-            resume_fast_scan_used=bool(resume_fast_scan_used),
-            resume_validation_version=int(stored_hls_resume_validation_version or 0),
-            preflight_seconds=round(max(preflight_finished_at - preflight_started_at, 0.0), 3),
-            requested_workers=int(worker_plan.get("requested_workers", worker_count) or worker_count),
-            site_worker_cap=int(worker_plan.get("site_worker_cap", 0) or 0),
-            host_worker_cap=int(worker_plan.get("host_worker_cap", 0) or 0),
-            host_worker_marker=str(worker_plan.get("host_worker_marker", "") or ""),
-            per_task_worker_budget=int(worker_plan.get("per_task_worker_budget", hls_host_worker_budget) or hls_host_worker_budget),
-            worker_budget_limited=bool(worker_plan.get("budget_limited", False)),
-            single_task_boost_applied=bool(worker_plan.get("boost_applied", False)),
-            boost_segment_count=int(worker_plan.get("boost_segment_count", 0) or 0),
-            boost_worker_cap=int(worker_plan.get("boost_worker_cap", 0) or 0),
-            tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
-            tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
-            resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
-            hls_host=hls_host,
-            manifest_host=urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower(),
-            segment_timeout_seconds=round(float(segment_timeout_seconds or 0.0), 3),
-            segment_retry_count=int(segment_retry_count or 0),
-            hls_host_active_downloads=hls_host_active_downloads,
-            hls_host_worker_budget=hls_host_worker_budget,
-            total_duration=total_duration,
-            **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
-        )
+        if pending_segment_count > 0:
+            self._log_ffmpeg_event(
+                "parallel hls download started",
+                Exception("parallel hls started"),
+                task,
+                item_id,
+                media_url,
+                segments=total_segments,
+                pending_segments=pending_segment_count,
+                completed_segments_at_start=completed_segments,
+                workers=worker_count,
+                route_start_delay_seconds=self._m3u8_route_start_delay_seconds(task),
+                route_selected_to_parallel_entry_seconds=(round(max(parallel_hls_entered_at - route_selected_at, 0.0), 3) if route_selected_at > 0 else 0.0),
+                parallel_entry_to_download_start_seconds=round(max(parallel_start_logged_at - parallel_hls_entered_at, 0.0), 3),
+                playlist_resolve_seconds=round(max(playlist_resolved_at - parallel_hls_entered_at, 0.0), 3),
+                segment_parse_seconds=round(max(segments_ready_at - playlist_resolved_at, 0.0), 3),
+                resume_scan_seconds=round(max(resume_scan_finished_at - resume_scan_started_at, 0.0), 3),
+                resume_fast_scan_used=bool(resume_fast_scan_used),
+                resume_validation_version=int(stored_hls_resume_validation_version or 0),
+                preflight_seconds=round(max(preflight_finished_at - preflight_started_at, 0.0), 3),
+                requested_workers=int(worker_plan.get("requested_workers", worker_count) or worker_count),
+                site_worker_cap=int(worker_plan.get("site_worker_cap", 0) or 0),
+                host_worker_cap=int(worker_plan.get("host_worker_cap", 0) or 0),
+                host_worker_marker=str(worker_plan.get("host_worker_marker", "") or ""),
+                per_task_worker_budget=int(worker_plan.get("per_task_worker_budget", hls_host_worker_budget) or hls_host_worker_budget),
+                worker_budget_limited=bool(worker_plan.get("budget_limited", False)),
+                single_task_boost_applied=bool(worker_plan.get("boost_applied", False)),
+                boost_segment_count=int(worker_plan.get("boost_segment_count", 0) or 0),
+                boost_worker_cap=int(worker_plan.get("boost_worker_cap", 0) or 0),
+                tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
+                tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
+                resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
+                hls_host=hls_host,
+                manifest_host=urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower(),
+                segment_timeout_seconds=round(float(segment_timeout_seconds or 0.0), 3),
+                segment_retry_count=int(segment_retry_count or 0),
+                hls_host_active_downloads=hls_host_active_downloads,
+                hls_host_worker_budget=hls_host_worker_budget,
+                total_duration=total_duration,
+                **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
+            )
 
         def _should_retry_slow_parallel_candidate(speed_bps, session_bytes, session_segments, now):
             source_site = _task_source_site_name(task)
@@ -24290,6 +24424,11 @@ class DownloadManagerApp:
                     part_dir=part_dir,
                     **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
                 )
+            self.update_tree_many(item_id, {
+                "progress": "99.9%",
+                "size": f"{completed_segments}/{total_segments}",
+                "speed_eta": "合併影片中...",
+            }, force=True)
             current_task_state_before_remux = str(_task_field_value(self.tasks.get(item_id, task), "state", "") or "")
             if (
                 _all_segments_ready_for_finalization()
@@ -24339,23 +24478,45 @@ class DownloadManagerApp:
                 if int(segment["index"]) not in completed_segment_indexes or not self._has_nonempty_file(part_path):
                     raise Exception("parallel HLS segment missing after download")
                 ordered_part_paths.append(part_path)
-            try:
-                self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
-            except Exception as concat_exc:
-                write_error_log(
-                    "parallel hls concat remux fallback to transport",
-                    concat_exc,
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    segments=total_segments,
-                )
+            prefer_transport_remux = int(total_segments or 0) >= int(PARALLEL_HLS_FAST_TRANSPORT_REMUX_MIN_SEGMENTS)
+
+            def _build_transport_stream_for_remux():
                 with open(transport_path, "wb") as merged_f:
                     for part_path in ordered_part_paths:
                         with open(part_path, "rb") as part_f:
                             shutil.copyfileobj(part_f, merged_f, length=HTTP_FILE_COPY_CHUNK_SIZE)
-                self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
-                remux_strategy = "transport"
+
+            if prefer_transport_remux:
+                try:
+                    _build_transport_stream_for_remux()
+                    self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
+                    remux_strategy = "transport-fast"
+                except Exception as transport_exc:
+                    write_error_log(
+                        "parallel hls transport remux fallback to concat",
+                        transport_exc,
+                        url=media_url,
+                        item_id=item_id,
+                        source_site=_task_source_site_name(task) or None,
+                        segments=total_segments,
+                    )
+                    self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
+                    remux_strategy = "concat-after-transport-fallback"
+            else:
+                try:
+                    self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
+                except Exception as concat_exc:
+                    write_error_log(
+                        "parallel hls concat remux fallback to transport",
+                        concat_exc,
+                        url=media_url,
+                        item_id=item_id,
+                        source_site=_task_source_site_name(task) or None,
+                        segments=total_segments,
+                    )
+                    _build_transport_stream_for_remux()
+                    self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
+                    remux_strategy = "transport"
             final_info = self._probe_media_info(merged_path)
             final_duration = float(final_info.get("duration", 0.0) or 0.0)
             if not final_info.get("valid") or int(final_info.get("size", 0) or 0) <= 0:
@@ -24567,6 +24728,22 @@ class DownloadManagerApp:
                     hls_host=hls_host,
                     fallback_count=len(_task_field_value(task, "fallback_urls", []) or []),
                     page_refresh_candidate_count=len(_task_field_value(task, "page_refresh_candidates", []) or []),
+                )
+                return False
+            fallback_count = len(_task_field_value(task, "fallback_urls", []) or [])
+            page_refresh_candidate_count = len(_task_field_value(task, "page_refresh_candidates", []) or [])
+            if not has_google_segments and (fallback_count > 0 or page_refresh_candidate_count > 0):
+                write_error_log(
+                    "parallel hls candidate failed retry next",
+                    exc,
+                    url=media_url,
+                    item_id=item_id,
+                    source_site=_task_source_site_name(task) or None,
+                    segments=total_segments,
+                    workers=worker_count,
+                    hls_host=hls_host,
+                    fallback_count=fallback_count,
+                    page_refresh_candidate_count=page_refresh_candidate_count,
                 )
                 return False
             log_title = "parallel hls google retry later" if has_google_segments else "parallel hls fallback to ffmpeg"
@@ -25462,6 +25639,30 @@ class DownloadManagerApp:
                     if self._should_try_parallel_hls_segments(candidate, probe_task)
                 }
             )
+            if source_site == "getav" and parallel_candidate_urls:
+                source_page_url = self._get_task_source_page(task, fallback_url=url)
+                source_page_url = _normalize_download_url(source_page_url) or source_page_url
+                if source_page_url and not bool(_task_field_value(task, "_getav_hls_exhausted_source_refresh_attempted", False)):
+                    _set_task_aux_fields(task, _getav_hls_exhausted_source_refresh_attempted=True)
+                    self._set_cached_resolved_link_state(
+                        task,
+                        resolved_url="",
+                        resolved_url_saved_at=0.0,
+                        fallback_urls=[],
+                        page_refresh_candidates=[],
+                        clear_source_refresh_history=True,
+                    )
+                    write_error_log(
+                        "getav hls exhausted source refresh",
+                        DownloadSourceUnavailableException("GetAV HLS candidates exhausted; refreshing source page"),
+                        url=url,
+                        item_id=item_id,
+                        source_page=source_page_url,
+                        attempted_parallel_candidates=len(parallel_candidate_urls),
+                    )
+                    self._set_task_parse_ui(item_id, message="GetAV HLS 候選失效，重新解析來源頁...")
+                    return self._download_task_internal(source_page_url, item_id, save_dir, use_impersonate, is_mp3)
+                raise DownloadSourceUnavailableException("GetAV HLS candidates exhausted after source refresh")
             if source_site in ggjav_hls_source_sites and parallel_setup_errors:
                 error_summary = "; ".join(
                     f"{urllib.parse.urlsplit(url).netloc or url}: {message}"
@@ -27660,6 +27861,13 @@ class DownloadManagerApp:
                 return True, None
             segment_headers = self._cached_resolved_link_probe_headers(task, first_segment_url, source_url)
             data, content_type = self._read_probe_url_start_bytes(first_segment_url, _make_range_http_headers(segment_headers, "bytes=0-511"), _remaining_timeout(), use_browser_probe=prefer_browser_probe, browser_probe_session=browser_probe_session)
+            segment_host = urllib.parse.urlsplit(_normalize_download_url(first_segment_url) or "").netloc.lower()
+            allow_mislabelled_media = (
+                self._parallel_hls_allows_mislabelled_media(segment_host)
+                and self._is_valid_parallel_hls_segment_media_bytes(data)
+            )
+            if allow_mislabelled_media:
+                return True, None
             if _task_source_site_name(task) == "bestjavporn" and self._unwrap_png_wrapped_ts_segment_bytes(data):
                 return True, None
             if _is_non_video_probe_payload(data, content_type):
@@ -34302,6 +34510,40 @@ def main():
                 )
             except Exception:
                 pass
+
+        try:
+            peer_processes = _iter_downloader_peer_processes()
+            independent_peers = [
+                peer for peer in peer_processes
+                if str(peer.get("role") or "") == "independent"
+            ]
+        except Exception:
+            peer_processes = []
+            independent_peers = []
+        if independent_peers:
+            try:
+                write_error_log(
+                    "single instance peer denied",
+                    Exception("single instance peer denied"),
+                    current_pid=os.getpid(),
+                    peer_count=len(peer_processes),
+                    independent_peer_count=len(independent_peers),
+                    peer_processes=json.dumps(independent_peers[:4], ensure_ascii=False, default=str),
+                )
+            except Exception:
+                pass
+            try:
+                release_single_instance_lock()
+            except Exception:
+                pass
+            warning_root = tk.Tk()
+            warning_root.withdraw()
+            warning_root.attributes("-topmost", True)
+            try:
+                messagebox.showwarning(t("msg_warning") if t("msg_warning") != "msg_warning" else "警告", t("msg_already_running"), parent=warning_root)
+            finally:
+                warning_root.destroy()
+            return
 
         try:
             write_error_log(
