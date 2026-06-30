@@ -12,6 +12,10 @@ if ($null -ne (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Error
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
+if ($env:GITHUB_TOKEN -eq "github_pat_antigravitydummytoken" -or $env:GITHUB_TOKEN -eq "") {
+    $env:GITHUB_TOKEN = $null
+}
+
 $gh = "C:\Program Files\GitHub CLI\gh.exe"
 if (!(Test-Path -LiteralPath $gh)) {
     throw "GitHub CLI not found: $gh"
