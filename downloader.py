@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260630-3640"
+APP_BUILD = "20260630-3650"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -9442,6 +9442,22 @@ def get_curl_cffi_requests():
 
 def get_yt_dlp_module():
     global yt_dlp
+    try:
+        import os
+        paths = os.environ.get("PATH", "").split(os.pathsep)
+        common_paths = [
+            r"C:\Program Files\nodejs",
+            r"C:\Program Files (x86)\nodejs",
+            os.path.expandvars(r"%APPDATA%\npm"),
+            os.path.expandvars(r"%USERPROFILE%\AppData\Local\nvs"),
+            os.path.expandvars(r"%USERPROFILE%\.nvm"),
+        ]
+        for cp in common_paths:
+            if os.path.exists(cp) and cp not in paths:
+                paths.append(cp)
+        os.environ["PATH"] = os.pathsep.join(paths)
+    except Exception:
+        pass
     if yt_dlp is None:
         try:
             import yt_dlp as yt_dlp_module  # type: ignore
@@ -9604,7 +9620,8 @@ def _build_youtube_ytdlp_route_options(parsed_url):
         "format_sort": ["res", "fps", "hdr", "vcodec", "br"],
         "format_sort_force": True,
         "merge_output_format": "mkv",
-        "extractor_args": {"youtube": {"player_client": ["android_vr", "web", "android"]}},
+        "extractor_args": {"youtube": {"player_client": ["ios", "web_creator", "web", "android"]}},
+        "js_runtimes": {"node": {}, "quickjs": {}, "deno": {}},
         "http_headers": _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root),
         **_build_ytdlp_route_profile("youtube"),
     }
@@ -10162,25 +10179,32 @@ def _summarize_log_exception(exc, limit=180):
     return message
 
 
-def format_download_error_status(exc, limit=80):
-    message = summarize_error_message(exc, "err_net", limit=max(limit * 2, 120))
+def format_download_error_status(exc, limit=120):
+    raw_desc = summarize_error_message(exc, "err_net", limit=120)
+    message = raw_desc
     normalized = message.lower()
+    friendly = ""
     if "media url missing" in normalized or "no video formats found" in normalized:
-        message = "找不到可下載影片來源"
+        friendly = "找不到可下載影片來源"
     elif "unsupported url" in normalized or "unsupported url" in message:
-        message = "不支援此網址或無法解析影片"
+        friendly = "不支援此網址或無法解析影片"
     elif "all known video sources are unavailable" in normalized or "source unavailable" in normalized:
-        message = "影片來源暫時不可用，請稍後重試或改用其他來源"
+        friendly = "影片來源暫時不可用，請稍後重試"
     elif "requested format is not available" in normalized:
-        message = "找不到符合條件的影片畫質"
+        friendly = "找不到符合條件的影片畫質"
     elif "http error 404" in normalized or "http 404" in normalized:
-        message = "來源不存在或影片已下架"
+        friendly = "來源不存在或影片已下架"
     elif "http error 403" in normalized or "http 403" in normalized:
-        message = "來源拒絕存取，可能需要登入或 cookies"
+        friendly = "來源拒絕存取，可能需要登入或 cookies"
     elif "timed out" in normalized or "timeout" in normalized:
-        message = "連線逾時，來源暫時無回應"
+        friendly = "連線逾時，來源暫時無回應"
     elif "could not connect" in normalized or "connection refused" in normalized or "name does not resolve" in normalized:
-        message = "無法連線到影片來源"
+        friendly = "無法連線到影片來源"
+    if friendly:
+        if friendly.lower() not in normalized:
+            message = f"{friendly} ({message})"
+        else:
+            message = friendly
     message = re.sub(r"^ERROR:\s*", "", str(message or ""), flags=re.IGNORECASE).strip()
     message = re.sub(r"\s+", " ", message)
     if len(message) > limit:
@@ -17141,6 +17165,8 @@ class DownloadManagerApp:
         return True
 
     def _is_low_quality_youtube_output(self, task, output_path):
+        if _task_field_value(task, "disable_youtube_quality_check"):
+            return False
         if not output_path or str(output_path).lower().endswith((".mp3", ".m4a")):
             return False
         source_site = _task_source_site_name(task)
@@ -17156,7 +17182,25 @@ class DownloadManagerApp:
             height = int(video_stream.get("height") or 0)
         except Exception:
             height = 0
-        return 0 < height < YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT
+        if 0 < height < YTDLP_YOUTUBE_MIN_ACCEPT_EXISTING_HEIGHT:
+            try:
+                with ytdl_init_lock:
+                    import yt_dlp
+                    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "nocheckcertificate": True}) as ydl:
+                        video_info = ydl.extract_info(source_url, download=False)
+                        all_formats = video_info.get("formats") or []
+                        max_available_height = 0
+                        for fmt in all_formats:
+                            if fmt.get("vcodec") != "none":
+                                fmt_height = int(fmt.get("height") or 0)
+                                if fmt_height > max_available_height:
+                                    max_available_height = fmt_height
+                        if max_available_height > 0 and height >= max_available_height:
+                            return False
+            except Exception:
+                pass
+            return True
+        return False
 
     def _is_incomplete_hls_video_artifact(self, task, output_path, expected_duration=None, media_info=None):
         source_site = _task_source_site_name(task)
@@ -28866,6 +28910,21 @@ class DownloadManagerApp:
             audio_formats = [fmt for fmt in requested_formats if _format_has_audio(fmt) and not _format_has_video(fmt)]
             video_fmt = max(video_formats, key=_format_rank, default=None)
             audio_fmt = max(audio_formats, key=_format_rank, default=None)
+
+            if not video_fmt or not audio_fmt:
+                all_formats = [fmt for fmt in (info.get("formats") or []) if isinstance(fmt, dict)]
+                sep_video_formats = [fmt for fmt in all_formats if _format_has_video(fmt) and not _format_has_audio(fmt)]
+                sep_audio_formats = [fmt for fmt in all_formats if _format_has_audio(fmt) and not _format_has_video(fmt)]
+                if sep_video_formats and sep_audio_formats:
+                    video_fmt = max(sep_video_formats, key=_format_rank, default=None)
+                    audio_fmt = max(sep_audio_formats, key=_format_rank, default=None)
+                else:
+                    combined_formats = [fmt for fmt in all_formats if _format_has_video(fmt) and _format_has_audio(fmt)]
+                    if combined_formats:
+                        single_fmt = max(combined_formats, key=_format_rank, default=None)
+                        if single_fmt:
+                            info = single_fmt
+
             final_stem = output_template_stem
             final_output = os.path.join(save_dir, f"{final_stem}.mkv")
 
@@ -29067,10 +29126,7 @@ class DownloadManagerApp:
             )
             actual_output = ""
             try:
-                if site == "youtube" and not is_mp3:
-                    download_info, actual_output = _run_youtube_fast_multipart_download(target_url, output_template_stem)
-                else:
-                    download_info = _run_yt_dlp(target_url)
+                download_info = _run_yt_dlp(target_url)
             except Exception as exc:
                 if site == "bilibili" and "requested format is not available" in str(exc).lower():
                     raise Exception("Bilibili 未取得 720p 以上可下載影片；請提供有效登入 cookies 或改用有 720p 權限的帳號後重試") from exc
@@ -30298,14 +30354,36 @@ class DownloadManagerApp:
         is_youtube = any(host in parsed_url.netloc for host in ("youtube.com", "youtu.be"))
         if is_youtube:
             self._set_task_parse_ui(item_id, message="正在解析 YouTube...")
-            _run_ytdlp_site_route(
-                url,
-                source_site="youtube",
-                route_options=_build_youtube_ytdlp_route_options(parsed_url),
-                source_page=url,
-                fallback_urls=[],
-                log_context="youtube yt-dlp route selected",
-            )
+            try:
+                _run_ytdlp_site_route(
+                    url,
+                    source_site="youtube",
+                    route_options=_build_youtube_ytdlp_route_options(parsed_url),
+                    source_page=url,
+                    fallback_urls=[],
+                    log_context="youtube yt-dlp route selected",
+                )
+            except (StopDownloadException, KeyboardInterrupt, ResumeLowSpeedReanalysisException):
+                raise
+            except Exception as first_exc:
+                write_error_log("youtube high speed/quality download failed; attempting fallback route", first_exc, url=url, item_id=item_id)
+                err_msg = str(first_exc)
+                msg_truncated = err_msg[:50] + "..." if len(err_msg) > 50 else err_msg
+                self._set_task_parse_ui(item_id, message=f"高品質下載失敗({msg_truncated})，正改用低速/低畫質容錯下載...")
+                if item_id in self.tasks:
+                    _set_task_aux_fields(self.tasks[item_id], disable_youtube_quality_check=True)
+                fallback_options = _build_youtube_ytdlp_route_options(parsed_url)
+                fallback_options["format"] = "best/bestvideo+bestaudio"
+                fallback_options.pop("format_sort", None)
+                fallback_options.pop("format_sort_force", None)
+                _run_ytdlp_site_route(
+                    url,
+                    source_site="youtube",
+                    route_options=fallback_options,
+                    source_page=url,
+                    fallback_urls=[],
+                    log_context="youtube yt-dlp fallback route selected",
+                )
             return
 
         if _is_bilibili_video_url(url):
