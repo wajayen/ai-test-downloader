@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260630-3680"
+APP_BUILD = "20260701-3690"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -436,8 +436,11 @@ def _extract_jav_code(value):
     match = re.search(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})([A-Za-z])?\b", text)
     if not match:
         return ""
+    prefix = match.group(1).upper()
+    if prefix in ("EP", "SS", "BV"):
+        return ""
     suffix = (match.group(3) or "").upper()
-    return f"{match.group(1).upper()}-{match.group(2)}{suffix}"
+    return f"{prefix}-{match.group(2)}{suffix}"
 
 
 def _extract_hayav_jav_code(value):
@@ -452,7 +455,10 @@ def _extract_hayav_jav_code(value):
     for candidate in candidates:
         match = re.search(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})(?:u?c)?\b", candidate, re.IGNORECASE)
         if match:
-            return f"{match.group(1).upper()}-{match.group(2)}"
+            prefix = match.group(1).upper()
+            if prefix in ("EP", "SS", "BV"):
+                continue
+            return f"{prefix}-{match.group(2)}"
     return ""
 
 
@@ -960,8 +966,14 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "streamhls.click",
     "ts2ff6yms.com",
     "vdcdn.top",
+    "javdock",
 )
-PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top")
+PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com")
+PARALLEL_HLS_FMP4_BOX_MARKERS = (b"ftyp", b"moof", b"mdat", b"styp", b"sidx", b"free")
+PARALLEL_HLS_XOR_FF_TABLE = bytes([b ^ 0xff for b in range(256)])
+PARALLEL_HLS_STANDARD_IMPERSONATE_BROWSERS = ("chrome110", "chrome120")
+PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS = ("chrome110", "chrome120", "edge101")
+PARALLEL_HLS_SUPJAV_IMPERSONATE_BROWSERS = ("chrome124", "chrome120", "chrome110", "edge101")
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "ijycnd.com",
     "huyall.com",
@@ -987,6 +999,39 @@ MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "vodcnd",
     "wlcdn88.com",
     "xluuss",
+)
+PARALLEL_HLS_INFERRED_SITE_MAPPINGS = (
+    (("hohoj.tv",), "hohoj"),
+    (("goodav17.com",), "goodav17"),
+    (("mushroomtrack.com", "hls.sb-cd.com", "cdn77.org"), "jable"),
+    (("avbebe.com",), "avbebe"),
+    (("avjoy.me",), "avjoy"),
+    (("85xvideo.com",), "85xvideo"),
+    (("bestjavporn.com",), "bestjavporn"),
+    (("jav.ninja",), "javninja"),
+    (("getav.net", "worldstatic.com"), "getav"),
+    (("javdock.com", "video1.javdock.com"), "javdock"),
+    (("supjav.com",), "supjav"),
+    (("tinyavideo.com",), "tinyavideo"),
+    (("av01.media", "av01.tv"), "av01"),
+    (("tktube.com",), "tktube"),
+    (("ikanbot.com",), "ikanbot"),
+    (("movieffm.net",), "movieffm"),
+    (("hayav.com",), "hayav"),
+    (("gimy",), "gimy"),
+    (("xiaoyakankan.",), "xiaoyakankan"),
+    (("missav",), "missav"),
+    (("njav.com", "upload18.org", "321watch.workers.dev"), "njav"),
+    (("njavtv.com",), "njavtv"),
+    (("nnyy.in",), "nnyy"),
+    (("thanju.com",), "thanju"),
+    (("anime1.",), "anime1"),
+    (("youtube.com", "youtu.be"), "youtube"),
+    (("bilibili.com",), "bilibili"),
+    (("ppp.porn",), "ppp.porn"),
+    (("javfilms.com",), "javfilms"),
+    (("18jav.tv",), "18jav"),
+    (("18av.mm-cg.com",), "18av"),
 )
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
@@ -2827,74 +2872,15 @@ def _infer_source_site_from_task_urls(*urls):
         normalized = _normalize_download_url(raw_url)
         if not normalized:
             continue
-        parsed = urllib.parse.urlsplit(normalized)
-        host = parsed.netloc.lower()
-        path = parsed.path.lower()
-        if "hohoj.tv" in host:
-            return "hohoj"
-        if "goodav17.com" in host:
-            return "goodav17"
-        if "mushroomtrack.com" in host or "hls.sb-cd.com" in host or "cdn77.org" in host:
-            return "jable"
-        if "avbebe.com" in host:
-            return "avbebe"
-        if "avjoy.me" in host:
-            return "avjoy"
-        if "85xvideo.com" in host:
-            return "85xvideo"
-        if "bestjavporn.com" in host:
-            return "bestjavporn"
-        if "jav.ninja" in host:
-            return "javninja"
-        if "getav.net" in host or "worldstatic.com" in host:
-            return "getav"
         chat_platform_site = _chat_platform_file_site_from_url(raw_url)
         if chat_platform_site:
             return chat_platform_site
-        if "javdock.com" in host or "video1.javdock.com" in host:
-            return "javdock"
-        if "supjav.com" in host:
-            return "supjav"
-        if "tinyavideo.com" in host:
-            return "tinyavideo"
-        if "av01.media" in host or "av01.tv" in host:
-            return "av01"
-        if "tktube.com" in host:
-            return "tktube"
-        if "ikanbot.com" in host:
-            return "ikanbot"
-        if "movieffm.net" in host:
-            return "movieffm"
-        if "hayav.com" in host:
-            return "hayav"
-        if "gimy" in host:
-            return "gimy"
-        if "xiaoyakankan." in host:
-            return "xiaoyakankan"
-        if "missav" in host:
-            return "missav"
-        if "njav.com" in host or "upload18.org" in host or "321watch.workers.dev" in host:
-            return "njav"
-        if "njavtv.com" in host:
-            return "njavtv"
-        if "nnyy.in" in host:
-            return "nnyy"
-        if "thanju.com" in host:
-            return "thanju"
-        if "anime1." in host:
-            return "anime1"
-        if "youtube.com" in host or "youtu.be" in host:
-            return "youtube"
-        if "bilibili.com" in host:
-            return "bilibili"
-        if "ppp.porn" in host:
-            return "ppp.porn"
-        if "javfilms.com" in host:
-            return "javfilms"
-        if "18jav.tv" in host:
-            return "18jav"
-        if "18av.mm-cg.com" in host:
-            return "18av"
+        parsed = urllib.parse.urlsplit(normalized)
+        host = parsed.netloc.lower()
+        path = parsed.path.lower()
+        for domains, site_id in PARALLEL_HLS_INFERRED_SITE_MAPPINGS:
+            if any(dom in host for dom in domains):
+                return site_id
         if "mypikpak.com" in host and path.startswith("/s/"):
             return "pikpak"
     return ""
@@ -8483,7 +8469,7 @@ def _av01_manifest_has_real_media(manifest_url, referer="https://www.av01.media/
         if status_code >= 400 or not segment_bytes:
             return False
         if content_type.startswith("video/") or "octet-stream" in content_type:
-            if segment_bytes.startswith(b"\x47") or b"ftyp" in segment_bytes[:32] or b"moof" in segment_bytes[:32] or b"styp" in segment_bytes[:32]:
+            if segment_bytes.startswith(b"\x47") or any(marker in segment_bytes[:32] for marker in PARALLEL_HLS_FMP4_BOX_MARKERS):
                 return True
         return len(segment_bytes) >= 4096
     except Exception:
@@ -11831,7 +11817,7 @@ class DownloadManagerApp:
 
                 def gimy_fetch_detail_text(target_url):
                     last_exc = None
-                    for impersonate_name in ("chrome110", "chrome120", "edge101"):
+                    for impersonate_name in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
                         try:
                             resp_obj = c_req.get(target_url, impersonate=impersonate_name, timeout=15, headers=detail_headers)
                             return resp_obj.text
@@ -20028,7 +20014,7 @@ class DownloadManagerApp:
                 candidate_sessions = []
                 if session is not None:
                     candidate_sessions.append(session)
-                for browser in ("chrome110", "chrome120"):
+                for browser in PARALLEL_HLS_STANDARD_IMPERSONATE_BROWSERS:
                     try:
                         candidate_session = c_req.Session(impersonate=browser)
                         self._track_network_session(candidate_session)
@@ -20105,7 +20091,7 @@ class DownloadManagerApp:
                     candidate_sessions = []
                     if session is not None:
                         candidate_sessions.append(session)
-                    for browser in ("chrome110", "chrome120"):
+                    for browser in PARALLEL_HLS_STANDARD_IMPERSONATE_BROWSERS:
                         try:
                             candidate_session = c_req.Session(impersonate=browser)
                             self._track_network_session(candidate_session)
@@ -21265,7 +21251,7 @@ class DownloadManagerApp:
                 candidate_sessions = []
                 if session is not None:
                     candidate_sessions.append(session)
-                for browser in ("chrome110", "chrome120"):
+                for browser in PARALLEL_HLS_STANDARD_IMPERSONATE_BROWSERS:
                     try:
                         candidate_session = c_req.Session(impersonate=browser)
                         self._track_network_session(candidate_session)
@@ -21929,7 +21915,7 @@ class DownloadManagerApp:
         origin = origin or _url_origin(page_url) or "https://getav.net"
         referer = referer or origin.rstrip("/") + "/"
         last_exc = None
-        for browser in ("chrome124", "chrome120", "chrome110", "edge101"):
+        for browser in PARALLEL_HLS_SUPJAV_IMPERSONATE_BROWSERS:
             session = None
             try:
                 session = self._track_network_session(c_req.Session(impersonate=browser))
@@ -23002,11 +22988,26 @@ class DownloadManagerApp:
                 if chunk_type == b"IEND":
                     break
             tail = data[pos:]
-            if len(tail) < 188 or tail[0] != 0x47:
+            if not tail:
                 return None
-            if len(tail) >= 377 and tail[188] != 0x47:
+            stripped_len = len(tail) - len(tail.lstrip(b"\xff\x00"))
+            actual_tail = tail[stripped_len:]
+            if not actual_tail:
                 return None
-            return pos
+            first_byte = actual_tail[0]
+            if first_byte == 0x47:
+                return pos + stripped_len
+            xored_first = first_byte ^ 0xff
+            if xored_first == 0x47:
+                return pos + stripped_len
+            if len(actual_tail) >= 8:
+                type_bytes = actual_tail[4:8]
+                if type_bytes in PARALLEL_HLS_FMP4_BOX_MARKERS:
+                    return pos + stripped_len
+                xored_type_bytes = type_bytes.translate(PARALLEL_HLS_XOR_FF_TABLE)
+                if xored_type_bytes in PARALLEL_HLS_FMP4_BOX_MARKERS:
+                    return pos + stripped_len
+            return None
         except Exception:
             return None
 
@@ -23014,7 +23015,20 @@ class DownloadManagerApp:
         offset = self._png_wrapped_ts_payload_offset(data)
         if offset is None:
             return None
-        return bytes(data or b"")[offset:]
+        tail = bytes(data)[offset:]
+        if len(tail) >= 8:
+            type_bytes = tail[4:8]
+            if tail[0] != 0x47 and type_bytes not in PARALLEL_HLS_FMP4_BOX_MARKERS:
+                xored_first = tail[0] ^ 0xff
+                xored_type_bytes = type_bytes.translate(PARALLEL_HLS_XOR_FF_TABLE)
+                if xored_first == 0x47 or xored_type_bytes in PARALLEL_HLS_FMP4_BOX_MARKERS:
+                    return tail.translate(PARALLEL_HLS_XOR_FF_TABLE)
+        return tail
+
+    def _looks_like_raw_media_bytes(self, data):
+        if not data or len(data) < 8:
+            return False
+        return data[0] == 0x47 or data[4:8] in PARALLEL_HLS_FMP4_BOX_MARKERS
 
     def _is_valid_parallel_hls_segment_data(self, data, content_type=""):
         if not data or len(data) < 16:
@@ -23024,11 +23038,8 @@ class DownloadManagerApp:
         lowered_type = str(content_type or "").lower()
         if self._is_unsupported_parallel_hls_segment_payload(data, lowered_type):
             return False
-        if data[0] == 0x47:
+        if self._looks_like_raw_media_bytes(data):
             return True
-        if data[4:8] in (b"ftyp", b"moof", b"mdat", b"styp"):
-            return True
-        prefix = data[:128].lstrip()
         return "video/" in lowered_type or "application/octet-stream" in lowered_type
 
     def _is_valid_parallel_hls_segment_media_bytes(self, data):
@@ -23036,9 +23047,7 @@ class DownloadManagerApp:
             return False
         if self._unwrap_png_wrapped_ts_segment_bytes(data):
             return True
-        if data[0] == 0x47:
-            return True
-        return data[4:8] in (b"ftyp", b"moof", b"mdat", b"styp")
+        return self._looks_like_raw_media_bytes(data)
 
     def _is_parallel_hls_transport_stream_payload(self, data):
         if not data or len(data) < 188:
@@ -23123,12 +23132,17 @@ class DownloadManagerApp:
                 and self._is_valid_parallel_hls_segment_media_bytes(data)
             )
             if self._is_unsupported_parallel_hls_segment_payload(data, content_type) and not allow_mislabelled_media:
-                message = f"invalid HLS segment content: {content_type or 'unknown'}"
+                hex_preview = (data or b"")[:128].hex()
+                repr_preview = repr((data or b"")[:128])
+                message = f"invalid HLS segment content: {content_type or 'unknown'} (length={len(data or b'')}, hex={hex_preview}, repr={repr_preview})"
                 if "googleusercontent.com" in segment_host:
                     raise ParallelHlsUnsupportedSegmentContentException(message)
                 raise Exception(message)
+
             if not (allow_mislabelled_media or self._is_valid_parallel_hls_segment_data(data, content_type)):
-                message = f"invalid HLS segment content: {content_type or 'unknown'}"
+                hex_preview = (data or b"")[:128].hex()
+                repr_preview = repr((data or b"")[:128])
+                message = f"invalid HLS segment content: {content_type or 'unknown'} (length={len(data or b'')}, hex={hex_preview}, repr={repr_preview})"
                 if "googleusercontent.com" in segment_host:
                     raise ParallelHlsUnsupportedSegmentContentException(message)
                 raise Exception(message)
@@ -31559,7 +31573,7 @@ class DownloadManagerApp:
             headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": url}
             resp_text = None
             last_detail_error = None
-            for impersonate_name in ("chrome110", "chrome120", "edge101"):
+            for impersonate_name in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
                 try:
                     resp_text = c_req.get(url, impersonate=impersonate_name, timeout=15, headers=headers).text
                     break
@@ -31765,7 +31779,7 @@ class DownloadManagerApp:
                     "title": local_title,
                     "error": local_error,
                 }
-            for gimy_impersonate in ("chrome110", "chrome120", "edge101"):
+            for gimy_impersonate in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
                 try:
                     resp_text = gimy_fetch_text(url, url, gimy_impersonate)
                 except Exception as e:
@@ -32712,51 +32726,64 @@ class DownloadManagerApp:
 
         if "missav" in parsed_url.netloc:
             self._set_task_parse_ui(item_id, key="eta_site_missav", fallback="正在解析 MissAV 頁面...")
-            c_req = get_curl_cffi_requests()
-            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            resp, media_candidates, candidates, direct_media_candidates = _fetch_missav_media_candidates_with_retry(
-                c_req,
-                url,
-                site_root,
-                item_id=item_id,
-            )
-            self._ensure_task_can_continue(item_id)
-            if not candidates and not direct_media_candidates:
-                write_error_log(
-                    "missav parser candidates missing",
-                    Exception("MissAV parser found no usable media candidates"),
+            try:
+                c_req = get_curl_cffi_requests()
+                site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                resp, media_candidates, candidates, direct_media_candidates = _fetch_missav_media_candidates_with_retry(
+                    c_req,
+                    url,
+                    site_root,
                     item_id=item_id,
-                    url=url,
-                    **_http_response_log_fields(resp),
-                    has_next_data="__NEXT_DATA__" in (resp.text or ""),
-                    has_playlist_token="playlist" in (resp.text or "").lower(),
-                    has_m3u8_token=".m3u8" in (resp.text or "").lower(),
                 )
-                status_code = int(getattr(resp, "status_code", 0) or 0)
-                if status_code == 404:
-                    raise DownloadSourceUnavailableException("MissAV page returned 404 and no downloadable media was found")
-                raise DownloadSourceUnavailableException("MissAV stream URL missing")
-            page_text = _response_text_utf8(resp)
-            page_title = _clean_missav_title(
-                _extract_html_title(page_text, short_name),
-                page_url=url,
-                fallback_title=short_name,
-            )
-            if direct_media_candidates and not candidates:
-                direct_media_url = direct_media_candidates[0]
-                _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=direct_media_candidates[1:])
-                self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
-                self._download_direct_media(item_id, direct_media_url, save_dir, is_mp3=is_mp3, referer=url)
-                return
-            _dispatch_manifest_download(
-                candidates[0],
-                name=page_title,
-                source_site="missav",
-                source_page=url,
-                fallback_urls=candidates[1:] or direct_media_candidates,
-                referer=url,
-                origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
-            )
+                self._ensure_task_can_continue(item_id)
+                if not candidates and not direct_media_candidates:
+                    write_error_log(
+                        "missav parser candidates missing",
+                        Exception("MissAV parser found no usable media candidates"),
+                        item_id=item_id,
+                        url=url,
+                        **_http_response_log_fields(resp),
+                        has_next_data="__NEXT_DATA__" in (resp.text or ""),
+                        has_playlist_token="playlist" in (resp.text or "").lower(),
+                        has_m3u8_token=".m3u8" in (resp.text or "").lower(),
+                    )
+                    status_code = int(getattr(resp, "status_code", 0) or 0)
+                    if status_code == 404:
+                        raise DownloadSourceUnavailableException("MissAV page returned 404 and no downloadable media was found")
+                    raise DownloadSourceUnavailableException("MissAV stream URL missing")
+                page_text = _response_text_utf8(resp)
+                page_title = _clean_missav_title(
+                    _extract_html_title(page_text, short_name),
+                    page_url=url,
+                    fallback_title=short_name,
+                )
+                if direct_media_candidates and not candidates:
+                    direct_media_url = direct_media_candidates[0]
+                    _set_task_identity(name=page_title, source_site="missav", source_page=url, fallback_urls=direct_media_candidates[1:])
+                    self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
+                    self._download_direct_media(item_id, direct_media_url, save_dir, is_mp3=is_mp3, referer=url)
+                    return
+                _dispatch_manifest_download(
+                    candidates[0],
+                    name=page_title,
+                    source_site="missav",
+                    source_page=url,
+                    fallback_urls=candidates[1:] or direct_media_candidates,
+                    referer=url,
+                    origin=f"{parsed_url.scheme}://{parsed_url.netloc}",
+                )
+            except (
+                StopDownloadException,
+                KeyboardInterrupt,
+                ResumeLowSpeedReanalysisException,
+                ParallelHlsRetryLaterException,
+                ParallelHlsUnsupportedSegmentContentException,
+            ):
+                raise
+            except Exception as missav_exc:
+                if _retry_next_page_fallback("MissAV download failed; retrying next search result", missav_exc):
+                    return
+                raise
             return
 
         if "ppp.porn" in parsed_url.netloc and "/v/" in parsed_url.path:
@@ -33442,7 +33469,7 @@ class DownloadManagerApp:
             resp = None
             page_text = ""
             supjav_fetch_attempts = []
-            for impersonate_name in ("chrome124", "chrome120", "chrome110", "edge101"):
+            for impersonate_name in PARALLEL_HLS_SUPJAV_IMPERSONATE_BROWSERS:
                 try:
                     candidate_resp = c_req.get(
                         url,
