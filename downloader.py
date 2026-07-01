@@ -67,7 +67,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260701-3690"
+APP_BUILD = "20260701-3700"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -132,10 +132,10 @@ VIDEO_SEARCH_MIN_QUALITY = 720
 LOW_SPEED_CONCURRENCY_THRESHOLD_BPS = 500 * 1024
 LOW_SPEED_CONCURRENCY_MAX_DOWNLOADS = 3
 LOW_SPEED_CONCURRENCY_SAMPLE_TTL_SECONDS = 20.0
-RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 120.0
-RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 64 * 1024
+RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS = 60.0
+RESUME_LOW_SPEED_REANALYZE_THRESHOLD_BPS = 500 * 1024
 SLOW_SOURCE_REANALYZE_DELAY_SECONDS = 30.0
-SLOW_SOURCE_REANALYZE_THRESHOLD_BPS = 256 * 1024
+SLOW_SOURCE_REANALYZE_THRESHOLD_BPS = 500 * 1024
 SLOW_SOURCE_REANALYZE_MIN_DOWNLOADED_BYTES = 2 * 1024 * 1024
 PARALLEL_HLS_SHORT_PLAYLIST_NO_PROGRESS_SEGMENTS = 80
 PARALLEL_HLS_SHORT_PLAYLIST_NO_PROGRESS_DELAY_SECONDS = 90.0
@@ -234,7 +234,7 @@ STRICT_HLS_ARTIFACT_SITES = frozenset((
     "tinyavideo",
     "xiaoyakankan",
 ))
-STRICT_RESUMED_FFMPEG_ARTIFACT_SITES = frozenset(("avbebe", "gimy", "goodav17", "hohoj"))
+STRICT_RESUMED_FFMPEG_ARTIFACT_SITES = frozenset(("avbebe", "goodav17", "hohoj"))
 
 
 def _ffmpeg_should_retry_with_audio_transcode(message):
@@ -477,44 +477,32 @@ def _is_hayav_video_page_url(url):
     return bool(_extract_hayav_jav_code(path))
 
 
-def _is_avjoy_video_page_url(url):
+def _is_video_page_on_domain(url, domain, path_segment="/video/"):
     normalized = _normalize_download_url(url)
     if not normalized:
         return False
     parsed = urllib.parse.urlparse(normalized)
-    return "avjoy.me" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
+    return domain in parsed.netloc.lower() and path_segment in (parsed.path or "").lower()
+
+
+def _is_avjoy_video_page_url(url):
+    return _is_video_page_on_domain(url, "avjoy.me")
 
 
 def _is_bestjavporn_video_page_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    parsed = urllib.parse.urlparse(normalized)
-    return "bestjavporn.com" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
+    return _is_video_page_on_domain(url, "bestjavporn.com")
 
 
 def _is_javninja_video_page_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    parsed = urllib.parse.urlparse(normalized)
-    return "jav.ninja" in parsed.netloc.lower() and "/videos/" in (parsed.path or "").lower()
+    return _is_video_page_on_domain(url, "jav.ninja", "/videos/")
 
 
 def _is_getav_video_page_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    parsed = urllib.parse.urlparse(normalized)
-    return "getav.net" in parsed.netloc.lower() and "/videos/" in (parsed.path or "").lower()
+    return _is_video_page_on_domain(url, "getav.net", "/videos/")
 
 
 def _is_getav_embed_page_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    parsed = urllib.parse.urlparse(normalized)
-    return "getav.net" in parsed.netloc.lower() and "/embed/" in (parsed.path or "").lower()
+    return _is_video_page_on_domain(url, "getav.net", "/embed/")
 
 
 def _is_getav_index_playlist_url(url):
@@ -535,15 +523,7 @@ def _is_bestjavporn_transient_media_url(url):
     host = (parsed.netloc or "").lower()
     if "bestjavporn.com" in host:
         return False
-    transient_hosts = (
-        "cloudatacdn.com",
-        "dood.video",
-        "doodstream.",
-        "d000d.",
-        "do7go.com",
-        "dood.",
-    )
-    return any(marker in host for marker in transient_hosts)
+    return any(marker in host for marker in DOOD_FAMILY_HOST_MARKERS)
 
 
 def _is_dood_family_transient_media_url(url):
@@ -558,13 +538,7 @@ def _is_javninja_external_player_url(url):
     host = (parsed.netloc or "").lower()
     return _is_dood_family_transient_media_url(normalized) or any(
         marker in host
-        for marker in (
-            "filemoon.",
-            "streamtape.",
-            "streamtape.com",
-            "vinovo.",
-            "vinovo.to",
-        )
+        for marker in JAVNINJA_EXTERNAL_PLAYER_HOST_MARKERS
     )
 
 
@@ -578,11 +552,7 @@ def _search_result_uses_dood_family_media(result):
 
 
 def _is_javdock_video_page_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    parsed = urllib.parse.urlparse(normalized)
-    return "javdock.com" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
+    return _is_video_page_on_domain(url, "javdock.com")
 
 
 def _is_85xvideo_video_page_url(url):
@@ -607,11 +577,7 @@ def _is_85xvideo_video_page_url(url):
 
 
 def _is_tinyavideo_video_page_url(url):
-    normalized = _normalize_download_url(url)
-    if not normalized:
-        return False
-    parsed = urllib.parse.urlparse(normalized)
-    return "tinyavideo.com" in parsed.netloc.lower() and "/video/" in (parsed.path or "").lower()
+    return _is_video_page_on_domain(url, "tinyavideo.com")
 
 
 def _is_supjav_video_page_url(url):
@@ -967,13 +933,20 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "ts2ff6yms.com",
     "vdcdn.top",
     "javdock",
+    "ctyunxs.cn",
+    "yximgs.com",
+    "oag7h",
+    "ryiplay",
+    "vodcnd",
 )
-PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com")
+PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com", "ctyunxs.cn", "yximgs.com")
 PARALLEL_HLS_FMP4_BOX_MARKERS = (b"ftyp", b"moof", b"mdat", b"styp", b"sidx", b"free")
 PARALLEL_HLS_XOR_FF_TABLE = bytes([b ^ 0xff for b in range(256)])
-PARALLEL_HLS_STANDARD_IMPERSONATE_BROWSERS = ("chrome110", "chrome120")
-PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS = ("chrome110", "chrome120", "edge101")
+PARALLEL_HLS_STANDARD_IMPERSONATE_BROWSERS = ("chrome120", "chrome110")
+PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS = ("chrome120", "chrome110", "edge101")
 PARALLEL_HLS_SUPJAV_IMPERSONATE_BROWSERS = ("chrome124", "chrome120", "chrome110", "edge101")
+DOOD_FAMILY_HOST_MARKERS = ("cloudatacdn.com", "dood.video", "doodstream.", "d000d.", "do7go.com", "dood.")
+JAVNINJA_EXTERNAL_PLAYER_HOST_MARKERS = ("filemoon.", "streamtape.", "vinovo.")
 MOVIEFFM_FAST_HLS_HOST_PRIORITY = (
     "ijycnd.com",
     "huyall.com",
@@ -1234,9 +1207,9 @@ PARALLEL_HLS_FAST_TRANSPORT_REMUX_MIN_SEGMENTS = 256
 PARALLEL_HLS_SLOW_CANDIDATE_RETRY_THRESHOLD_BPS_BY_SITE = {
     "getav": 6 * 1024 * 1024,
 }
-PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SECONDS = 180.0
-PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_BYTES = 256 * 1024 * 1024
-PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SEGMENTS = 64
+PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SECONDS = 60.0
+PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_BYTES = 16 * 1024 * 1024
+PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SEGMENTS = 16
 PARALLEL_HLS_GOOGLE_SEGMENT_RETRIES = 20
 PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0)
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
@@ -1444,7 +1417,7 @@ NATIVE_HLS_DISABLED_HOST_MARKERS = ("ggjav",)
 NATIVE_HLS_HOST_MARKERS_BY_SITE = {
     "18av": ("streamfastpro",),
     "18jav": ("hshdkshd", "cdnlab.live"),
-    "gimy": ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd", "phimgood", "ryiplay"),
+    "gimy": ("ppqrrs", "qqqrst", "surrit", "oag7h", "vodcnd", "phimgood", "ryiplay", "ctyunxs", "yximgs"),
     "hohoj": ("cdnlab.live",),
     "jable": ("mushroomtrack", "hls.sb-cd.com", "cdn77.org"),
     "movieffm": ("xluuss", "lzcdn", "letvoss", "subokk", "bdzybf", "ukubf", "ijycnd", "qsstvw", "gsuus", "hhuus", "huyall", "bfllvip"),
@@ -6057,18 +6030,14 @@ def _browser_api_crypto_digest_hex(algorithm, value):
     return hashlib.sha256(data).hexdigest()
 
 
-def _bestjavporn_b64decode(value):
-    return _browser_api_atob(value)
-
-
-def _bestjavporn_rc4(data, key):
-    return _browser_api_rc4(data, key)
+def _browser_api_decrypt_rc4_b64(encrypted, key):
+    decrypted = _browser_api_rc4(_browser_api_atob(encrypted), key)
+    return _browser_api_atob(decrypted.decode("latin-1", "ignore")).decode("utf-8", "ignore")
 
 
 def _bestjavporn_dex(video_id, encrypted):
     key = _browser_api_reverse_btoa_seed(str(video_id or "") + "_0x58fe15")
-    decrypted = _bestjavporn_rc4(_bestjavporn_b64decode(encrypted), key)
-    return _bestjavporn_b64decode(decrypted.decode("latin-1", "ignore")).decode("utf-8", "ignore")
+    return _browser_api_decrypt_rc4_b64(encrypted, key)
 
 
 def _bestjavporn_player_config_key(player_url):
@@ -6080,19 +6049,17 @@ def _bestjavporn_player_config_key(player_url):
 
 def _bestjavporn_decode_player_config(data_config, player_url):
     key = _bestjavporn_player_config_key(player_url)
-    decrypted = _bestjavporn_rc4(_bestjavporn_b64decode(data_config), key)
-    config_json = _bestjavporn_b64decode(decrypted.decode("latin-1", "ignore")).decode("utf-8", "ignore")
+    config_json = _browser_api_decrypt_rc4_b64(data_config, key)
     config = json.loads(config_json)
     source_blob = config.get("src", "")
-    sources = json.loads(_bestjavporn_b64decode(source_blob).decode("utf-8", "ignore")) if source_blob else []
+    sources = json.loads(_browser_api_atob(source_blob).decode("utf-8", "ignore")) if source_blob else []
     return config, sources if isinstance(sources, list) else []
 
 
 def _javdock_fme(video_id, encrypted, encode_sources=True):
     suffix = "_0x48107a" if encode_sources else "undefined"
     key = _browser_api_reverse_btoa_seed(str(video_id or "") + suffix)
-    decrypted = _browser_api_rc4(_browser_api_atob(encrypted), key)
-    return _browser_api_atob(decrypted.decode("latin-1", "ignore")).decode("utf-8", "ignore")
+    return _browser_api_decrypt_rc4_b64(encrypted, key)
 
 
 def _build_gimy_iframe_urls(page_url, player_data):
@@ -20291,7 +20258,7 @@ class DownloadManagerApp:
             last_exc = None
             candidate_sessions = []
             owned_sessions = []
-            for browser in ("chrome120", "chrome110"):
+            for browser in PARALLEL_HLS_STANDARD_IMPERSONATE_BROWSERS:
                 try:
                     candidate_session = c_req.Session(impersonate=browser)
                     self._track_network_session(candidate_session)
@@ -21889,7 +21856,7 @@ class DownloadManagerApp:
                 referer=(origin or candidate_origin).rstrip("/") + "/",
                 origin=candidate_origin,
             )
-            for browser in ("chrome120", "chrome110", "edge101"):
+            for browser in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
                 session = None
                 try:
                     session = self._track_network_session(c_req.Session(impersonate=browser))
@@ -22050,7 +22017,7 @@ class DownloadManagerApp:
         headers = _make_ytdlp_http_headers(referer=site_root)
         c_req = get_curl_cffi_requests()
         last_exc = None
-        for browser in ("chrome120", "chrome110", "edge101"):
+        for browser in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
             try:
                 resp = c_req.get(page_url, impersonate=browser, timeout=20, headers=headers)
                 page_text = str(getattr(resp, "text", "") or "")
@@ -22078,7 +22045,7 @@ class DownloadManagerApp:
         origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'www.bestjavporn.com'}"
         c_req = get_curl_cffi_requests()
         last_exc = None
-        for browser in ("chrome120", "chrome110", "edge101"):
+        for browser in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
             session = None
             try:
                 session = self._track_network_session(c_req.Session(impersonate=browser))
@@ -22156,7 +22123,7 @@ class DownloadManagerApp:
         origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'www.javdock.com'}"
         c_req = get_curl_cffi_requests()
         last_exc = None
-        for browser in ("chrome120", "chrome110", "edge101"):
+        for browser in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
             session = None
             try:
                 session = self._track_network_session(c_req.Session(impersonate=browser))
@@ -24270,7 +24237,7 @@ class DownloadManagerApp:
 
         def _should_retry_slow_parallel_candidate(speed_bps, session_bytes, session_segments, now):
             source_site = _task_source_site_name(task)
-            threshold_bps = int(PARALLEL_HLS_SLOW_CANDIDATE_RETRY_THRESHOLD_BPS_BY_SITE.get(source_site, 0) or 0)
+            threshold_bps = int(PARALLEL_HLS_SLOW_CANDIDATE_RETRY_THRESHOLD_BPS_BY_SITE.get(source_site, 500 * 1024) or 0)
             if threshold_bps <= 0 or float(speed_bps or 0.0) >= threshold_bps:
                 return False
             if bool(_task_field_value(task, "_parallel_hls_slow_candidate_retry_attempted", False)):
