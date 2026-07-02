@@ -2,7 +2,7 @@
 
 Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔名 / 番號搜尋、多站備援、續傳、佇列管理與自動封裝為 Windows 較容易播放的 MP4。程式主要整合 `yt-dlp`、`curl_cffi`、`requests`、`ffmpeg`、`ffprobe` 與站台專用解析規則。
 
-目前版本：`20260605-3480`
+目前版本：`20260702-3720`
 
 ## 目前狀態
 
@@ -13,7 +13,7 @@ Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔
 - AV01 目前可解析授權 manifest 與 1080p 串流；若 native HLS 產物驗證失敗，會自動回退 ffmpeg 下載。
 - MissAV 舊續傳任務會在啟動載入時重新正規化番號與中文字幕檔名，避免頁面標題亂碼污染任務列表與續傳比對。
 - 番號搜尋會避開 BestJavPorn / JavDock 只回傳短預覽片段的假可下載來源，並保留其他搜尋頁作為自動換源候選。
-- BestJavPorn / JavDock 會解析本頁加密 API 與 player config 取得真正 HLS，避免誤抓推薦卡片的預覽影片。
+- BestJavPorn / JavDock 會解析本頁加密 API 與 player config 取得真正 HLS，避免誤抓推薦卡片的預覽影片。已支援繞過 JAVDock 經由 Google 翻譯代理傳輸的分段防盜鏈機制（包含 `image/png` 偽裝媒體處理），並引入全局常數統一優化 fMP4 格式中 `ftyp`、`moof`、`mdat`、`styp`、`sidx` 與 `free` 等箱體特徵的檢測與解封裝。
 - 85xvideo 會解析 WordPress / VideoJS 頁面內的直接 HLS source，並交由既有最高畫質與分段下載流程處理。
 - 部分成人或串流站台會因 CDN、地區、來源失效、Cloudflare 或站方變更而需要重新解析或改走備援搜尋。
 
