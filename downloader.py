@@ -70,7 +70,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260702-3710"
+APP_BUILD = "20260702-3720"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -441,7 +441,7 @@ def _extract_jav_code(value):
     if not match:
         return ""
     prefix = match.group(1).upper()
-    if prefix in ("EP", "SS", "BV"):
+    if prefix in NON_JAV_PREFIX_MARKERS:
         return ""
     suffix = (match.group(3) or "").upper()
     return f"{prefix}-{match.group(2)}{suffix}"
@@ -457,10 +457,10 @@ def _extract_hayav_jav_code(value):
         parsed = urllib.parse.urlparse(normalized_url)
         candidates.append(parsed.path.rstrip("/").split("/")[-1])
     for candidate in candidates:
-        match = re.search(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})(?:u?c)?\b", candidate, re.IGNORECASE)
+        match = HAYAV_JAV_CODE_REGEX.search(candidate)
         if match:
             prefix = match.group(1).upper()
-            if prefix in ("EP", "SS", "BV"):
+            if prefix in NON_JAV_PREFIX_MARKERS:
                 continue
             return f"{prefix}-{match.group(2)}"
     return ""
@@ -528,8 +528,7 @@ def _is_dood_family_transient_media_url(url):
     return any(marker in host for marker in DOOD_FAMILY_HOST_MARKERS)
 
 
-def _is_bestjavporn_transient_media_url(url):
-    return _is_dood_family_transient_media_url(url)
+_is_bestjavporn_transient_media_url = _is_dood_family_transient_media_url
 
 
 def _is_javninja_external_player_url(url):
@@ -943,6 +942,10 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
 )
 PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com", "ctyunxs.cn", "yximgs.com")
 PARALLEL_HLS_FMP4_BOX_MARKERS = (b"ftyp", b"moof", b"mdat", b"styp", b"sidx", b"free")
+PARALLEL_HLS_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PARALLEL_HLS_NON_VIDEO_MAGIC_PREFIXES = (b"<!DOCTYPE", b"<html", b"{", b"\x89PNG", b"GIF8", b"\xff\xd8\xff")
+NON_JAV_PREFIX_MARKERS = ("EP", "SS", "BV")
+HAYAV_JAV_CODE_REGEX = re.compile(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})(?:u?c)?\b", re.IGNORECASE)
 PARALLEL_HLS_XOR_FF_TABLE = bytes([b ^ 0xff for b in range(256)])
 PARALLEL_HLS_STANDARD_IMPERSONATE_BROWSERS = ("chrome120", "chrome110")
 PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS = ("chrome120", "chrome110", "edge101")
@@ -4986,7 +4989,7 @@ def _is_non_video_probe_payload(data, content_type=""):
     if any(marker in lowered_type for marker in ("text/html", "image/", "application/json")):
         return True
     prefix = (data or b"")[:128].lstrip()
-    return prefix.startswith((b"<!DOCTYPE", b"<html", b"{", b"\x89PNG", b"GIF8", b"\xff\xd8\xff"))
+    return prefix.startswith(PARALLEL_HLS_NON_VIDEO_MAGIC_PREFIXES)
 
 
 def _avbebe_manifest_looks_downloadable(manifest_url, referer=None, origin=None, timeout=12):
@@ -17838,7 +17841,7 @@ class DownloadManagerApp:
                     not wrapped_ts
                     and (
                         "image/" in content_type
-                        or body.startswith(b"\x89PNG\r\n\x1a\n")
+                        or body.startswith(PARALLEL_HLS_PNG_SIGNATURE)
                         or body.startswith(b"\xff\xd8\xff")
                         or body.startswith(b"GIF87a")
                         or body.startswith(b"GIF89a")
@@ -22948,21 +22951,37 @@ class DownloadManagerApp:
         return self._remove_parallel_hls_aes_padding(cipher.decrypt(encrypted))
 
     def _png_wrapped_ts_payload_offset(self, data):
-        data = bytes(data or b"")
-        if not data.startswith(b"\x89PNG\r\n\x1a\n") or len(data) < 80:
+        if not data:
+            return None
+        try:
+            view = memoryview(data)
+        except TypeError:
+            try:
+                view = memoryview(bytes(data))
+            except Exception:
+                return None
+        if len(view) < 80:
+            return None
+        if bytes(view[:8]) != PARALLEL_HLS_PNG_SIGNATURE:
             return None
         pos = 8
         try:
-            while pos + 12 <= len(data):
-                chunk_size = int.from_bytes(data[pos:pos + 4], "big")
-                chunk_type = data[pos + 4:pos + 8]
+            while pos + 12 <= len(view):
+                chunk_size = int.from_bytes(bytes(view[pos:pos + 4]), "big")
+                chunk_type = bytes(view[pos + 4:pos + 8])
                 pos += 12 + chunk_size
                 if chunk_type == b"IEND":
                     break
-            tail = data[pos:]
+            tail = view[pos:]
             if not tail:
                 return None
-            stripped_len = len(tail) - len(tail.lstrip(b"\xff\x00"))
+            stripped_len = 0
+            for i in range(len(tail)):
+                val = tail[i]
+                if val == 0xff or val == 0x00:
+                    stripped_len += 1
+                else:
+                    break
             actual_tail = tail[stripped_len:]
             if not actual_tail:
                 return None
@@ -22973,7 +22992,7 @@ class DownloadManagerApp:
             if xored_first == 0x47:
                 return pos + stripped_len, True
             if len(actual_tail) >= 8:
-                type_bytes = actual_tail[4:8]
+                type_bytes = bytes(actual_tail[4:8])
                 if type_bytes in PARALLEL_HLS_FMP4_BOX_MARKERS:
                     return pos + stripped_len, False
                 xored_type_bytes = type_bytes.translate(PARALLEL_HLS_XOR_FF_TABLE)
@@ -22988,15 +23007,22 @@ class DownloadManagerApp:
         if res is None:
             return None
         offset, needs_xor = res
-        tail = bytes(data)[offset:]
+        try:
+            view = memoryview(data)
+        except TypeError:
+            try:
+                view = memoryview(bytes(data))
+            except Exception:
+                return None
+        tail = view[offset:]
         if needs_xor:
-            return tail.translate(PARALLEL_HLS_XOR_FF_TABLE)
-        return tail
+            return tail.tobytes().translate(PARALLEL_HLS_XOR_FF_TABLE)
+        return tail.tobytes()
 
     def _looks_like_raw_media_bytes(self, data):
         if not data or len(data) < 8:
             return False
-        return data[0] == 0x47 or data[4:8] in PARALLEL_HLS_FMP4_BOX_MARKERS
+        return data[0] == 0x47 or bytes(data[4:8]) in PARALLEL_HLS_FMP4_BOX_MARKERS
 
     def _is_valid_parallel_hls_segment_data(self, data, content_type=""):
         if not data or len(data) < 16:
@@ -23022,7 +23048,11 @@ class DownloadManagerApp:
             return False
         if self._unwrap_png_wrapped_ts_segment_bytes(data):
             return True
-        return data[0] == 0x47
+        if data[0] == 0x47:
+            return True
+        if data[4:8] in PARALLEL_HLS_FMP4_BOX_MARKERS:
+            return True
+        return False
 
     def _parallel_hls_allows_mislabelled_media(self, host):
         host = str(host or "").lower()
@@ -23035,7 +23065,7 @@ class DownloadManagerApp:
         if any(marker in lowered_type for marker in ("text/html", "image/", "application/json")):
             return True
         prefix = (data or b"")[:128].lstrip()
-        return prefix.startswith((b"<!DOCTYPE", b"<html", b"{", b"\x89PNG", b"GIF8", b"\xff\xd8\xff"))
+        return prefix.startswith(PARALLEL_HLS_NON_VIDEO_MAGIC_PREFIXES)
 
     def _is_valid_parallel_hls_part_file(self, path):
         if not self._has_nonempty_file(path):
@@ -30734,7 +30764,7 @@ class DownloadManagerApp:
         if "jable.tv" in parsed_url.netloc:
             self._set_task_parse_ui(item_id, key="eta_site_jable", fallback="正在解析 Jable...")
             c_req = get_curl_cffi_requests()
-            resp = c_req.get(url, impersonate="chrome110", timeout=15)
+            resp = c_req.get(url, impersonate="chrome124", timeout=15)
             m = RE_JABLE_M3U8_1.search(resp.text)
             if not m:
                 m = RE_JABLE_M3U8_2.search(resp.text)
