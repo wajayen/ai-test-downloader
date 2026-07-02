@@ -41,7 +41,10 @@ except Exception:
 try:
     from Crypto.Cipher import AES as CryptoAES
 except Exception:
-    CryptoAES = None
+    try:
+        from Cryptodome.Cipher import AES as CryptoAES
+    except Exception:
+        CryptoAES = None
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -67,7 +70,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260701-3700"
+APP_BUILD = "20260702-3710"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -180,6 +183,7 @@ FFMPEG_HLS_RECONNECT_OPTIONS = (
 FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS = "15000000"
 FFMPEG_FAST_HLS_HTTP_SITES = frozenset((
     "85xvideo",
+    "18av",
     "18jav",
     "777tv",
     "99itv",
@@ -515,19 +519,17 @@ def _is_getav_index_playlist_url(url):
     return "worldstatic.com" in host and path.endswith("/index.txt") and "/cdn/assets/deliveries/" in path
 
 
-def _is_bestjavporn_transient_media_url(url):
+def _is_dood_family_transient_media_url(url):
     normalized = _normalize_download_url(url)
     if not normalized:
         return False
     parsed = urllib.parse.urlparse(normalized)
     host = (parsed.netloc or "").lower()
-    if "bestjavporn.com" in host:
-        return False
     return any(marker in host for marker in DOOD_FAMILY_HOST_MARKERS)
 
 
-def _is_dood_family_transient_media_url(url):
-    return _is_bestjavporn_transient_media_url(url)
+def _is_bestjavporn_transient_media_url(url):
+    return _is_dood_family_transient_media_url(url)
 
 
 def _is_javninja_external_player_url(url):
@@ -1191,6 +1193,7 @@ PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST = {
     "ppqrrs.com": 12,
     "adfg8.vip": 12,
     "phimgood.com": 12,
+    "streamfastpro": 15,
 }
 PARALLEL_HLS_SHUTDOWN_SEGMENT_TIMEOUT_SECONDS = 1.5
 PARALLEL_HLS_SEGMENT_RETRIES = 10
@@ -1201,6 +1204,7 @@ PARALLEL_HLS_SEGMENT_RETRIES_BY_HOST = {
     "ppqrrs.com": 16,
     "adfg8.vip": 16,
     "phimgood.com": 16,
+    "streamfastpro": 16,
 }
 PARALLEL_HLS_RESUME_VALIDATION_VERSION = 2
 PARALLEL_HLS_FAST_TRANSPORT_REMUX_MIN_SEGMENTS = 256
@@ -5836,12 +5840,13 @@ def _clean_supjav_title(raw_title, page_url="", fallback_title="SupJav"):
 def _extract_supjav_external_file_links(page_text, base_url="https://supjav.com/zh/"):
     links = []
     text = str(page_text or "")
-    for match in re.findall(r"https?://[^\"'<> ]+?dl=[^\"'<> ]+", text):
-        normalized = _normalize_download_url(html.unescape(match).rstrip(");,"))
-        if normalized and "supjav.com" in urllib.parse.urlsplit(normalized).netloc.lower() and normalized not in links:
-            links.append(normalized)
-    for match in re.findall(r'href=["\']([^"\']*[\?&]dl=[^"\']+)["\']', text, re.IGNORECASE):
-        normalized = _normalize_download_url(urllib.parse.urljoin(base_url, html.unescape(match).rstrip(");,")))
+    raw_matches = re.findall(r"https?://[^\"'<> ]+?dl=[^\"'<> ]+", text)
+    raw_matches.extend(
+        urllib.parse.urljoin(base_url, match)
+        for match in re.findall(r'href=["\']([^"\']*[\?&]dl=[^"\']+)["\']', text, re.IGNORECASE)
+    )
+    for raw in raw_matches:
+        normalized = _normalize_download_url(html.unescape(raw).rstrip(");,"))
         if normalized and "supjav.com" in urllib.parse.urlsplit(normalized).netloc.lower() and normalized not in links:
             links.append(normalized)
     return links
@@ -22963,33 +22968,29 @@ class DownloadManagerApp:
                 return None
             first_byte = actual_tail[0]
             if first_byte == 0x47:
-                return pos + stripped_len
+                return pos + stripped_len, False
             xored_first = first_byte ^ 0xff
             if xored_first == 0x47:
-                return pos + stripped_len
+                return pos + stripped_len, True
             if len(actual_tail) >= 8:
                 type_bytes = actual_tail[4:8]
                 if type_bytes in PARALLEL_HLS_FMP4_BOX_MARKERS:
-                    return pos + stripped_len
+                    return pos + stripped_len, False
                 xored_type_bytes = type_bytes.translate(PARALLEL_HLS_XOR_FF_TABLE)
                 if xored_type_bytes in PARALLEL_HLS_FMP4_BOX_MARKERS:
-                    return pos + stripped_len
+                    return pos + stripped_len, True
             return None
         except Exception:
             return None
 
     def _unwrap_png_wrapped_ts_segment_bytes(self, data):
-        offset = self._png_wrapped_ts_payload_offset(data)
-        if offset is None:
+        res = self._png_wrapped_ts_payload_offset(data)
+        if res is None:
             return None
+        offset, needs_xor = res
         tail = bytes(data)[offset:]
-        if len(tail) >= 8:
-            type_bytes = tail[4:8]
-            if tail[0] != 0x47 and type_bytes not in PARALLEL_HLS_FMP4_BOX_MARKERS:
-                xored_first = tail[0] ^ 0xff
-                xored_type_bytes = type_bytes.translate(PARALLEL_HLS_XOR_FF_TABLE)
-                if xored_first == 0x47 or xored_type_bytes in PARALLEL_HLS_FMP4_BOX_MARKERS:
-                    return tail.translate(PARALLEL_HLS_XOR_FF_TABLE)
+        if needs_xor:
+            return tail.translate(PARALLEL_HLS_XOR_FF_TABLE)
         return tail
 
     def _looks_like_raw_media_bytes(self, data):
@@ -23046,6 +23047,61 @@ class DownloadManagerApp:
         except Exception:
             return False
 
+    def _fetch_parallel_hls_segment_sample(self, segment_url, request_headers, segment_has_key=False, prefer_curl=False, stop_event=None):
+        is_javdock = "video.javdock.com" in request_headers.get("Referer", "")
+        probe_headers = dict(request_headers)
+        if not segment_has_key and not is_javdock:
+            probe_headers.setdefault("Range", "bytes=0-511")
+
+        def _stop_requested():
+            return bool(
+                (stop_event is not None and stop_event.is_set())
+                or getattr(self, "_shutdown_stop_requested", False)
+                or self._shutdown_started
+            )
+
+        def _fetch_with_curl():
+            if _stop_requested():
+                raise StopDownloadException("stop requested")
+            session = self._parallel_hls_curl_session()
+            resp = session.get(
+                segment_url,
+                timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS,
+                headers=probe_headers,
+            )
+            if _stop_requested():
+                raise StopDownloadException("stop requested")
+            status_code = int(getattr(resp, "status_code", 0) or 0)
+            if status_code >= 400:
+                raise Exception(f"HTTP {status_code}")
+            content_type = str((getattr(resp, "headers", {}) or {}).get("Content-Type") or "").lower()
+            data = bytes(getattr(resp, "content", b"") or b"")
+            if not segment_has_key and not is_javdock:
+                data = data[:512]
+            return data, content_type
+
+        def _fetch_with_urllib():
+            if _stop_requested():
+                raise StopDownloadException("stop requested")
+            with urllib.request.urlopen(urllib.request.Request(segment_url, headers=probe_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                content_type = str(resp.headers.get("Content-Type") or "").lower()
+                data = resp.read() if (segment_has_key or is_javdock) else resp.read(512)
+            if _stop_requested():
+                raise StopDownloadException("stop requested")
+            return data, content_type
+
+        fetch_order = (_fetch_with_curl, _fetch_with_urllib) if prefer_curl else (_fetch_with_urllib, _fetch_with_curl)
+        last_exc = None
+        for fetcher in fetch_order:
+            try:
+                return fetcher()
+            except StopDownloadException:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                continue
+        raise last_exc or Exception("segment sample fetch failed")
+
     def _preflight_parallel_hls_segments(self, segments, headers, sample_limit=3, stop_event=None, prefer_curl=False):
         google_segments = [
             segment
@@ -23069,42 +23125,29 @@ class DownloadManagerApp:
             if not segment_url:
                 continue
             segment_host = urllib.parse.urlsplit(segment_url).netloc.lower()
-            probe_headers = dict(request_headers)
             segment_has_key = bool((segment.get("key") or {}).get("uri"))
-            is_javdock = "video.javdock.com" in probe_headers.get("Referer", "")
-            if not segment_has_key and not is_javdock:
-                probe_headers.setdefault("Range", "bytes=0-511")
             try:
-                with urllib.request.urlopen(urllib.request.Request(segment_url, headers=probe_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
-                    content_type = str(resp.headers.get("Content-Type") or "").lower()
-                    data = resp.read() if (segment_has_key or is_javdock) else resp.read(512)
+                data, content_type = self._fetch_parallel_hls_segment_sample(
+                    segment_url,
+                    request_headers,
+                    segment_has_key=segment_has_key,
+                    prefer_curl=prefer_curl,
+                    stop_event=stop_event,
+                )
             except Exception:
-                if not prefer_curl:
-                    continue
-                try:
-                    data, content_type = self._fetch_parallel_hls_segment_payload(
-                        segment_url,
-                        probe_headers,
-                        prefer_curl=True,
-                        stop_event=stop_event,
-                    )
-                    if not segment_has_key and not is_javdock:
-                        data = bytes(data or b"")[:512]
-                except Exception:
-                    continue
+                continue
             if segment_has_key:
                 data = self._decrypt_parallel_hls_segment_data(data, segment, key_cache)
             allow_mislabelled_media = (
                 self._parallel_hls_allows_mislabelled_media(segment_host)
                 and self._is_valid_parallel_hls_segment_media_bytes(data)
             )
-            if self._is_unsupported_parallel_hls_segment_payload(data, content_type) and not allow_mislabelled_media:
-                message = f"invalid HLS segment content: {content_type or 'unknown'}"
-                if "googleusercontent.com" in segment_host:
-                    raise ParallelHlsUnsupportedSegmentContentException(message)
-                raise Exception(message)
-            if not (allow_mislabelled_media or self._is_valid_parallel_hls_segment_data(data, content_type)):
-                message = f"invalid HLS segment content: {content_type or 'unknown'}"
+            is_unsupported = self._is_unsupported_parallel_hls_segment_payload(data, content_type) and not allow_mislabelled_media
+            is_invalid = not (allow_mislabelled_media or self._is_valid_parallel_hls_segment_data(data, content_type))
+            if is_unsupported or is_invalid:
+                hex_preview = (data or b"")[:128].hex()
+                repr_preview = repr((data or b"")[:128])
+                message = f"invalid HLS segment content: {content_type or 'unknown'} (length={len(data or b'')}, hex={hex_preview}, repr={repr_preview})"
                 if "googleusercontent.com" in segment_host:
                     raise ParallelHlsUnsupportedSegmentContentException(message)
                 raise Exception(message)
@@ -23138,13 +23181,12 @@ class DownloadManagerApp:
             return False
         request_headers = dict(headers or {})
         request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
-        is_javdock = "video.javdock.com" in request_headers.get("Referer", "")
-        if not is_javdock:
-            request_headers.setdefault("Range", "bytes=0-511")
         try:
-            with urllib.request.urlopen(urllib.request.Request(segment_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
-                content_type = str(resp.headers.get("Content-Type") or "").lower()
-                data = resp.read() if is_javdock else resp.read(512)
+            data, content_type = self._fetch_parallel_hls_segment_sample(
+                segment_url,
+                request_headers,
+                segment_has_key=False,
+            )
         except Exception:
             return False
         return self._is_unsupported_parallel_hls_segment_payload(data, content_type)
@@ -26357,11 +26399,10 @@ class DownloadManagerApp:
                 ]
             if referer:
                 cmd += ["-referer", referer]
-            if use_fast_hls_http:
-                cmd += [
-                    "-extension_picky",
-                    "0",
-                ]
+            cmd += [
+                "-extension_picky",
+                "0",
+            ]
             cmd += list(FFMPEG_HLS_RECONNECT_OPTIONS)
             if resume_seek_seconds > 0:
                 cmd += ["-ss", f"{resume_seek_seconds:.3f}"]
@@ -27780,6 +27821,7 @@ class DownloadManagerApp:
             )
 
     def _should_trigger_resume_low_speed_reanalysis(self, task, source_url, save_dir, speed_bps, is_mp3=False, now=None, allow_zero_progress=False):
+        return False
         if task is None:
             return False
         if bool(_task_field_value(task, "_resume_low_speed_reanalysis_attempted", False)):
