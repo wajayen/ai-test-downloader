@@ -70,7 +70,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260702-3720"
+APP_BUILD = "20260714-3744"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -915,6 +915,8 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "vip.dytt-see.com",
     "dytt-kan.com",
     "vip.dytt-kan.com",
+    "dytt-network.com",
+    "vip.dytt-network.com",
     "surrit.com",
     "upload18.org",
     "321watch.workers.dev",
@@ -940,8 +942,12 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "ryiplay",
     "vodcnd",
 )
-PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com", "ctyunxs.cn", "yximgs.com")
+PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com", "ctyunxs.cn", "yximgs.com", "tiktokcdn.com", "byteoversea.com")
 PARALLEL_HLS_FMP4_BOX_MARKERS = (b"ftyp", b"moof", b"mdat", b"styp", b"sidx", b"free")
+PARALLEL_HLS_RATE_LIMIT_STATUS_CODES = (403, 429, 502, 503, 504)
+PARALLEL_HLS_RATE_LIMIT_ERROR_KEYWORDS = ("429", "too many requests", "rate limit", "503", "502", "504", "403 forbidden", "connection reset", "connection aborted", "timeout")
+GIMY_NETLOC_MARKERS = ("gimy", "gitube")
+GIMY_DOMAINS = ("gimy.cc", "gimy.tw", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com", "gitube.tv")
 PARALLEL_HLS_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PARALLEL_HLS_NON_VIDEO_MAGIC_PREFIXES = (b"<!DOCTYPE", b"<html", b"{", b"\x89PNG", b"GIF8", b"\xff\xd8\xff")
 NON_JAV_PREFIX_MARKERS = ("EP", "SS", "BV")
@@ -996,7 +1002,7 @@ PARALLEL_HLS_INFERRED_SITE_MAPPINGS = (
     (("ikanbot.com",), "ikanbot"),
     (("movieffm.net",), "movieffm"),
     (("hayav.com",), "hayav"),
-    (("gimy",), "gimy"),
+    (("gimy", "gitube"), "gimy"),
     (("xiaoyakankan.",), "xiaoyakankan"),
     (("missav",), "missav"),
     (("njav.com", "upload18.org", "321watch.workers.dev"), "njav"),
@@ -1054,6 +1060,8 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "vip.dytt-see.com": 24,
     "dytt-kan.com": 24,
     "vip.dytt-kan.com": 24,
+    "dytt-network.com": 24,
+    "vip.dytt-network.com": 24,
     "lz-cdn": 48,
     "gsuus.com": 24,
     "lz-cdn.com": 24,
@@ -1068,7 +1076,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "121126.com": 48,
     "ggjav.com": 60,
     "surrit.com": 45,
-    "streamfastpro": 32,
+    "streamfastpro": 24,
     "mushroomtrack.com": 24,
     "hls.sb-cd.com": 24,
     "worldstatic.com": 48,
@@ -1106,7 +1114,7 @@ PARALLEL_HLS_HOST_WORKER_BUDGET_BY_HOST = {
     "huabf.com": 144,
     "worldstatic.com": 144,
     "surrit.com": 90,
-    "streamfastpro": 96,
+    "streamfastpro": 32,
     "tiktokcdn.com": 108,
     "ts2ff6yms.com": 144,
     "upload18.org": 72,
@@ -1175,6 +1183,8 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "vip.dytt-see.com",
     "dytt-kan.com",
     "vip.dytt-kan.com",
+    "dytt-network.com",
+    "vip.dytt-network.com",
     "lz-cdn",
     "lz-cdn.com",
     "yuglf.com",
@@ -1188,6 +1198,7 @@ PARALLEL_HLS_SINGLE_TASK_BOOST_HOST_MARKERS = (
     "ffzy-play",
 )
 PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE = 20000
+PARALLEL_HLS_STREAM_CHUNK_SIZE = 65536
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS = 6
 PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS_BY_HOST = {
     "worldstatic.com": 2,
@@ -6837,6 +6848,7 @@ SUPPORTED_DOWNLOAD_PAGE_NETLOC_MARKERS = (
     "gimy01.tv",
     "gimy.tube",
     "gimytube.com",
+    "gitube.tv",
     "xiaoyakankan",
     "yfsp.tv",
     "tiktok.com",
@@ -6881,6 +6893,7 @@ VIDEO_SEARCH_SUPPORTED_SITE_MARKERS = (
     "gimy01.tv",
     "gimy.tube",
     "gimytube.com",
+    "gitube.tv",
     "avbebe.com",
     "avjoy.me",
     "bestjavporn.com",
@@ -6934,6 +6947,7 @@ VIDEO_SEARCH_SITE_PRIORITY = {
     "gimy01.tv": 16,
     "gimy.tube": 17,
     "gimytube.com": 17,
+    "gitube.tv": 17,
     "3kor.com": 17,
     "dramasq.io": 17,
     "olevod.com": 18,
@@ -6992,6 +7006,7 @@ VIDEO_SEARCH_PLAYLIST_DETAIL_SITE_MARKERS = (
     "gimy01.tv",
     "gimy.tube",
     "gimytube.com",
+    "gitube.tv",
     "movieffm.net",
     "nnyy.in",
     "xiaoyakankan.io",
@@ -8788,6 +8803,7 @@ def _video_search_result_is_downloadable(result):
         "gimy01.tv",
         "gimy.tube",
         "gimytube.com",
+        "gitube.tv",
         "18jav.tv",
         "18av.mm-cg.com",
         "99itv.net",
@@ -12562,7 +12578,7 @@ class DownloadManagerApp:
         if parsed_new_url and ("anime1.me" in parsed_new_url.netloc.lower() or "anime1.pw" in parsed_new_url.netloc.lower()) and ("/category/" in parsed_new_url.path.lower() or "cat" in new_url_query):
             self._start_background_parse(fetch_anime1)
             return
-        if "gimy" in lowered and _is_gimy_detail_path(lowered):
+        if any(marker in lowered for marker in GIMY_NETLOC_MARKERS) and _is_gimy_detail_path(lowered):
             self._start_background_parse(fetch_gimy_detail)
             return
         if ("hanime1.me" in lowered or "hanimeone.me" in lowered) and "list=" in lowered:
@@ -13254,7 +13270,7 @@ class DownloadManagerApp:
     def _schedule_summary_refresh(self):
         if self._shutdown_requested():
             return
-        if self._summary_refresh_scheduled:
+        if getattr(self, "_summary_refresh_scheduled", False):
             return
         self._summary_refresh_scheduled = True
         try:
@@ -14115,6 +14131,7 @@ class DownloadManagerApp:
             "gimy01.tv": "gimy",
             "gimy.tube": "gimy",
             "gimytube.com": "gimy",
+            "gitube.tv": "gimy",
             "javfilms.com": "javfilms",
             "18jav.tv": "18jav",
             "hohoj.tv": "hohoj",
@@ -14163,7 +14180,7 @@ class DownloadManagerApp:
                 {"url": episode_url, "title": title}
                 for episode_url, title in _extract_olevod_episode_entries(page_text, normalized_url, page_title or query_text or "Olevod")
             ]
-        if site in ("gimy.cc", "gimy.tw", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com") and _is_gimy_detail_path(parsed.path):
+        if site in GIMY_DOMAINS and _is_gimy_detail_path(parsed.path):
             base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
             drama_name = _clean_gimy_title(page_title or "Gimy", fallback_title=page_title or query_text or "Gimy", page_url=normalized_url)
             entries = self._extract_gimy_detail_entries(page_text, base, drama_name)
@@ -15199,7 +15216,7 @@ class DownloadManagerApp:
                 return collected
             if jav_code:
                 return collected
-            for domain in ("gimy.tw", "gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com"):
+            for domain in ("gimy.tw", "gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com", "gitube.tv"):
                 for path_marker in ("/voddetail", "/detail", "/title", "/watch"):
                     for primary in primary_queries:
                         query = f"{primary} site:{domain}{path_marker}"
@@ -17484,7 +17501,17 @@ class DownloadManagerApp:
             self._set_task_resume_temp_file(task, item_id, output_path)
         else:
             self._set_task_output_file(task, item_id, output_path)
-        if self._can_accept_existing_output(task, item_id, output_path, temp=temp):
+        try:
+            can_accept = self._can_accept_existing_output(task, item_id, output_path, temp=temp)
+        except TypeError as exc:
+            if "unexpected keyword argument" in str(exc) or "argument" in str(exc):
+                try:
+                    can_accept = self._can_accept_existing_output(task, item_id, output_path)
+                except TypeError:
+                    raise exc
+            else:
+                raise
+        if can_accept:
             self._mark_existing_file_complete(item_id, message or self._ui_text("eta_file_exists", "檔案已存在"))
             return True
         return False
@@ -22836,8 +22863,9 @@ class DownloadManagerApp:
     def _fetch_hls_text_for_parallel(self, url, headers):
         request_headers = dict(headers or {})
         request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+        playlist_timeout = max(float(PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS), 15.0)
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=request_headers), timeout=playlist_timeout) as resp:
                 return resp.read().decode("utf-8", "ignore")
         except Exception as urllib_exc:
             try:
@@ -22845,7 +22873,7 @@ class DownloadManagerApp:
                 resp = c_req.get(
                     url,
                     impersonate="chrome120",
-                    timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS,
+                    timeout=playlist_timeout,
                     headers=request_headers,
                 )
                 if getattr(resp, "status_code", 0) and int(resp.status_code) >= 400:
@@ -22867,6 +22895,7 @@ class DownloadManagerApp:
         if not any(line.startswith("#EXT-X-ENDLIST") for line in lines):
             raise Exception("parallel HLS only supports complete VOD playlists")
         active_key = None
+        active_map = None
         sequence_number = 0
         pending_duration = 0.0
         segments = []
@@ -22876,6 +22905,18 @@ class DownloadManagerApp:
                     sequence_number = int(line.split(":", 1)[1].strip())
                 except Exception:
                     sequence_number = 0
+            elif line.startswith("#EXT-X-MAP"):
+                attrs = self._parse_hls_attribute_list(line.split(":", 1)[1] if ":" in line else "")
+                map_uri = attrs.get("URI", "")
+                if map_uri:
+                    active_map = {
+                        "index": -1,
+                        "sequence": -1,
+                        "url": urllib.parse.urljoin(playlist_url, map_uri),
+                        "duration": 0.0,
+                        "key": None,
+                        "is_init": True,
+                    }
             elif line.startswith("#EXT-X-KEY"):
                 attrs = self._parse_hls_attribute_list(line.split(":", 1)[1] if ":" in line else "")
                 method = str(attrs.get("METHOD", "") or "").upper()
@@ -22906,6 +22947,8 @@ class DownloadManagerApp:
                 pending_duration = 0.0
         if not segments:
             raise Exception("parallel HLS playlist has no media segments")
+        if active_map:
+            segments.insert(0, active_map)
         return segments
 
     def _fetch_parallel_hls_keys(self, segments, headers, stop_event=None):
@@ -23027,7 +23070,7 @@ class DownloadManagerApp:
     def _is_valid_parallel_hls_segment_data(self, data, content_type=""):
         if not data or len(data) < 16:
             return False
-        if self._unwrap_png_wrapped_ts_segment_bytes(data):
+        if self._png_wrapped_ts_payload_offset(data) is not None:
             return True
         lowered_type = str(content_type or "").lower()
         if self._is_unsupported_parallel_hls_segment_payload(data, lowered_type):
@@ -23039,14 +23082,14 @@ class DownloadManagerApp:
     def _is_valid_parallel_hls_segment_media_bytes(self, data):
         if not data or len(data) < 16:
             return False
-        if self._unwrap_png_wrapped_ts_segment_bytes(data):
+        if self._png_wrapped_ts_payload_offset(data) is not None:
             return True
         return self._looks_like_raw_media_bytes(data)
 
     def _is_parallel_hls_transport_stream_payload(self, data):
         if not data or len(data) < 188:
             return False
-        if self._unwrap_png_wrapped_ts_segment_bytes(data):
+        if self._png_wrapped_ts_payload_offset(data) is not None:
             return True
         if data[0] == 0x47:
             return True
@@ -23060,7 +23103,7 @@ class DownloadManagerApp:
 
     def _is_unsupported_parallel_hls_segment_payload(self, data, content_type=""):
         lowered_type = str(content_type or "").lower()
-        if self._unwrap_png_wrapped_ts_segment_bytes(data):
+        if self._png_wrapped_ts_payload_offset(data) is not None:
             return False
         if any(marker in lowered_type for marker in ("text/html", "image/", "application/json")):
             return True
@@ -23142,7 +23185,11 @@ class DownloadManagerApp:
         request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
         sampled_segments = []
         seen_sample_urls = set()
-        for segment in list(segments or [])[:max(int(sample_limit or 0), 1)]:
+        for segment in list(segments or []):
+            if segment.get("is_init"):
+                continue
+            if len(sampled_segments) >= max(int(sample_limit or 0), 1):
+                break
             segment_url = _normalize_download_url(segment.get("url", ""))
             if segment_url and segment_url not in seen_sample_urls:
                 seen_sample_urls.add(segment_url)
@@ -23349,7 +23396,7 @@ class DownloadManagerApp:
                 return max(int(host_retries or 0), 1)
         return max(int(PARALLEL_HLS_SEGMENT_RETRIES), 1)
 
-    def _fetch_parallel_hls_segment_payload(self, segment_url, request_headers, prefer_curl=False, stop_event=None):
+    def _fetch_parallel_hls_segment_payload(self, segment_url, request_headers, prefer_curl=False, stop_event=None, session=None):
         def _stop_requested():
             return bool(
                 (stop_event is not None and stop_event.is_set())
@@ -23363,8 +23410,8 @@ class DownloadManagerApp:
         def _fetch_with_curl():
             if _stop_requested():
                 raise StopDownloadException("stop requested")
-            session = self._parallel_hls_curl_session()
-            resp = session.get(
+            use_session = session if session is not None else self._parallel_hls_curl_session()
+            resp = use_session.get(
                 segment_url,
                 timeout=_segment_timeout(),
                 headers=request_headers,
@@ -23399,7 +23446,7 @@ class DownloadManagerApp:
                 continue
         raise last_exc or Exception("parallel HLS segment fetch failed")
 
-    def _stream_parallel_hls_segment_payload_to_file(self, segment_url, request_headers, temp_part_path, prefer_curl=False, stop_event=None):
+    def _stream_parallel_hls_segment_payload_to_file(self, segment_url, request_headers, temp_part_path, prefer_curl=False, stop_event=None, session=None):
         def _stop_requested():
             return bool(
                 (stop_event is not None and stop_event.is_set())
@@ -23428,8 +23475,8 @@ class DownloadManagerApp:
         def _stream_with_curl():
             if _stop_requested():
                 raise StopDownloadException("stop requested")
-            session = self._parallel_hls_curl_session()
-            resp = session.get(
+            use_session = session if session is not None else self._parallel_hls_curl_session()
+            resp = use_session.get(
                 segment_url,
                 timeout=_segment_timeout(),
                 headers=request_headers,
@@ -23446,8 +23493,8 @@ class DownloadManagerApp:
                 expected_length = _content_length_from_headers(resp_headers)
                 head = b""
                 total = 0
-                with open(temp_part_path, "wb") as out_f:
-                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                with open(temp_part_path, "wb", buffering=524288) as out_f:
+                    for chunk in resp.iter_content(chunk_size=PARALLEL_HLS_STREAM_CHUNK_SIZE):
                         if _stop_requested():
                             raise StopDownloadException("stop requested")
                         if not chunk:
@@ -23476,11 +23523,11 @@ class DownloadManagerApp:
                 expected_length = _content_length_from_headers(resp.headers)
                 head = b""
                 total = 0
-                with open(temp_part_path, "wb") as out_f:
+                with open(temp_part_path, "wb", buffering=524288) as out_f:
                     while True:
                         if _stop_requested():
                             raise StopDownloadException("stop requested")
-                        chunk = resp.read(1024 * 1024)
+                        chunk = resp.read(PARALLEL_HLS_STREAM_CHUNK_SIZE)
                         if not chunk:
                             break
                         if len(head) < 512:
@@ -23508,15 +23555,17 @@ class DownloadManagerApp:
         raise last_exc or Exception("parallel HLS segment stream failed")
 
     def _parallel_hls_segment_error_is_rate_limited(self, exc):
-        try:
-            if int(getattr(exc, "code", 0) or 0) == 429:
-                return True
-        except Exception:
-            pass
+        for attr in ("code", "status_code"):
+            try:
+                val = int(getattr(exc, attr, 0) or 0)
+                if val in PARALLEL_HLS_RATE_LIMIT_STATUS_CODES:
+                    return True
+            except Exception:
+                pass
         text = str(exc or "").lower()
-        return "429" in text or "too many requests" in text or "rate limit" in text
+        return any(kw in text for kw in PARALLEL_HLS_RATE_LIMIT_ERROR_KEYWORDS)
 
-    def _download_parallel_hls_segment(self, segment, part_path, headers, key_cache, stop_event, prefer_curl=False):
+    def _download_parallel_hls_segment(self, segment, part_path, headers, key_cache, stop_event, prefer_curl=False, session=None):
         if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
             raise StopDownloadException("stop requested")
         if self._is_valid_parallel_hls_part_file(part_path):
@@ -23552,8 +23601,9 @@ class DownloadManagerApp:
                         temp_part_path,
                         prefer_curl=bool(prefer_curl and not is_google_segment),
                         stop_event=stop_event,
+                        session=session,
                     )
-                    if self._unwrap_png_wrapped_ts_segment_bytes(head):
+                    if self._png_wrapped_ts_payload_offset(head) is not None:
                         with open(temp_part_path, "rb") as part_f:
                             raw_part_data = part_f.read()
                         unwrapped_part_data = self._unwrap_png_wrapped_ts_segment_bytes(raw_part_data)
@@ -23580,6 +23630,7 @@ class DownloadManagerApp:
                     request_headers,
                     prefer_curl=bool(prefer_curl and not is_google_segment),
                     stop_event=stop_event,
+                    session=session,
                 )
                 if segment_has_key:
                     data = self._decrypt_parallel_hls_segment_data(data, segment, key_cache)
@@ -23614,12 +23665,14 @@ class DownloadManagerApp:
                     pass
                 if attempt >= retry_count - 1:
                     break
+                import random
+                jitter = random.uniform(0.8, 1.2)
                 if is_google_segment:
-                    delay = PARALLEL_HLS_GOOGLE_RETRY_DELAYS[min(attempt, len(PARALLEL_HLS_GOOGLE_RETRY_DELAYS) - 1)]
+                    delay = PARALLEL_HLS_GOOGLE_RETRY_DELAYS[min(attempt, len(PARALLEL_HLS_GOOGLE_RETRY_DELAYS) - 1)] * jitter
                 elif self._parallel_hls_segment_error_is_rate_limited(exc):
-                    delay = min(2.0 * (attempt + 1), 12.0)
+                    delay = min(2.0 * (attempt + 1), 12.0) * jitter
                 else:
-                    delay = min(0.5 * (attempt + 1), 3.0)
+                    delay = min(0.5 * (attempt + 1), 3.0) * jitter
                 if stop_event.wait(delay) or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
                     raise StopDownloadException("stop requested")
         raise last_exc or Exception("parallel HLS segment download failed")
@@ -23781,15 +23834,8 @@ class DownloadManagerApp:
         playlist_resolved_at = time.time()
         if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
             raise StopDownloadException("shutdown requested")
-        if "#EXT-X-MAP" in str(playlist_text or "").upper():
-            write_error_log(
-                "parallel hls skipped fmp4 playlist",
-                Exception("parallel HLS skipped fragmented MP4 playlist"),
-                url=media_url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-            )
-            return False
+        # Enforce parallel HLS for fragmented MP4 playlists containing #EXT-X-MAP
+        # We will parse and download the init segment as part of the segment list.
         segments = self._parse_parallel_hls_segments(media_url, playlist_text)
         original_segment_count = len(segments)
         if original_segment_count > PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE:
@@ -23864,6 +23910,7 @@ class DownloadManagerApp:
         stop_event = threading.Event()
         self._register_parallel_hls_stop_event(item_id, stop_event)
         key_cache = {}
+        thread_local = threading.local()
         transport_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ts"
         merged_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.mp4"
         concat_list_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ffconcat"
@@ -24351,6 +24398,11 @@ class DownloadManagerApp:
             if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=self._disk_full_pause_note()):
                 stop_event.set()
                 raise StopDownloadException("disk space low")
+            session = getattr(thread_local, "session", None)
+            if session is None:
+                c_req = get_curl_cffi_requests()
+                session = c_req.Session()
+                thread_local.session = session
             try:
                 part_size = self._download_parallel_hls_segment(
                     segment,
@@ -24359,6 +24411,7 @@ class DownloadManagerApp:
                     key_cache,
                     stop_event,
                     prefer_curl=prefer_curl_segments,
+                    session=session,
                 )
             except OSError as exc:
                 if _is_no_space_left_error(exc):
@@ -26444,7 +26497,7 @@ class DownloadManagerApp:
             else:
                 cmd += ["-c", "copy"]
             cmd += [active_output_path]
-
+            print(f"DEBUG: running ffmpeg command: {cmd}")
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -31601,7 +31654,7 @@ class DownloadManagerApp:
             self._download_task_internal(preferred_url, item_id, save_dir, use_impersonate, is_mp3)
             return
 
-        if "gimy" in parsed_url.netloc and _is_gimy_detail_path(parsed_url.path):
+        if any(marker in parsed_url.netloc.lower() for marker in GIMY_NETLOC_MARKERS) and _is_gimy_detail_path(parsed_url.path):
             self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             headers = {"User-Agent": DEFAULT_USER_AGENT, "Referer": url}
@@ -31710,7 +31763,7 @@ class DownloadManagerApp:
                 raise last_episode_error
             return
 
-        if "gimy" in parsed_url.netloc and "/eps/" in parsed_url.path:
+        if any(marker in parsed_url.netloc.lower() for marker in GIMY_NETLOC_MARKERS) and "/eps/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             stream_candidates = []
@@ -32193,7 +32246,7 @@ class DownloadManagerApp:
             )
             return
 
-        if "gimy" in parsed_url.netloc and _is_gimy_play_path(parsed_url.path):
+        if any(marker in parsed_url.netloc.lower() for marker in GIMY_NETLOC_MARKERS) and _is_gimy_play_path(parsed_url.path):
             self._set_task_parse_ui(item_id, key="eta_site_gimy", fallback="正在解析 Gimy 頁面...")
             c_req = get_curl_cffi_requests()
             resp = c_req.get(url, impersonate="chrome110", timeout=20, headers={"Referer": url})
