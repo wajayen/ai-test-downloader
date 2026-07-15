@@ -70,7 +70,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260715-3752"
+APP_BUILD = "20260715-3753"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -23979,6 +23979,8 @@ class DownloadManagerApp:
         self._register_parallel_hls_stop_event(item_id, stop_event)
         key_cache = {}
         thread_local = threading.local()
+        sessions_to_clean = []
+        sessions_lock = threading.Lock()
         transport_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ts"
         merged_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.mp4"
         concat_list_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ffconcat"
@@ -24488,6 +24490,8 @@ class DownloadManagerApp:
                 except Exception:
                     pass
                 thread_local.session = session
+                with sessions_lock:
+                    sessions_to_clean.append(session)
             try:
                 part_size = self._download_parallel_hls_segment(
                     segment,
@@ -24742,6 +24746,12 @@ class DownloadManagerApp:
                     raise
                 finally:
                     executor.shutdown(wait=not stop_requested and not self._shutdown_started, cancel_futures=True)
+                    with sessions_lock:
+                        for s in sessions_to_clean:
+                            try:
+                                s.close()
+                            except Exception:
+                                pass
             else:
                 self._log_ffmpeg_event(
                     "parallel hls resume complete before download",
