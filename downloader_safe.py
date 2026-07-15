@@ -70,7 +70,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260715-3746"
+APP_BUILD = "20260715-3748"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -22938,46 +22938,55 @@ class DownloadManagerApp:
 
     def _fetch_parallel_hls_keys(self, segments, headers, stop_event=None):
         key_cache = {}
-        for segment in segments:
-            if self._shutdown_started or (stop_event is not None and stop_event.is_set()):
-                raise StopDownloadException("stop requested")
-            key_url = (segment.get("key") or {}).get("uri")
-            if not key_url or key_url in key_cache:
-                continue
-            request_headers = dict(headers or {})
-            request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
-            key_data = None
-            try:
-                c_req = get_curl_cffi_requests()
-                s = c_req.Session(impersonate="chrome120")
+        s = None
+        try:
+            for segment in segments:
+                if self._shutdown_started or (stop_event is not None and stop_event.is_set()):
+                    raise StopDownloadException("stop requested")
+                key_url = (segment.get("key") or {}).get("uri")
+                if not key_url or key_url in key_cache:
+                    continue
+                request_headers = dict(headers or {})
+                request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+                key_data = None
                 try:
-                    from curl_cffi import CurlOpt
-                    s.curl_options = {
-                        CurlOpt.BUFFERSIZE: 262144,
-                        CurlOpt.TCP_NODELAY: 1,
-                        CurlOpt.DNS_CACHE_TIMEOUT: 600
-                    }
-                except Exception:
-                    s.curl_options = {
-                        98: 262144,
-                        121: 1,
-                        92: 600
-                    }
-                try:
-                    s = self._track_network_session(s)
+                    if s is None:
+                        c_req = get_curl_cffi_requests()
+                        s = c_req.Session(impersonate="chrome120")
+                        try:
+                            from curl_cffi import CurlOpt
+                            s.curl_options = {
+                                CurlOpt.BUFFERSIZE: 262144,
+                                CurlOpt.TCP_NODELAY: 1,
+                                CurlOpt.DNS_CACHE_TIMEOUT: 600
+                            }
+                        except Exception:
+                            s.curl_options = {
+                                98: 262144,
+                                121: 1,
+                                92: 600
+                            }
+                        try:
+                            s = self._track_network_session(s)
+                        except Exception:
+                            pass
+                    resp = s.get(key_url, headers=request_headers, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS)
+                    if resp.status_code == 200:
+                        key_data = resp.content
                 except Exception:
                     pass
-                resp = s.get(key_url, headers=request_headers, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS)
-                if resp.status_code == 200:
-                    key_data = resp.content
-            except Exception:
-                pass
-            if key_data is None:
-                with urllib.request.urlopen(urllib.request.Request(key_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
-                    key_data = resp.read()
-            if len(key_data) != 16:
-                raise Exception("parallel HLS AES key has invalid length")
-            key_cache[key_url] = key_data
+                if key_data is None:
+                    with urllib.request.urlopen(urllib.request.Request(key_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                        key_data = resp.read()
+                if len(key_data) != 16:
+                    raise Exception("parallel HLS AES key has invalid length")
+                key_cache[key_url] = key_data
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
         return key_cache
 
     def _decrypt_parallel_hls_segment_data(self, data, segment, key_cache):
@@ -23519,6 +23528,11 @@ class DownloadManagerApp:
                 head = b""
                 total = 0
                 with open(temp_part_path, "wb", buffering=524288) as out_f:
+                    if expected_length > 0:
+                        try:
+                            out_f.truncate(expected_length)
+                        except OSError:
+                            pass
                     for chunk in resp.iter_content(chunk_size=PARALLEL_HLS_STREAM_CHUNK_SIZE):
                         if _stop_requested():
                             raise StopDownloadException("stop requested")
@@ -23549,6 +23563,11 @@ class DownloadManagerApp:
                 head = b""
                 total = 0
                 with open(temp_part_path, "wb", buffering=524288) as out_f:
+                    if expected_length > 0:
+                        try:
+                            out_f.truncate(expected_length)
+                        except OSError:
+                            pass
                     while True:
                         if _stop_requested():
                             raise StopDownloadException("stop requested")
