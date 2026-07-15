@@ -70,7 +70,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260714-3744"
+APP_BUILD = "20260715-3750"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -22520,9 +22520,18 @@ class DownloadManagerApp:
     def _gimy_direct_media_headers(self, referer, origin):
         return {"Referer": referer, "Origin": origin, "User-Agent": DEFAULT_USER_AGENT}
 
+    def _parallel_hls_default_workers(self):
+        config_workers = getattr(self, "config", {}).get("hls_workers") or getattr(self, "config", {}).get("max_workers")
+        if config_workers is not None:
+            try:
+                return max(int(config_workers), 1)
+            except Exception:
+                pass
+        return PARALLEL_HLS_SEGMENT_WORKERS
+
     def _parallel_hls_workers_for_site(self, source_site, url=""):
         site = (source_site or "").strip().lower()
-        workers = int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, PARALLEL_HLS_SEGMENT_WORKERS))
+        workers = int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, self._parallel_hls_default_workers()))
         normalized_url = _normalize_download_url(url)
         host = urllib.parse.urlsplit(normalized_url).netloc.lower() if normalized_url else ""
         for marker, host_workers in PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST.items():
@@ -22553,7 +22562,7 @@ class DownloadManagerApp:
 
     def _parallel_hls_worker_plan(self, source_site, media_url, segments, total_segment_count=None):
         site = (source_site or "").strip().lower()
-        site_worker_cap = int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, PARALLEL_HLS_SEGMENT_WORKERS))
+        site_worker_cap = int(PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE.get(site, self._parallel_hls_default_workers()))
         workers = site_worker_cap
         host_worker_cap = 0
         host_worker_marker = ""
@@ -22961,8 +22970,35 @@ class DownloadManagerApp:
                 continue
             request_headers = dict(headers or {})
             request_headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
-            with urllib.request.urlopen(urllib.request.Request(key_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
-                key_data = resp.read()
+            key_data = None
+            try:
+                c_req = get_curl_cffi_requests()
+                s = c_req.Session(impersonate="chrome120")
+                try:
+                    from curl_cffi import CurlOpt
+                    s.curl_options = {
+                        CurlOpt.BUFFERSIZE: 262144,
+                        CurlOpt.TCP_NODELAY: 1,
+                        CurlOpt.DNS_CACHE_TIMEOUT: 600
+                    }
+                except Exception:
+                    s.curl_options = {
+                        98: 262144,
+                        121: 1,
+                        92: 600
+                    }
+                try:
+                    s = self._track_network_session(s)
+                except Exception:
+                    pass
+                resp = s.get(key_url, headers=request_headers, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS)
+                if resp.status_code == 200:
+                    key_data = resp.content
+            except Exception:
+                pass
+            if key_data is None:
+                with urllib.request.urlopen(urllib.request.Request(key_url, headers=request_headers), timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                    key_data = resp.read()
             if len(key_data) != 16:
                 raise Exception("parallel HLS AES key has invalid length")
             key_cache[key_url] = key_data
@@ -23364,6 +23400,19 @@ class DownloadManagerApp:
             return session
         c_req = get_curl_cffi_requests()
         session = c_req.Session(impersonate="chrome120")
+        try:
+            from curl_cffi import CurlOpt
+            session.curl_options = {
+                CurlOpt.BUFFERSIZE: 262144,
+                CurlOpt.TCP_NODELAY: 1,
+                CurlOpt.DNS_CACHE_TIMEOUT: 600
+            }
+        except Exception:
+            session.curl_options = {
+                98: 262144,
+                121: 1,
+                92: 600
+            }
         try:
             session = self._track_network_session(session)
         except Exception:
@@ -24401,7 +24450,24 @@ class DownloadManagerApp:
             session = getattr(thread_local, "session", None)
             if session is None:
                 c_req = get_curl_cffi_requests()
-                session = c_req.Session()
+                session = c_req.Session(impersonate="chrome120")
+                try:
+                    from curl_cffi import CurlOpt
+                    session.curl_options = {
+                        CurlOpt.BUFFERSIZE: 262144,
+                        CurlOpt.TCP_NODELAY: 1,
+                        CurlOpt.DNS_CACHE_TIMEOUT: 600
+                    }
+                except Exception:
+                    session.curl_options = {
+                        98: 262144,
+                        121: 1,
+                        92: 600
+                    }
+                try:
+                    session = self._track_network_session(session)
+                except Exception:
+                    pass
                 thread_local.session = session
             try:
                 part_size = self._download_parallel_hls_segment(
@@ -24419,6 +24485,12 @@ class DownloadManagerApp:
                     free_bytes = self._get_disk_free_bytes(out_path)
                     self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=self._disk_full_pause_note())
                     raise StopDownloadException("disk space low")
+                thread_local.session = None
+                raise
+            except StopDownloadException:
+                raise
+            except Exception:
+                thread_local.session = None
                 raise
             if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=self._disk_full_pause_note()):
                 stop_event.set()
