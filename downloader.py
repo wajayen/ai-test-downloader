@@ -70,7 +70,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260715-3753"
+APP_BUILD = "20260715-3754"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -23008,7 +23008,7 @@ class DownloadManagerApp:
         finally:
             if s is not None:
                 try:
-                    s.close()
+                    self._close_network_session(s)
                 except Exception:
                     pass
         return key_cache
@@ -24749,7 +24749,7 @@ class DownloadManagerApp:
                     with sessions_lock:
                         for s in sessions_to_clean:
                             try:
-                                s.close()
+                                self._close_network_session(s)
                             except Exception:
                                 pass
             else:
