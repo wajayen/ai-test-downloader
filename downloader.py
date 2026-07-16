@@ -17,6 +17,7 @@ import json
 import locale
 import os
 import platform
+import random
 import re
 import shutil
 import socket
@@ -70,7 +71,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260715-3754"
+APP_BUILD = "20260716-3760"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1462,9 +1463,9 @@ FFMPEG_NEAR_COMPLETE_RESUME_RATIO = 0.01
 HLS_RESUME_REWIND_MIN_SECONDS = 6.0
 HLS_RESUME_REWIND_MAX_SECONDS = 20.0
 HLS_RESUME_REWIND_SEGMENT_MULTIPLIER = 2.5
-UI_THROTTLE_INTERVAL_SECONDS = 2.0
-STATUS_STYLE_REFRESH_INTERVAL_MS = 600
-SUMMARY_REFRESH_INTERVAL_MS = 1200
+UI_THROTTLE_INTERVAL_SECONDS = 0.3
+STATUS_STYLE_REFRESH_INTERVAL_MS = 300
+SUMMARY_REFRESH_INTERVAL_MS = 500
 STARTUP_RESUME_DELAY_MS = 1200
 STARTUP_RESUME_BATCH_SIZE = 12
 STARTUP_RESUME_BATCH_DELAY_MS = 250
@@ -3550,18 +3551,30 @@ def _is_expired_signed_media_url(url, now_ts=None):
         return False
     parsed = urllib.parse.urlsplit(normalized)
     host = parsed.netloc.lower()
-    if "mxcontent.net" not in host:
-        return False
     query_map = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-    expiry_values = query_map.get("e", [])
-    if not expiry_values:
-        return False
-    try:
-        expiry_ts = int(float(expiry_values[0]))
-    except Exception:
-        return False
     current_ts = int(now_ts if now_ts is not None else time.time())
-    return expiry_ts <= current_ts + 30
+    if "mxcontent.net" in host:
+        expiry_values = query_map.get("e", [])
+        if expiry_values:
+            try:
+                expiry_ts = int(float(expiry_values[0]))
+                return expiry_ts <= current_ts + 30
+            except Exception:
+                pass
+    for param_name in ("expire", "expires", "expiry", "exp"):
+        values = query_map.get(param_name, []) or query_map.get(param_name.upper(), [])
+        if values:
+            try:
+                val = int(float(values[0]))
+                if 800000000 < val < 2500000000:
+                    if val <= current_ts + 60:
+                        return True
+                elif 800000000000 < val < 2500000000000:
+                    if val <= (current_ts + 60) * 1000:
+                        return True
+            except Exception:
+                pass
+    return False
 
 
 def _extract_movieffm_external_source_urls(page_html):
@@ -10636,10 +10649,14 @@ def make_context_menu(widget):
     return menu
 
 
+from downloader_job_object import _init_windows_job_object, _assign_process_to_job
+
+
 class DownloadManagerApp:
     """Main desktop downloader application."""
 
     def __init__(self, root):
+        _init_windows_job_object()
         self.root = root
         self.root.title(f"{t('app_title')} v{APP_BUILD.split('-')[-1]}")
         self.root.geometry("850x680")
@@ -13355,11 +13372,17 @@ class DownloadManagerApp:
                     os.remove(filename)
             except OSError:
                 pass
+            root, ext = os.path.splitext(filename)
+            part_dir = f"{root}.segments"
+            try:
+                if os.path.isdir(part_dir):
+                    shutil.rmtree(part_dir, ignore_errors=True)
+            except Exception:
+                pass
             if key != "temp_filename":
                 continue
             sidecars = [filename + ".resume", filename + ".merged"]
             sidecars.extend(self._resume_progress_candidate_paths_for_base(filename))
-            root, ext = os.path.splitext(filename)
             if ext:
                 sidecars.extend([f"{root}.resume{ext}", f"{root}.merged{ext}"])
             for sidecar in sidecars:
@@ -20438,6 +20461,7 @@ class DownloadManagerApp:
             startupinfo=startupinfo,
             creationflags=creationflags,
         )
+        _assign_process_to_job(proc)
         if item_id in self.tasks:
             _set_task_aux_fields(self.tasks[item_id], _proc=proc)
         recent_lines = []
@@ -20654,6 +20678,14 @@ class DownloadManagerApp:
                 }
             )
         _set_task_aux_fields(task, **state_updates)
+        if not self._is_retryable_persisted_download_error(task):
+            for key in ("filename", "temp_filename"):
+                filename = task.get(key)
+                if filename:
+                    root, ext = os.path.splitext(filename)
+                    for path in (f"{root}.segments", f"{filename}.segments"):
+                        if os.path.isdir(path):
+                            shutil.rmtree(path, ignore_errors=True)
         self._update_task_state_entry(task, **state_updates)
         self._schedule_summary_refresh()
         return True
@@ -20908,6 +20940,7 @@ class DownloadManagerApp:
             startupinfo=startupinfo,
             creationflags=creationflags,
         )
+        _assign_process_to_job(proc)
         _set_task_aux_fields(task, _proc=proc)
         last_bytes = 0
         last_time = time.time()
@@ -23733,7 +23766,6 @@ class DownloadManagerApp:
                     pass
                 if attempt >= retry_count - 1:
                     break
-                import random
                 jitter = random.uniform(0.8, 1.2)
                 if is_google_segment:
                     delay = PARALLEL_HLS_GOOGLE_RETRY_DELAYS[min(attempt, len(PARALLEL_HLS_GOOGLE_RETRY_DELAYS) - 1)] * jitter
@@ -24457,7 +24489,7 @@ class DownloadManagerApp:
             return True
 
         def _download_one(segment):
-            nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes, last_segment_speed_update, last_segment_speed_bytes, last_progress_activity_at, last_progress_completed_segments
+            nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes, last_segment_speed_update, last_segment_speed_bytes, last_progress_activity_at, last_progress_completed_segments, dynamic_in_flight_limit
             if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
                 stop_event.set()
                 raise StopDownloadException("shutdown requested")
@@ -24492,6 +24524,7 @@ class DownloadManagerApp:
                 thread_local.session = session
                 with sessions_lock:
                     sessions_to_clean.append(session)
+            t0 = time.time()
             try:
                 part_size = self._download_parallel_hls_segment(
                     segment,
@@ -24502,7 +24535,15 @@ class DownloadManagerApp:
                     prefer_curl=prefer_curl_segments,
                     session=session,
                 )
+                dur = max(time.time() - t0, 0.001)
+                with completed_lock:
+                    if dur > 5.0:
+                        dynamic_in_flight_limit = max(2, dynamic_in_flight_limit // 2)
+                    else:
+                        dynamic_in_flight_limit = min(dynamic_in_flight_limit + 1, max_in_flight_limit)
             except OSError as exc:
+                with completed_lock:
+                    dynamic_in_flight_limit = max(2, dynamic_in_flight_limit // 2)
                 if _is_no_space_left_error(exc):
                     stop_event.set()
                     free_bytes = self._get_disk_free_bytes(out_path)
@@ -24513,6 +24554,8 @@ class DownloadManagerApp:
             except StopDownloadException:
                 raise
             except Exception:
+                with completed_lock:
+                    dynamic_in_flight_limit = max(2, dynamic_in_flight_limit // 2)
                 thread_local.session = None
                 raise
             if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=self._disk_full_pause_note()):
@@ -24626,10 +24669,11 @@ class DownloadManagerApp:
                 pending_iter = iter(pending_segments)
                 in_flight = set()
                 stop_requested = False
-                in_flight_limit = max(
+                max_in_flight_limit = max(
                     int(worker_count),
                     int(worker_count) * int(PARALLEL_HLS_IN_FLIGHT_MULTIPLIER),
                 )
+                dynamic_in_flight_limit = max_in_flight_limit
 
                 def _submit_next_segment():
                     try:
@@ -24640,7 +24684,7 @@ class DownloadManagerApp:
                     return True
 
                 try:
-                    for _ in range(min(in_flight_limit, len(pending_segments))):
+                    for _ in range(min(dynamic_in_flight_limit, len(pending_segments))):
                         if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
                             if _shutdown_can_finalize_completed_segments():
                                 stop_event.clear()
@@ -24728,7 +24772,7 @@ class DownloadManagerApp:
                                 break
                             stop_requested = True
                             raise StopDownloadException("stop requested")
-                        while len(in_flight) < in_flight_limit:
+                        while len(in_flight) < dynamic_in_flight_limit:
                             if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
                                 current_task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
                                 if _shutdown_can_finalize_completed_segments(current_task_state):
@@ -26610,6 +26654,7 @@ class DownloadManagerApp:
                 startupinfo=startupinfo,
                 creationflags=creationflags,
             )
+            _assign_process_to_job(proc)
             if item_id in self.tasks:
                 _set_task_aux_fields(self.tasks[item_id], _proc=proc)
             progress = {}

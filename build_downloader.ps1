@@ -7,6 +7,7 @@ $distDir = Join-Path $projectRoot 'dist'
 $buildDir = Join-Path $projectRoot 'build'
 $sourceFile = Join-Path $projectRoot 'downloader.py'
 $safeSourceFile = Join-Path $projectRoot 'downloader_safe.py'
+$jobObjectSourceFile = Join-Path $projectRoot 'downloader_job_object.py'
 $ffmpegSource = Join-Path $projectRoot 'ffmpeg.exe'
 $ffprobeSource = Join-Path $projectRoot 'ffprobe.exe'
 $runtimeLogCheckScript = Join-Path $projectRoot 'check_runtime_logs.ps1'
@@ -63,7 +64,7 @@ if (Test-Path -LiteralPath $runtimeLogCheckScript) {
     & $runtimeLogCheckScript -ProjectRoot $projectRoot
 }
 
-& $pythonExe -m py_compile $sourceFile $safeSourceFile
+& $pythonExe -m py_compile $sourceFile $safeSourceFile $jobObjectSourceFile
 & $pythonExe -m PyInstaller --clean --noconfirm --distpath $distDir --workpath $buildDir $specFile
 Sync-BundledBinary -SourcePath $ffmpegSource -DestinationPath (Join-Path $distDir 'ffmpeg.exe')
 Sync-BundledBinary -SourcePath $ffprobeSource -DestinationPath (Join-Path $distDir 'ffprobe.exe')
