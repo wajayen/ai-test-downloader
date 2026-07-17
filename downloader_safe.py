@@ -71,7 +71,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260716-3760"
+APP_BUILD = "20260716-3770"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1231,7 +1231,7 @@ PARALLEL_HLS_GOOGLE_RETRY_DELAYS = (5.0, 10.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT = 10.0
 YTDLP_HLS_NATIVE_SOCKET_TIMEOUT_BY_SITE = {
     "bestjavporn": 5.0,
-    "javdock": 5.0,
+    "javdock": 20.0,
     "gimy": 15.0,
     "goodav17": 15.0,
     "99itv": 15.0,
@@ -5945,7 +5945,7 @@ def _resolve_supjav_playback_media(page_text, page_url, c_req=None):
                 player_url,
                 impersonate="chrome120",
                 timeout=20,
-                headers=_make_browser_page_headers(referer=page_url, origin="https://lk1.supremejav.com"),
+                headers={"Referer": page_url},
             )
             player_final = str(getattr(player_resp, "url", player_url) or player_url)
             player_text = _response_text_utf8(player_resp)
@@ -5956,7 +5956,7 @@ def _resolve_supjav_playback_media(page_text, page_url, c_req=None):
                 child_url,
                 impersonate="chrome120",
                 timeout=25,
-                headers=_make_browser_page_headers(referer=player_final, origin="https://lk1.supremejav.com"),
+                headers={"Referer": player_final},
             )
             child_final = str(getattr(child_resp, "url", child_url) or child_url)
             child_text = _response_text_utf8(child_resp)
@@ -9495,7 +9495,9 @@ def _ytdlp_retry_sleep_file_access(*args, **kwargs):
 
 
 def _make_ytdlp_http_headers(referer=None, origin=None, user_agent=DEFAULT_USER_AGENT):
-    headers = {"User-Agent": user_agent}
+    headers = {}
+    if user_agent:
+        headers["User-Agent"] = user_agent
     if referer:
         headers["Referer"] = referer
     if origin:
@@ -9561,13 +9563,15 @@ def _http_range_part_retry_delay(exc, url, attempt):
     except Exception:
         host = ""
     if "http 429" in error_text or "too many requests" in error_text or "rate limit" in error_text:
-        delay = min(2.0 * (attempt_index + 1), float(HTTP_RANGE_PART_RATE_LIMIT_RETRY_MAX_DELAY_SECONDS))
+        delay = min(2.0 * (1.8 ** attempt_index), float(HTTP_RANGE_PART_RATE_LIMIT_RETRY_MAX_DELAY_SECONDS))
     elif "http 503" in error_text or "http 502" in error_text or "http 504" in error_text:
-        delay = min(1.5 * (attempt_index + 1), float(HTTP_RANGE_PART_RATE_LIMIT_RETRY_MAX_DELAY_SECONDS))
+        delay = min(1.5 * (1.6 ** attempt_index), float(HTTP_RANGE_PART_RATE_LIMIT_RETRY_MAX_DELAY_SECONDS))
     elif "timed out" in error_text or "timeout" in error_text:
-        delay = min(max(delay, 1.2 * (attempt_index + 1)), float(HTTP_RANGE_PART_RETRY_MAX_DELAY_SECONDS))
+        delay = min(max(delay, 1.2 * (1.5 ** attempt_index)), float(HTTP_RANGE_PART_RETRY_MAX_DELAY_SECONDS))
+    elif "connection" in error_text or "aborted" in error_text or "reset" in error_text:
+        delay = min(max(delay, 1.0 * (1.4 ** attempt_index)), float(HTTP_RANGE_PART_RETRY_MAX_DELAY_SECONDS))
     if "media-cdn" in host and ("http 503" in error_text or "http 429" in error_text):
-        delay = min(max(delay, 2.0 * (attempt_index + 1)), 12.0)
+        delay = min(max(delay, 2.0 * (1.8 ** attempt_index)), 12.0)
     return max(float(delay), 0.1)
 
 
@@ -10641,7 +10645,7 @@ def make_context_menu(widget):
     return menu
 
 
-from downloader_job_object import _init_windows_job_object, _assign_process_to_job
+from downloader_job_object import _init_windows_job_object, _assign_process_to_job, _posix_cleanup
 
 
 class DownloadManagerApp:
@@ -11114,6 +11118,10 @@ class DownloadManagerApp:
         if session is None:
             return
         self._untrack_network_session(session)
+        try:
+            session._closed = True
+        except Exception:
+            pass
         try:
             close_method = getattr(session, "close", None)
             if callable(close_method):
@@ -20224,9 +20232,19 @@ class DownloadManagerApp:
     def _download_http_range_part(self, url, headers, start_byte, end_byte, part_path, progress_box, stop_event):
         expected_size = max(int(end_byte) - int(start_byte) + 1, 0)
         last_exc = None
+        request_headers = dict(headers or {})
         for attempt in range(HTTP_RANGE_PART_MAX_ATTEMPTS):
             if stop_event.is_set() or self._shutdown_started:
                 return
+            if attempt > 0:
+                USER_AGENTS = [
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
+                ]
+                request_headers["User-Agent"] = USER_AGENTS[attempt % len(USER_AGENTS)]
             try:
                 existing_size = self._get_existing_file_size(part_path)
                 if existing_size < 0 or (expected_size > 0 and existing_size > expected_size):
@@ -20252,7 +20270,7 @@ class DownloadManagerApp:
                 request_start_byte = int(start_byte) + int(existing_size)
                 return self._download_http_range_part_once(
                     url,
-                    headers,
+                    request_headers,
                     start_byte,
                     end_byte,
                     part_path,
@@ -20435,23 +20453,32 @@ class DownloadManagerApp:
             "error",
             "-progress",
             "pipe:1",
+            "-protocol_whitelist",
+            "file,http,https,tcp,tls,crypto,data",
+            "-allowed_extensions",
+            "ALL",
+            "-rw_timeout",
+            FFMPEG_HLS_RW_TIMEOUT_MICROSECONDS,
         ]
+        cmd += list(FFMPEG_HLS_RECONNECT_OPTIONS)
         if headers_blob:
             cmd += ["-headers", headers_blob]
         cmd += ["-i", url, "-vn", "-acodec", "libmp3lame", "-b:a", "192k", temp_out_path]
 
         write_error_log("ffmpeg direct audio started", Exception("ffmpeg direct audio started"), url=url, item_id=item_id)
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            bufsize=1,
-            startupinfo=startupinfo,
-            creationflags=creationflags,
-        )
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "ignore",
+            "bufsize": 1,
+            "startupinfo": startupinfo,
+            "creationflags": creationflags,
+        }
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(cmd, **popen_kwargs)
         _assign_process_to_job(proc)
         if item_id in self.tasks:
             _set_task_aux_fields(self.tasks[item_id], _proc=proc)
@@ -20515,11 +20542,20 @@ class DownloadManagerApp:
         write_error_log("ffmpeg direct audio finished", Exception("ffmpeg direct audio finished"), url=url, item_id=item_id, output=out_path, bytes=self._get_existing_file_size(out_path))
 
     def _get_disk_free_bytes(self, target_path):
+        if not hasattr(self, "_disk_free_cache"):
+            self._disk_free_cache = {}
         try:
             base_dir = target_path if os.path.isdir(target_path) else os.path.dirname(target_path)
             if not base_dir:
                 base_dir = _APP_DIR
-            return shutil.disk_usage(base_dir).free
+            base_dir = os.path.abspath(base_dir)
+            now = time.time()
+            cached_val, cached_time = self._disk_free_cache.get(base_dir, (None, 0))
+            if cached_val is not None and now - cached_time < 2.0:
+                return cached_val
+            free_space = shutil.disk_usage(base_dir).free
+            self._disk_free_cache[base_dir] = (free_space, now)
+            return free_space
         except Exception:
             return None
 
@@ -20924,13 +20960,15 @@ class DownloadManagerApp:
             startupinfo.wShowWindow = 0
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            startupinfo=startupinfo,
-            creationflags=creationflags,
-        )
+        popen_kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "startupinfo": startupinfo,
+            "creationflags": creationflags,
+        }
+        if os.name != "nt":
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(cmd, **popen_kwargs)
         _assign_process_to_job(proc)
         _set_task_aux_fields(task, _proc=proc)
         last_bytes = 0
@@ -23099,6 +23137,14 @@ class DownloadManagerApp:
         except Exception:
             return None
 
+    def _is_png_wrapped_ts_signature(self, data):
+        if not data or len(data) < 8:
+            return False
+        try:
+            return data[:8] == PARALLEL_HLS_PNG_SIGNATURE
+        except Exception:
+            return False
+
     def _unwrap_png_wrapped_ts_segment_bytes(self, data):
         res = self._png_wrapped_ts_payload_offset(data)
         if res is None:
@@ -23124,7 +23170,7 @@ class DownloadManagerApp:
     def _is_valid_parallel_hls_segment_data(self, data, content_type=""):
         if not data or len(data) < 16:
             return False
-        if self._png_wrapped_ts_payload_offset(data) is not None:
+        if self._is_png_wrapped_ts_signature(data):
             return True
         lowered_type = str(content_type or "").lower()
         if self._is_unsupported_parallel_hls_segment_payload(data, lowered_type):
@@ -23136,14 +23182,14 @@ class DownloadManagerApp:
     def _is_valid_parallel_hls_segment_media_bytes(self, data):
         if not data or len(data) < 16:
             return False
-        if self._png_wrapped_ts_payload_offset(data) is not None:
+        if self._is_png_wrapped_ts_signature(data):
             return True
         return self._looks_like_raw_media_bytes(data)
 
     def _is_parallel_hls_transport_stream_payload(self, data):
         if not data or len(data) < 188:
             return False
-        if self._png_wrapped_ts_payload_offset(data) is not None:
+        if self._is_png_wrapped_ts_signature(data):
             return True
         if data[0] == 0x47:
             return True
@@ -23157,7 +23203,7 @@ class DownloadManagerApp:
 
     def _is_unsupported_parallel_hls_segment_payload(self, data, content_type=""):
         lowered_type = str(content_type or "").lower()
-        if self._png_wrapped_ts_payload_offset(data) is not None:
+        if self._is_png_wrapped_ts_signature(data):
             return False
         if any(marker in lowered_type for marker in ("text/html", "image/", "application/json")):
             return True
@@ -23298,7 +23344,7 @@ class DownloadManagerApp:
                     content_type = str(resp.headers.get("Content-Type") or "").lower()
             except Exception:
                 continue
-            if "image/" in content_type:
+            if "image/" in content_type and content_type != "image/png":
                 raise ParallelHlsUnsupportedSegmentContentException(
                     f"Google-backed HLS returned non-video segment content: {content_type}"
                 )
@@ -23414,7 +23460,7 @@ class DownloadManagerApp:
 
     def _parallel_hls_curl_session(self):
         session = getattr(parallel_hls_thread_local, "session", None)
-        if session is not None:
+        if session is not None and not getattr(session, "_closed", False):
             return session
         c_req = get_curl_cffi_requests()
         session = c_req.Session(impersonate="chrome120")
@@ -23672,6 +23718,15 @@ class DownloadManagerApp:
             pass
         for attempt in range(retry_count):
             try:
+                if attempt > 0:
+                    USER_AGENTS = [
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
+                    ]
+                    request_headers["User-Agent"] = USER_AGENTS[attempt % len(USER_AGENTS)]
                 if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
                     raise StopDownloadException("stop requested")
                 key_info = segment.get("key") or {}
@@ -23685,7 +23740,7 @@ class DownloadManagerApp:
                         stop_event=stop_event,
                         session=session,
                     )
-                    if self._png_wrapped_ts_payload_offset(head) is not None:
+                    if self._is_png_wrapped_ts_signature(head):
                         with open(temp_part_path, "rb") as part_f:
                             raw_part_data = part_f.read()
                         unwrapped_part_data = self._unwrap_png_wrapped_ts_segment_bytes(raw_part_data)
@@ -23751,9 +23806,9 @@ class DownloadManagerApp:
                 if is_google_segment:
                     delay = PARALLEL_HLS_GOOGLE_RETRY_DELAYS[min(attempt, len(PARALLEL_HLS_GOOGLE_RETRY_DELAYS) - 1)] * jitter
                 elif self._parallel_hls_segment_error_is_rate_limited(exc):
-                    delay = min(2.0 * (attempt + 1), 12.0) * jitter
+                    delay = min(2.0 * (1.8 ** attempt), 20.0) * jitter
                 else:
-                    delay = min(0.5 * (attempt + 1), 3.0) * jitter
+                    delay = min(0.5 * (1.5 ** attempt), 8.0) * jitter
                 if stop_event.wait(delay) or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
                     raise StopDownloadException("stop requested")
         raise last_exc or Exception("parallel HLS segment download failed")
@@ -24482,6 +24537,8 @@ class DownloadManagerApp:
                 stop_event.set()
                 raise StopDownloadException("disk space low")
             session = getattr(thread_local, "session", None)
+            if session is not None and getattr(session, "_closed", False):
+                session = None
             if session is None:
                 c_req = get_curl_cffi_requests()
                 session = c_req.Session(impersonate="chrome120")
@@ -26624,17 +26681,19 @@ class DownloadManagerApp:
                 cmd += ["-c", "copy"]
             cmd += [active_output_path]
 
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                bufsize=1,
-                startupinfo=startupinfo,
-                creationflags=creationflags,
-            )
+            popen_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "ignore",
+                "bufsize": 1,
+                "startupinfo": startupinfo,
+                "creationflags": creationflags,
+            }
+            if os.name != "nt":
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(cmd, **popen_kwargs)
             _assign_process_to_job(proc)
             if item_id in self.tasks:
                 _set_task_aux_fields(self.tasks[item_id], _proc=proc)
@@ -27494,6 +27553,10 @@ class DownloadManagerApp:
                     break
             except Exception:
                 pass
+            try:
+                self.root.update()
+            except Exception:
+                pass
             time.sleep(0.25)
         try:
             write_error_log(
@@ -27567,6 +27630,10 @@ class DownloadManagerApp:
                 except Exception:
                     pass
                 last_session_close_at = now
+            try:
+                self.root.update()
+            except Exception:
+                pass
             time.sleep(0.05)
         if active_found:
             try:
@@ -33689,7 +33756,7 @@ class DownloadManagerApp:
                         url,
                         impersonate=impersonate_name,
                         timeout=25,
-                        headers=_make_browser_page_headers(referer=supjav_origin + "/", origin=supjav_origin),
+                        headers={"Referer": supjav_origin + "/"},
                     )
                     candidate_text = _response_text_utf8(candidate_resp)
                     status_code = int(getattr(candidate_resp, "status_code", 0) or 0)
@@ -34694,13 +34761,13 @@ class DownloadManagerApp:
         if current_downloading > 0:
             if self._ask_close_downloads_confirmation(t("msg_close_warn", count=current_downloading), active_count=current_downloading, parent=self.root):
                 try:
+                    self._shutdown_started = True
                     self._shutdown_queue_blocked = True
                     # Give nearly complete HLS jobs a chance to finish before
                     # signaling the worker stop event; otherwise the grace wait
                     # only waits for an already-interrupted transfer.
                     self._wait_for_near_complete_shutdown_downloads()
                     self._shutdown_stop_requested = True
-                    self._shutdown_started = True
                     self._signal_transfer_stop_events()
                     self._prepare_shutdown_resume_state()
                     self._wait_for_shutdown_downloads()
@@ -34761,6 +34828,11 @@ class DownloadManagerApp:
             self._force_kill_child_processes()
         except Exception:
             pass
+        if os.name != "nt":
+            try:
+                _posix_cleanup()
+            except Exception:
+                pass
         remaining_threads = 0
         try:
             remaining_threads = self._wait_for_background_threads(timeout_seconds=SHUTDOWN_BACKGROUND_THREAD_WAIT_SECONDS)
