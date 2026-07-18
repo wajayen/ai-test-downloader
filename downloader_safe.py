@@ -71,7 +71,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260716-3770"
+APP_BUILD = "20260718-3775"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -1088,7 +1088,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "ffzy-play": 60,
     "cdn2020.com": 48,
     "huabf.com": 48,
-    "googleusercontent.com": 1,
+    "googleusercontent.com": 6,
     "tiktokcdn.com": 36,
     "ts2ff6yms.com": 48,
     "upload18.org": 24,
@@ -9880,7 +9880,7 @@ class UIThrottler:
             return
         if not updates:
             return
-        if "status" in updates:
+        if "state" in updates or "status" in updates:
             force = True
         now = time.time()
         with self._lock:
@@ -9891,6 +9891,11 @@ class UIThrottler:
                 last_val, _last_time = last_map.get(col, (None, 0))
                 if not force and value == last_val and pending_map.get(col) == value:
                     continue
+                if not force and col == "progress" and last_val is not None:
+                    if value == last_val:
+                        continue
+                    if now - _last_time < 0.25 and value != "100%" and value != "100.0%":
+                        continue
                 last_map[col] = (value, now)
                 pending_map[col] = value
                 changed = True
@@ -9930,6 +9935,8 @@ class UIThrottler:
             column_indexes = self._column_indexes()
             for item_id, updates in pending.items():
                 try:
+                    if not self.tree.exists(item_id):
+                        continue
                     current_values = list(self.tree.item(item_id, "values"))
                 except tk.TclError:
                     continue
@@ -10001,6 +10008,22 @@ class DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
         thread.start()
         self._threads.add(thread)
         concurrent.futures.thread._threads_queues[thread] = self._work_queue
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        if cancel_futures:
+            try:
+                super().shutdown(wait=wait, cancel_futures=cancel_futures)
+            except TypeError:
+                try:
+                    while True:
+                        work_item = self._work_queue.get_nowait()
+                        if work_item is not None:
+                            work_item.future.cancel()
+                except Exception:
+                    pass
+                super().shutdown(wait=wait)
+        else:
+            super().shutdown(wait=wait)
 
 
 def load_config():
@@ -10743,6 +10766,7 @@ class DownloadManagerApp:
         self.root.after(STARTUP_RESUME_DELAY_MS, self._resume_unfinished_tasks_deferred)
         self.root.after(int(STARTUP_RESUME_WARMUP_SECONDS * 1000) + 500, self._process_queue_after_startup_warmup)
         self.root.after(STARTUP_AUTO_INSTALL_FFMPEG_DELAY_MS, self._auto_install_ffmpeg_if_missing)
+        self._clean_leftover_temp_files()
 
     def _shutdown_requested(self):
         return bool(getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False))
@@ -14054,7 +14078,14 @@ class DownloadManagerApp:
             return
         root = getattr(self, "root", None)
         if root:
-            root.after(0, callback)
+            try:
+                root.after(0, callback)
+            except RuntimeError:
+                # Handle running outside of tkinter mainloop (e.g. in test scripts)
+                try:
+                    callback()
+                except Exception:
+                    pass
         else:
             callback()
 
@@ -14062,6 +14093,44 @@ class DownloadManagerApp:
         self._schedule_ui_call(
             lambda _item_id=item_id, _col=col, _value=value, _force=force: self.update_tree(_item_id, _col, _value, force=_force)
         )
+
+    def _clean_leftover_temp_files(self):
+        def cleanup():
+            try:
+                time.sleep(3)
+                search_dirs = []
+                try:
+                    save_dir = self._safe_get_save_dir()
+                    if save_dir:
+                        resume_dir = os.path.join(os.path.abspath(os.path.expanduser(save_dir)), ".downloader_resume")
+                        if os.path.isdir(resume_dir):
+                            search_dirs.append(resume_dir)
+                except Exception:
+                    pass
+                try:
+                    temp_dir = tempfile.gettempdir()
+                    if temp_dir and temp_dir not in search_dirs:
+                        search_dirs.append(temp_dir)
+                except Exception:
+                    pass
+                
+                for sdir in search_dirs:
+                    if not os.path.isdir(sdir):
+                        continue
+                    for root_dir, dirs, files in os.walk(sdir):
+                        for file in files:
+                            if file.endswith(".tmp") or file.endswith(".temp"):
+                                file_path = os.path.join(root_dir, file)
+                                try:
+                                    if time.time() - os.path.getmtime(file_path) > 300:
+                                        os.remove(file_path)
+                                # Keep it quiet to not disrupt main thread
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+
+        threading.Thread(target=cleanup, daemon=True).start()
 
     def _tree_has_focus(self):
         if self.tree is None:
@@ -23223,6 +23292,10 @@ class DownloadManagerApp:
     def _fetch_parallel_hls_segment_sample(self, segment_url, request_headers, segment_has_key=False, prefer_curl=False, stop_event=None):
         is_javdock = "video.javdock.com" in request_headers.get("Referer", "")
         probe_headers = dict(request_headers)
+        segment_host = urllib.parse.urlsplit(_normalize_download_url(segment_url) or "").netloc.lower()
+        if "googleusercontent.com" in segment_host:
+            probe_headers.pop("Referer", None)
+            probe_headers.pop("Origin", None)
         if not segment_has_key and not is_javdock:
             probe_headers.setdefault("Range", "bytes=0-511")
 
@@ -23339,7 +23412,10 @@ class DownloadManagerApp:
             if not segment_url:
                 continue
             try:
-                req = urllib.request.Request(segment_url, headers=request_headers, method="HEAD")
+                google_request_headers = dict(request_headers)
+                google_request_headers.pop("Referer", None)
+                google_request_headers.pop("Origin", None)
+                req = urllib.request.Request(segment_url, headers=google_request_headers, method="HEAD")
                 with urllib.request.urlopen(req, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
                     content_type = str(resp.headers.get("Content-Type") or "").lower()
             except Exception:
@@ -23708,6 +23784,9 @@ class DownloadManagerApp:
         segment_url = str(segment.get("url") or "")
         segment_host = urllib.parse.urlsplit(_normalize_download_url(segment_url) or "").netloc.lower()
         is_google_segment = "googleusercontent.com" in segment_host
+        if is_google_segment:
+            request_headers.pop("Referer", None)
+            request_headers.pop("Origin", None)
         retry_count = self._parallel_hls_segment_retry_count(segment_url)
         last_exc = None
         temp_part_path = f"{part_path}.tmp"
@@ -23736,7 +23815,7 @@ class DownloadManagerApp:
                         segment_url,
                         request_headers,
                         temp_part_path,
-                        prefer_curl=bool(prefer_curl and not is_google_segment),
+                        prefer_curl=prefer_curl,
                         stop_event=stop_event,
                         session=session,
                     )
@@ -23765,7 +23844,7 @@ class DownloadManagerApp:
                 data, content_type = self._fetch_parallel_hls_segment_payload(
                     segment_url,
                     request_headers,
-                    prefer_curl=bool(prefer_curl and not is_google_segment),
+                    prefer_curl=prefer_curl,
                     stop_event=stop_event,
                     session=session,
                 )
