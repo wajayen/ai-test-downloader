@@ -71,7 +71,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260718-3775"
+APP_BUILD = "20260718-3780"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -10700,6 +10700,7 @@ class DownloadManagerApp:
         self._last_reported_domain_limit = None
         self._resume_artifact_locks = {}
         self._resume_artifact_locks_guard = threading.Lock()
+        self._ffmpeg_remux_lock = threading.Lock()
         self.config = load_config()
         global CURRENT_LANG
         CURRENT_LANG = detect_default_language()
@@ -23098,13 +23099,15 @@ class DownloadManagerApp:
                             s.curl_options = {
                                 CurlOpt.BUFFERSIZE: 262144,
                                 CurlOpt.TCP_NODELAY: 1,
-                                CurlOpt.DNS_CACHE_TIMEOUT: 600
+                                CurlOpt.DNS_CACHE_TIMEOUT: 600,
+                                CurlOpt.PIPEWAIT: 1,
                             }
                         except Exception:
                             s.curl_options = {
                                 98: 262144,
                                 121: 1,
-                                92: 600
+                                92: 600,
+                                237: 1,
                             }
                         try:
                             s = self._track_network_session(s)
@@ -23545,13 +23548,15 @@ class DownloadManagerApp:
             session.curl_options = {
                 CurlOpt.BUFFERSIZE: 262144,
                 CurlOpt.TCP_NODELAY: 1,
-                CurlOpt.DNS_CACHE_TIMEOUT: 600
+                CurlOpt.DNS_CACHE_TIMEOUT: 600,
+                CurlOpt.PIPEWAIT: 1,
             }
         except Exception:
             session.curl_options = {
                 98: 262144,
                 121: 1,
-                92: 600
+                92: 600,
+                237: 1,
             }
         try:
             session = self._track_network_session(session)
@@ -23764,6 +23769,14 @@ class DownloadManagerApp:
             status_code = int(getattr(exc, "status_code", 0) or 0)
             if status_code in (403, 429, 502, 503, 504):
                 return True
+        except Exception:
+            pass
+        try:
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                val = int(getattr(resp, "status_code", 0) or 0)
+                if val in (403, 429, 502, 503, 504):
+                    return True
         except Exception:
             pass
         text = str(exc or "").lower()
@@ -24626,13 +24639,15 @@ class DownloadManagerApp:
                     session.curl_options = {
                         CurlOpt.BUFFERSIZE: 262144,
                         CurlOpt.TCP_NODELAY: 1,
-                        CurlOpt.DNS_CACHE_TIMEOUT: 600
+                        CurlOpt.DNS_CACHE_TIMEOUT: 600,
+                        CurlOpt.PIPEWAIT: 1,
                     }
                 except Exception:
                     session.curl_options = {
                         98: 262144,
                         121: 1,
-                        92: 600
+                        92: 600,
+                        237: 1,
                     }
                 try:
                     session = self._track_network_session(session)
@@ -24987,38 +25002,40 @@ class DownloadManagerApp:
                         with open(part_path, "rb") as part_f:
                             shutil.copyfileobj(part_f, merged_f, length=HTTP_FILE_COPY_CHUNK_SIZE)
 
-            if prefer_transport_remux:
-                try:
-                    _build_transport_stream_for_remux()
-                    self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
-                    remux_strategy = "transport-fast"
-                except Exception as transport_exc:
-                    write_error_log(
-                        "parallel hls transport remux fallback to concat",
-                        transport_exc,
-                        url=media_url,
-                        item_id=item_id,
-                        source_site=_task_source_site_name(task) or None,
-                        segments=total_segments,
-                    )
-                    self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
-                    remux_strategy = "concat-after-transport-fallback"
-            else:
-                try:
-                    self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
-                except Exception as concat_exc:
-                    write_error_log(
-                        "parallel hls concat remux fallback to transport",
-                        concat_exc,
-                        url=media_url,
-                        item_id=item_id,
-                        source_site=_task_source_site_name(task) or None,
-                        segments=total_segments,
-                    )
-                    _build_transport_stream_for_remux()
-                    self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
-                    remux_strategy = "transport"
-            final_info = self._probe_media_info(merged_path)
+            self.update_tree_many(item_id, {"speed_eta": "正在合併影音檔案，請稍候..."}, force=True)
+            with self._ffmpeg_remux_lock:
+                if prefer_transport_remux:
+                    try:
+                        _build_transport_stream_for_remux()
+                        self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
+                        remux_strategy = "transport-fast"
+                    except Exception as transport_exc:
+                        write_error_log(
+                            "parallel hls transport remux fallback to concat",
+                            transport_exc,
+                            url=media_url,
+                            item_id=item_id,
+                            source_site=_task_source_site_name(task) or None,
+                            segments=total_segments,
+                        )
+                        self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
+                        remux_strategy = "concat-after-transport-fallback"
+                else:
+                    try:
+                        self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
+                    except Exception as concat_exc:
+                        write_error_log(
+                            "parallel hls concat remux fallback to transport",
+                            concat_exc,
+                            url=media_url,
+                            item_id=item_id,
+                            source_site=_task_source_site_name(task) or None,
+                            segments=total_segments,
+                        )
+                        _build_transport_stream_for_remux()
+                        self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
+                        remux_strategy = "transport"
+                final_info = self._probe_media_info(merged_path)
             final_duration = float(final_info.get("duration", 0.0) or 0.0)
             if not final_info.get("valid") or int(final_info.get("size", 0) or 0) <= 0:
                 raise Exception("parallel HLS remux produced invalid output")
