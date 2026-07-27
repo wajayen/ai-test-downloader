@@ -33,6 +33,15 @@ class HlsDownloader:
         self.thread_local = threading.local()
         
     def download(self) -> bool:
+        from common_utils import (
+            _normalize_download_url,
+            _task_field_value,
+            _set_task_aux_fields,
+            _task_source_site_name,
+            write_error_log,
+            format_transfer_rate,
+            format_eta,
+        )
         # Import lazily to avoid circular dependencies
         from downloader import (
             StopDownloadException,
@@ -40,14 +49,7 @@ class HlsDownloader:
             ResumeLowSpeedReanalysisException,
             ParallelHlsRetryLaterException,
             DaemonThreadPoolExecutor,
-            _normalize_download_url,
-            _task_field_value,
-            _set_task_aux_fields,
-            _task_source_site_name,
-            write_error_log,
             get_curl_cffi_requests,
-            format_transfer_rate,
-            format_eta,
             PARALLEL_HLS_RESUME_VALIDATION_VERSION,
             PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE,
             PARALLEL_HLS_FAST_TRANSPORT_REMUX_MIN_SEGMENTS,

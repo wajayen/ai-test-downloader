@@ -2,8 +2,11 @@
 
 Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔名 / 番號搜尋、多站備援、續傳、佇列管理與自動封裝為 Windows 較容易播放的 MP4。程式主要整合 `yt-dlp`、`curl_cffi`、`requests`、`ffmpeg`、`ffprobe` 與站台專用解析規則。
 
-目前版本：`20260718-3783`
-- **解析器解耦設計**：將 JAVDock, BestJavPorn, GetAV 與 AVJOY 等站台解析器程式碼解耦移至獨立的 `extractors/` 資料夾，主程式透過統一的 Extractor 介面動態載入，大幅提升程式碼維護性與錯誤容忍度。
+目前版本：`20260727-3795`
+- **解析器解耦設計**：將 JAVDock, BestJavPorn, GetAV, AVJOY 以及 Legacy 站台（TinyAVideo、Eyny）等解析器程式碼解耦移至獨立的 `extractors/` 資料夾，主程式透過統一的 Extractor 介面動態載入。
+- **並行 HLS 下載解耦**：將複雜的並行分段調度與 AES-128 解密核心邏輯提取至 `hls_downloader.py` 模組，大幅簡化主程式長度。
+- **GUI 介面佈局解耦**：將 Tkinter 視窗 UI 建置、欄位設定與 DnD 拖放註冊移至 `downloader_gui.py`。
+- **共享工具常數抽取**：建立 `common_utils.py`，集中收納日誌記錄器（`write_error_log`）、編碼轉換、URL 規範化等無狀態工具與常數，消除動態執行期查詢。
 
 
 ## 目前狀態
@@ -116,8 +119,12 @@ GitHub CLI 在 Codex Windows 終端若出現偶發 401，需確認 `gh api user`
 
 ## 專案檔案
 
-- `downloader.py`：主要程式碼。
-- `downloader_safe.py`：同步維護的安全備份來源。
+- `downloader.py`：主要協調與下載狀態協作程式碼。
+- `downloader_safe.py`：同步維護的安全協同備份來源。
+- `hls_downloader.py`：獨立解耦的並行 HLS 下載與解密引擎。
+- `downloader_gui.py`：獨立解耦的 Tkinter GUI 介面與事件綁定。
+- `common_utils.py`：全局共享之日誌、字串編碼、URL 規範化等無狀態工具函式庫。
+- `extractors/`：解耦之多站點解析器套件。
 - `downloader.spec`：PyInstaller 設定。
 - `build_downloader.ps1`：編譯與發布腳本。
 - `check_runtime_logs.ps1`：修改前執行紀錄檢查。

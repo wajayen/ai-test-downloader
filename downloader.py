@@ -29,6 +29,36 @@ import time
 import traceback
 import urllib.request
 import urllib.parse
+from common_utils import (
+    log_file_lock,
+    ERROR_LOG_FILE,
+    TRACE_LOG_FILE,
+    _ERROR_LOG_RECENT,
+    ERROR_LOG_MAX_ENTRIES,
+    TRACE_LOG_MAX_ENTRIES,
+    ERROR_LOG_DEDUPE_WINDOW_SECONDS,
+    LOG_ASCII_MIRROR_KEYS,
+    TRACE_LOG_CONTEXTS,
+    _summarize_log_exception,
+    _log_entry_context,
+    _log_ascii_mirror,
+    _trim_delimited_log_entries,
+    write_error_log,
+    _mojibake_visible_marker_count,
+    _contains_mojibake_noise,
+    _response_text_utf8,
+    _normalize_download_url,
+    _dedupe_download_urls,
+    _task_field_value,
+    _task_source_site_name,
+    _set_task_aux_fields,
+    _is_no_space_left_error,
+    format_transfer_rate,
+    format_transfer_size,
+    format_eta,
+    format_progress_percent,
+)
+
 import weakref
 import zipfile
 from functools import lru_cache
@@ -71,7 +101,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260718-3790"
+APP_BUILD = "20260727-3795"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -79,8 +109,8 @@ else:
     _APP_DIR = os.path.abspath(os.path.dirname(__file__))
 CONFIG_FILE = os.path.join(_APP_DIR, "config.json")
 STATE_FILE = os.path.join(_APP_DIR, "downloads.json")
-ERROR_LOG_FILE = os.path.join(_APP_DIR, "error.log")
-TRACE_LOG_FILE = os.path.join(_APP_DIR, "activity.log")
+
+
 URL_INPUT_HISTORY_LIMIT = 10
 MAX_DOWNLOADS_PER_DOMAIN = 3
 MAX_ACTIVE_DOWNLOADS_GLOBAL = 3
@@ -154,7 +184,7 @@ DISK_SPACE_NEAR_COMPLETE_REMAINING_BYTES = 512 * 1024 * 1024
 STATE_PERSIST_INTERVAL_SECONDS = 2.5
 RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS = 2.0
 RESUME_PROGRESS_MIN_BYTES_DELTA = 2 * 1024 * 1024
-ERROR_LOG_DEDUPE_WINDOW_SECONDS = 2.0
+
 SINGLE_INSTANCE_ACQUIRE_TIMEOUT_SECONDS = 4.0
 SINGLE_INSTANCE_ACQUIRE_RETRY_INTERVAL_SECONDS = 0.2
 FORCED_SHUTDOWN_EXIT_DELAY_SECONDS = 36.0
@@ -245,52 +275,6 @@ STRICT_RESUMED_FFMPEG_ARTIFACT_SITES = frozenset(("avbebe", "goodav17", "hohoj")
 def _ffmpeg_should_retry_with_audio_transcode(message):
     lowered = str(message or "").lower()
     return any(marker in lowered for marker in FFMPEG_AUDIO_TRANSCODE_RETRY_MARKERS)
-
-
-def _response_text_utf8(response):
-    content = getattr(response, "content", None)
-    decoded_candidates = []
-    if isinstance(content, (bytes, bytearray)) and content:
-        content_bytes = bytes(content)
-        encodings = []
-        for encoding in (
-            getattr(response, "encoding", None),
-            getattr(response, "apparent_encoding", None),
-            "utf-8",
-            "utf-8-sig",
-            "gb18030",
-            "big5",
-            "cp950",
-        ):
-            encoding = str(encoding or "").strip()
-            if encoding and encoding.lower() not in {item.lower() for item in encodings}:
-                encodings.append(encoding)
-        for encoding in encodings:
-            try:
-                decoded_candidates.append(content_bytes.decode(encoding))
-            except Exception:
-                continue
-    response_text = str(getattr(response, "text", "") or "")
-    if response_text:
-        decoded_candidates.append(response_text)
-    if not decoded_candidates:
-        return ""
-
-    def _decode_score(text):
-        text = str(text or "")
-        if not text:
-            return -100000
-        cjk_count = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", text))
-        bad_count = text.count("\ufffd") + len(re.findall(r"[\ue000-\uf8ff]", text))
-        mojibake_count = _mojibake_visible_marker_count(text)
-        score = min(len(text), 5000) + cjk_count * 8 - bad_count * 80
-        if mojibake_count >= 3:
-            score -= mojibake_count * 120
-        if _looks_like_garbled_text(text):
-            score -= 1000
-        return score
-
-    return max(decoded_candidates, key=_decode_score)
 
 
 def _decode_html_bytes_best_effort(raw_bytes):
@@ -1024,7 +1008,7 @@ PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
     "85xvideo": 48,
     "movieffm": 60,
-    "18av": 32,
+    "18av": 48,
     "avbebe": 24,
     "bestjavporn": 36,
     "dramasq": 24,
@@ -1079,7 +1063,7 @@ PARALLEL_HLS_SEGMENT_WORKERS_BY_HOST = {
     "121126.com": 48,
     "ggjav.com": 60,
     "surrit.com": 45,
-    "streamfastpro": 24,
+    "streamfastpro": 48,
     "mushroomtrack.com": 24,
     "hls.sb-cd.com": 24,
     "worldstatic.com": 48,
@@ -1535,164 +1519,11 @@ MEDIA_DOWNLOAD_RETRY_MARKERS = (
     "sec_e_untrusted_root",
     "schannel:",
 )
-_ERROR_LOG_RECENT = {}
-ERROR_LOG_MAX_ENTRIES = 10
-TRACE_LOG_MAX_ENTRIES = 10
-LOG_ASCII_MIRROR_KEYS = frozenset((
-    "filename",
-    "final_path",
-    "output",
-    "path",
-    "temp_filename",
-))
-TRACE_LOG_CONTEXTS = frozenset((
-    "app start",
-    "app peer processes detected",
-    "app shutdown finalized",
-    "app shutdown started",
-    "shutdown non-grace downloads stop requested",
-    "shutdown wait active downloads timeout",
-    "single instance lock denied",
-    "single instance lock file denied",
-    "single instance peer denied",
-    "single instance lock recovered after retry",
-    "m3u8 route selected",
-    "preferred native hls route selected",
-    "ffmpeg terminate requested",
-    "ffmpeg download started",
-    "ffmpeg download finished",
-    "ffmpeg resume segment preserved",
-    "ffmpeg resume segment accepted as complete output",
-    "parallel hls download started",
-    "parallel hls download finished",
-    "parallel hls download interrupted",
-    "parallel hls output already finalized",
-    "parallel hls candidate failed retry next",
-    "parallel hls concat remux fallback to transport",
-    "parallel hls transport remux fallback to concat",
-    "parallel hls resume complete before download",
-    "parallel hls remux deferred during shutdown",
-    "parallel hls completed remux finalizing during shutdown",
-    "parallel hls shutdown finalize guard activated",
-    "tktube media candidate rejected",
-    "download task duplicate worker skipped",
-    "download worker skipped during shutdown",
-    "download task active transfer state repaired",
-    "download task delete requested",
-    "download task delete waiting for worker stop",
-    "download task worker released",
-    "retryable persisted error resumed",
-    "http media download finished",
-    "direct media wrapper finalized output",
-    "parallel hls setup retry next candidate",
-    "parallel hls setup fallback to ffmpeg",
-    "parallel hls setup candidates exhausted",
-    "ggjav ffmpeg skipped failed hls candidates",
-    "ffmpeg direct media handoff",
-    "ggjav hls exhausted page fallback",
-    "getav hls exhausted source refresh",
-    "parallel hls skipped fmp4 playlist",
-    "parallel hls skipped huge playlist",
-    "parallel hls skipped unsupported edge segments",
-    "parallel hls google retry later",
-    "parallel hls purged invalid resume segments",
-    "parallel hls purged mismatched resume metadata",
-    "parallel hls purged orphan resume segments",
-    "parallel hls resume progress corrected from parts",
-    "parallel hls resume metadata differs from parts",
-    "parallel hls skipped missing leading resume segments",
-    "parallel hls resume segments loaded",
-    "ggjav hls exhausted search fallback",
-    "startup resume tasks classified",
-    "startup resume temp path prepared",
-    "completed output renamed",
-    "existing output accepted",
-    "existing output rejected",
-    "download task state normalized",
-    "garbled download thread title repaired",
-    "mixed garbled download thread title repaired",
-    "mixed garbled task title repaired",
-    "avbebe category page retargeted",
-    "avbebe rejected playable iframe stream",
-    "avbebe rejected non-video stream candidate",
-    "avbebe hgcloud rejected stream candidate",
-    "windows compatible mp4 remuxed",
-    "windows compatible mp4 remux failed",
-    "windows compatible mp4 transcoded",
-    "ffmpeg direct audio started",
-    "ffmpeg direct audio finished",
-    "ffmpeg audio transcode retry",
-    "m3u8 total bytes invalidated",
-    "m3u8 total bytes probe skipped",
-    "download concurrency limit changed",
-    "http multipart download started",
-    "http multipart fallback to single stream",
-    "http multipart parts preserved for resume",
-    "http media resume state preserved",
-    "http range part retry",
-    "http media output incomplete",
-    "state save skipped disk full",
-    "unknown video artifact removed",
-    "direct media fallback retry",
-    "hayav stream fallback",
-    "movieffm same-code fallback",
-    "av01 placeholder stream fallback",
-    "avjoy media refresh retry",
-    "yt-dlp native hls fallback started",
-    "yt-dlp native hls fallback finished",
-    "native hls artifact rejected",
-    "native hls artifact remuxed",
-    "native hls remux repair failed",
-    "existing output quarantined",
-    "native hls handoff to ffmpeg",
-    "gimy native hls handoff to ffmpeg",
-    "manifest source page refresh",
-    "video search candidate rejected",
-    "native hls failed output removed",
-    "ffmpeg near complete resume accepted",
-    "ffmpeg preserved resume segment finalized",
-    "ffmpeg preserved resume segment finalize failed",
-    "resume sidecar ignored smaller than base",
-    "resume invalid partial reset",
-    "resume implausible near-complete reset",
-    "resume low speed reanalysis requested",
-    "slow source reanalysis requested",
-    "parallel hls no progress reanalysis requested",
-    "unsupported url alternate search prompt",
-    "unsupported url alternate search declined",
-    "cached resolved url startup timeout",
-    "cached resolved probe skipped",
-    "cached resolved url expired",
-    "cached resolved refresh preserved resume artifacts",
-    "cached media link refresh",
-    "cached resolved url unavailable",
-    "close active download warning shown",
-    "close active download warning result",
-    "near complete shutdown grace started",
-    "near complete shutdown grace result",
-    "close active download dialog fallback",
-    "hayav unavailable external embed skipped",
-    "missav parser retry recovered",
-    "anime1 custom parser fallback",
-    "anime1 source retry after media failure",
-    "xiaoyakankan parse start",
-    "xiaoyakankan parse success",
-    "xiaoyakankan parse fallback",
-    "dead external source refresh",
-    "page fallback retry",
-    "hohoj slow external source refresh",
-    "bilibili yt-dlp route selected",
-    "facebook yt-dlp route selected",
-    "instagram yt-dlp route selected",
-    "youtube yt-dlp route selected",
-    "youtube yt-dlp fallback route selected",
-    "youtube cached component reset",
-    "youtube multipart component download started",
-    "youtube yt-dlp output accepted",
-    "instagram savereels fallback",
-    "instagram extractor fallback",
-    "facebook extractor fallback",
-))
+
+
+
+
+
 
 FORCED_M3U8_SITE_RULES = {
     "jable": {
@@ -1784,13 +1615,13 @@ NATIVE_HLS_PREFERRED_HOSTS = frozenset((
 ))
 GIMY_RESOLVED_URL_CACHE_TTL_SECONDS = 180
 
-RE_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
 RE_JABLE_M3U8_1 = re.compile(r'(https?:[\\/]+[^\s"\'\\]+\.m3u8[^\s"\'\\]*)')
 RE_JABLE_M3U8_2 = re.compile(r'hlsUrl\s*=\s*["\']([^"\']+\.m3u8.*?)["\']')
 RE_JABLE_M3U8_3 = re.compile(r'["\'](https?[^"\']+\.m3u8[^"\']*)["\']')
 RE_JABLE_TITLE = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 state_lock = threading.RLock()
-log_file_lock = threading.RLock()
+
 parallel_hls_thread_local = threading.local()
 single_instance_mutex = None
 single_instance_lock_file = None
@@ -2192,13 +2023,6 @@ class ParallelHlsUnsupportedSegmentContentException(Exception):
 
 class DownloadSourceUnavailableException(Exception):
     """Expected final state when every known source for a task is unavailable."""
-
-
-def _is_no_space_left_error(exc):
-    if getattr(exc, "errno", None) == 28:
-        return True
-    text = str(exc or "").lower()
-    return "no space left on device" in text or "errno 28" in text
 
 
 def _is_session_closed_error(exc):
@@ -2713,34 +2537,6 @@ def _normalize_state_entry(entry):
     return normalized
 
 
-def _normalize_download_url(url):
-    if not isinstance(url, str):
-        return ""
-    raw = html.unescape(url).strip()
-    if not raw:
-        return ""
-    lowered_raw = raw.lower()
-    if raw.startswith("[") and ("url=" in lowered_raw or "pmoive" in lowered_raw):
-        return ""
-    parsed = urllib.parse.urlsplit(raw)
-    scheme = (parsed.scheme or "https").lower()
-    netloc = parsed.netloc.lower()
-    if parsed.scheme and not netloc:
-        return ""
-    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    if netloc in ("www.youtube.com", "youtube.com", "m.youtube.com") and parsed.path == "/watch":
-        query_map = {}
-        for key, value in query:
-            query_map.setdefault(key, []).append(value)
-        if query_map.get("v"):
-            query = [(key, value) for key, value in query if key not in ("list", "index", "start_radio", "pp", "feature")]
-    elif netloc == "youtu.be":
-        query = [(key, value) for key, value in query if key not in ("list", "index", "start_radio", "pp", "feature")]
-    normalized_path = urllib.parse.quote(urllib.parse.unquote(parsed.path or "/"), safe="/:@!$&'()*+,;=%")
-    normalized_query = urllib.parse.urlencode(query, doseq=True)
-    return urllib.parse.urlunsplit((scheme, netloc, normalized_path, normalized_query, ""))
-
-
 def _extract_youtube_video_id(url):
     normalized = _normalize_download_url(url)
     if not normalized:
@@ -2832,35 +2628,6 @@ def _find_megacmd_get_command():
     return None
 
 
-def _dedupe_download_urls(candidates, primary_url=None):
-    if not candidates:
-        return []
-    primary_normalized = _normalize_download_url(primary_url) if primary_url else ""
-    deduped = []
-    seen = set()
-    for candidate in candidates:
-        if not candidate:
-            continue
-        normalized = _normalize_download_url(candidate)
-        if not normalized or normalized == primary_normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(normalized)
-    return deduped
-
-
-def _task_field_value(task, field_name, default=None):
-    target = task if task is not None else {}
-    return target.get(field_name, default)
-
-
-def _task_source_site_name(task, fallback_site=""):
-    source_site = str(_task_field_value(task, "source_site", "") or "").strip().lower()
-    if source_site:
-        return source_site
-    return str(fallback_site or "").strip().lower()
-
-
 def _infer_source_site_from_task_urls(*urls):
     for raw_url in urls:
         normalized = _normalize_download_url(raw_url)
@@ -2878,13 +2645,6 @@ def _infer_source_site_from_task_urls(*urls):
         if "mypikpak.com" in host and path.startswith("/s/"):
             return "pikpak"
     return ""
-
-
-def _set_task_aux_fields(task, **fields):
-    target = task if task is not None else {}
-    for key, value in fields.items():
-        target[key] = value
-    return target
 
 
 def _task_gimy_refresh_history(task):
@@ -10233,57 +9993,6 @@ def format_download_error_status(exc, limit=120):
     return f"{status_error}：{message}" if message else status_error
 
 
-def format_transfer_rate(bytes_per_second):
-    try:
-        value = max(float(bytes_per_second or 0), 0.0)
-    except (TypeError, ValueError):
-        return "0 B/s"
-    if value >= 1024 * 1024:
-        return f"{value / 1024 / 1024:.2f} MB/s"
-    if value >= 1024:
-        return f"{value / 1024:.2f} KB/s"
-    return f"{value:.0f} B/s"
-
-
-def format_transfer_size(downloaded_bytes=None, total_bytes=None):
-    try:
-        downloaded = None if downloaded_bytes is None else max(float(downloaded_bytes or 0), 0.0)
-        total = None if total_bytes is None else max(float(total_bytes or 0), 0.0)
-    except (TypeError, ValueError):
-        return "-"
-    if total and total > 0 and downloaded is not None:
-        return f"{downloaded / (1024 * 1024):.1f} / {total / (1024 * 1024):.1f} MB"
-    if downloaded is not None and downloaded > 0:
-        return f"{downloaded / (1024 * 1024):.1f} MB"
-    if total and total > 0:
-        return f"{total / (1024 * 1024):.1f} MB"
-    return "-"
-
-
-def format_eta(seconds):
-    try:
-        value = max(int(float(seconds or 0)), 0)
-    except (TypeError, ValueError):
-        return "--:--"
-    hours, rem = divmod(value, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours > 0:
-        return f"{hours:d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
-
-
-def format_progress_percent(downloaded_bytes, total_bytes, cap_at_99=True):
-    try:
-        downloaded = max(float(downloaded_bytes or 0), 0.0)
-        total = max(float(total_bytes or 0), 0.0)
-    except (TypeError, ValueError):
-        return None
-    if total <= 0:
-        return None
-    upper = 99.0 if cap_at_99 else 100.0
-    return max(0.0, min((downloaded / total) * 100.0, upper))
-
-
 def unpack_packed_javascript(text):
     if not text:
         return None
@@ -10411,59 +10120,6 @@ def _trim_delimited_log_entries(log_path, max_entries):
             f.write(normalized_text)
     except Exception:
         pass
-
-
-def write_error_log(context, exc, **extra):
-    try:
-        with log_file_lock:
-            now = time.time()
-            trace_only = context in TRACE_LOG_CONTEXTS
-            log_path = TRACE_LOG_FILE if trace_only else ERROR_LOG_FILE
-            signature = (
-                log_path,
-                context,
-                type(exc).__name__,
-                str(exc),
-                tuple((key, str(value)) for key, value in sorted(extra.items())),
-            )
-            last_seen = _ERROR_LOG_RECENT.get(signature)
-            if last_seen and now - last_seen < ERROR_LOG_DEDUPE_WINDOW_SECONDS:
-                return
-            _ERROR_LOG_RECENT[signature] = now
-            if len(_ERROR_LOG_RECENT) > 256:
-                cutoff = now - ERROR_LOG_DEDUPE_WINDOW_SECONDS
-                for stale_key in [key for key, ts in _ERROR_LOG_RECENT.items() if ts < cutoff]:
-                    _ERROR_LOG_RECENT.pop(stale_key, None)
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            lines = [
-                f"[{timestamp}] {context}",
-                f"build: {APP_BUILD}",
-            ]
-            if trace_only:
-                lines.append(f"message: {_summarize_log_exception(exc)}")
-            else:
-                lines.append(f"exception: {type(exc).__name__}: {_summarize_log_exception(exc, limit=400)}")
-            for key, value in extra.items():
-                safe_value = str(value).replace("\x00", "")
-                if key in ("original_error", "reason", "message"):
-                    safe_value = _summarize_log_exception(safe_value)
-                lines.append(f"{key}: {safe_value}")
-                if key in LOG_ASCII_MIRROR_KEYS:
-                    ascii_value = _log_ascii_mirror(safe_value)
-                    if ascii_value:
-                        lines.append(f"{key}_ascii: {ascii_value}")
-            if not trace_only:
-                lines.append("traceback:")
-                lines.append("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).replace("\x00", "").rstrip())
-            lines.append("--------------------------------------------------------------------------------")
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write("\n".join(lines).replace("\x00", "") + "\n")
-            max_entries = TRACE_LOG_MAX_ENTRIES if log_path == TRACE_LOG_FILE else ERROR_LOG_MAX_ENTRIES
-            _trim_delimited_log_entries(log_path, max_entries)
-            if trace_only:
-                _trim_delimited_log_entries(ERROR_LOG_FILE, ERROR_LOG_MAX_ENTRIES)
-    except Exception:
-        return
 
 
 def has_local_ffmpeg_binaries():
@@ -10791,7 +10447,9 @@ class DownloadCoordinator:
         return True
 
 
-class DownloadManagerApp(DownloadCoordinator):
+from downloader_gui import DownloadManagerGUI
+
+class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
     """Main desktop downloader application."""
 
     def __init__(self, root):
@@ -10869,330 +10527,6 @@ class DownloadManagerApp(DownloadCoordinator):
             return
         self._ffmpeg_install_started = True
         self.download_ffmpeg_interactive(None)
-
-    def setup_ui(self):
-        style = ttk.Style()
-        try:
-            style.theme_use("vista")
-        except Exception:
-            pass
-        style.configure("App.Treeview", rowheight=30, font=("Microsoft JhengHei UI", 10))
-        style.configure("App.Treeview.Heading", font=("Microsoft JhengHei UI", 10, "bold"), padding=(8, 6))
-        style.configure("App.TCombobox", padding=4)
-        style.configure("App.Vertical.TScrollbar", arrowsize=14)
-        style.configure("App.Horizontal.TScrollbar", arrowsize=14)
-
-        header_frame = tk.Frame(self.root, bg="#f4f7fb")
-        header_frame.grid(row=0, column=0, padx=20, pady=(12, 4), sticky="ew")
-        header_frame.columnconfigure(0, weight=1)
-        header_frame.columnconfigure(1, weight=0)
-        header_frame.columnconfigure(2, weight=1)
-        center_frame = tk.Frame(header_frame, bg="#f4f7fb")
-        center_frame.grid(row=0, column=1, sticky="n")
-        self.header_title_label = tk.Label(
-            center_frame,
-            text=t("app_title"),
-            font=("Microsoft JhengHei UI", 18, "bold"),
-            bg="#f4f7fb",
-            fg="#123b5d",
-            anchor="center",
-            justify="center",
-        )
-        self.header_title_label.grid(row=0, column=0, sticky="ew")
-        self.overview_var = tk.StringVar(value=t("overview_idle"))
-        right_frame = tk.Frame(header_frame, bg="#f4f7fb")
-        right_frame.grid(row=0, column=2, sticky="ne")
-        tk.Label(
-            right_frame,
-            textvariable=self.overview_var,
-            font=("Microsoft JhengHei UI", 9, "bold"),
-            bg="#ddebf7",
-            fg="#224563",
-            padx=10,
-            pady=5,
-            bd=1,
-            relief="solid",
-        ).grid(row=0, column=0, sticky="e")
-
-        action_bar = tk.Frame(self.root, bg="#f4f7fb")
-        action_bar.grid(row=1, column=0, padx=20, pady=(0, 0), sticky="ew")
-        action_bar.columnconfigure(0, weight=1)
-        action_button_frame = tk.Frame(action_bar, bg="#f4f7fb")
-        action_button_frame.grid(row=0, column=0, sticky="")
-
-        def make_action_btn(text, command, bg):
-            return tk.Button(
-                action_button_frame,
-                text=text,
-                command=command,
-                font=("Microsoft JhengHei UI", 9),
-                bg=bg,
-                fg="white",
-                relief="flat",
-                padx=12,
-                pady=4,
-                cursor="hand2",
-            )
-
-        self.action_buttons["resume"] = make_action_btn(t("menu_resume"), self.resume_selected, "#2e7dbe")
-        self.action_buttons["resume"].pack(side="left", padx=(0, 8))
-        self.action_buttons["pause"] = make_action_btn(t("menu_pause"), self.pause_selected, "#d7871f")
-        self.action_buttons["pause"].pack(side="left", padx=(0, 8))
-        self.action_buttons["delete"] = make_action_btn(t("menu_delete"), self.delete_selected, "#c94a4a")
-        self.action_buttons["delete"].pack(side="left", padx=(0, 8))
-        self.action_buttons["clear"] = make_action_btn(t("menu_clear"), self.clear_all_finished, "#607d8b")
-        self.action_buttons["clear"].pack(side="left")
-
-        settings_frame = tk.LabelFrame(
-            self.root,
-            text=t("basic_settings"),
-            font=("Microsoft JhengHei UI", 9, "bold"),
-            height=230,
-            padx=12,
-            pady=14,
-            bg="#f8fbff",
-            fg="#204a69",
-            bd=1,
-            relief="groove",
-        )
-        self.settings_frame = settings_frame
-        settings_frame.grid(row=2, column=0, padx=20, pady=(2, 0), sticky="ew")
-        settings_frame.grid_propagate(False)
-        settings_frame.columnconfigure(1, weight=1)
-
-        self.save_dir_label = tk.Label(settings_frame, text=t("save_dir"), font=("Microsoft JhengHei UI", 9), bg="#f8fbff", fg="#24435b")
-        self.save_dir_label.grid(row=0, column=0, sticky="w", pady=(6, 2))
-        default_dir = self.config.get("save_dir", "")
-        if not default_dir:
-            default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-            os.makedirs(default_dir, exist_ok=True)
-        default_dir = self._normalize_save_dir_value(default_dir)
-        self._save_dir_cached = default_dir
-        self.save_dir_var.set(default_dir)
-        self.save_dir_entry = tk.Entry(settings_frame, textvariable=self.save_dir_var, font=("Segoe UI", 9), relief="groove", bd=1)
-        self.save_dir_entry.grid(row=0, column=1, sticky="ew", ipady=1)
-        self.save_dir_entry.bind("<FocusOut>", lambda _event: self.persist_save_dir())
-        self.save_dir_entry.bind("<Return>", lambda _event: self.persist_save_dir())
-        self.browse_button = tk.Button(
-            settings_frame,
-            text=t("browse"),
-            command=self.browse_folder,
-            font=("Microsoft JhengHei UI", 9),
-            bg="#e5eef7",
-            fg="#163a59",
-            relief="flat",
-            padx=10,
-            pady=4,
-            cursor="hand2",
-        )
-        self.browse_button.grid(row=0, column=2, padx=(10, 0))
-
-        input_frame = tk.Frame(settings_frame, bg="#f8fbff")
-        self.input_frame = input_frame
-        input_frame.grid(row=1, column=0, columnspan=3, pady=(20, 8), sticky="ew")
-        input_frame.columnconfigure(0, weight=1)
-        self.new_url_label = tk.Label(input_frame, text=t("new_url"), font=("Microsoft JhengHei UI", 9), bg="#f8fbff", fg="#d96c00")
-        self.new_url_label.grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.url_entry = ttk.Combobox(
-            input_frame,
-            values=self.url_history,
-            state="normal",
-            font=("Segoe UI", 9),
-            style="App.TCombobox",
-        )
-        self.url_entry.set("")
-        self.url_entry.grid(row=1, column=0, sticky="ew", ipady=1)
-        self.url_entry.bind("<Return>", lambda _event: self.add_new_download())
-        self.url_entry.bind("<Up>", lambda _event: self._select_url_history(-1))
-        self.url_entry.bind("<Down>", lambda _event: self._select_url_history(1))
-        make_context_menu(self.url_entry)
-        self.format_dropdown = ttk.Combobox(
-            input_frame,
-            textvariable=self.format_var,
-            values=[t("format_video"), t("format_audio")],
-            state="readonly",
-            width=10,
-            font=("Segoe UI", 9),
-            style="App.TCombobox",
-        )
-        self.format_dropdown.grid(row=1, column=1, padx=(12, 0))
-        self.format_dropdown.current(0)
-        self.add_button = tk.Button(
-            input_frame,
-            text=t("add_task"),
-            font=("Microsoft JhengHei UI", 9, "bold"),
-            bg="#1f8f5f",
-            fg="white",
-            activebackground="#19744d",
-            activeforeground="white",
-            relief="flat",
-            command=self.add_new_download,
-            padx=12,
-            pady=5,
-            cursor="hand2",
-        )
-        self.add_button.grid(row=1, column=2, padx=(12, 0), ipadx=6)
-        self.topmost_var = tk.BooleanVar(value=True)
-
-        def toggle_topmost():
-            try:
-                self.root.attributes("-topmost", bool(self.topmost_var.get()))
-            except Exception:
-                return
-
-        self.topmost_checkbox = tk.Checkbutton(
-            right_frame,
-            text=t("chk_topmost"),
-            variable=self.topmost_var,
-            command=toggle_topmost,
-            font=("Microsoft JhengHei UI", 9),
-            fg="#4e5f6d",
-            bg="#f4f7fb",
-            activebackground="#f4f7fb",
-        )
-        self.topmost_checkbox.grid(row=1, column=0, pady=(6, 0), sticky="e")
-
-        list_frame = tk.LabelFrame(
-            self.root,
-            text=t("list_frame"),
-            font=("Microsoft JhengHei UI", 9, "bold"),
-            bg="#f4f7fb",
-            fg="#204a69",
-            bd=1,
-            relief="groove",
-            padx=10,
-            pady=10,
-            name="list_frame",
-        )
-        self.list_frame = list_frame
-        list_frame.grid(row=3, column=0, padx=20, pady=(10, 12), sticky="nsew")
-        list_frame.columnconfigure(0, weight=1)
-        list_frame.rowconfigure(0, weight=1)
-        self.root.rowconfigure(3, weight=1)
-
-        columns = ("name", "progress", "size", "speed_eta", "status")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", style="App.Treeview", selectmode="extended")
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        self._configure_task_tree_columns()
-        self.tree.tag_configure("row_downloading", background="#ecfdf5")
-        self.tree.tag_configure("row_queued", background="#eff6ff")
-        self.tree.tag_configure("row_paused", background="#fff7ed")
-        self.tree.tag_configure("row_done", background="#f3f4f6")
-        self.tree.tag_configure("row_finalizing", background="#f5f3ff")
-        self.tree.tag_configure("row_error", background="#fef2f2")
-        try:
-            self.root.after(350, self._register_primary_drop_targets)
-        except Exception:
-            self._register_primary_drop_targets()
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview, style="App.Vertical.TScrollbar")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        xscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.tree.xview, style="App.Horizontal.TScrollbar")
-        xscroll.grid(row=1, column=0, sticky="ew")
-        self.tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=xscroll.set)
-
-        self.tree_menu = tk.Menu(self.root, tearoff=0)
-        self.tree_menu.add_command(label=t("menu_resume"), command=self.resume_selected)
-        self.tree_menu.add_command(label=t("menu_pause"), command=self.pause_selected)
-        self.tree_menu.add_command(label=t("menu_delete"), command=self.delete_selected)
-        self.tree_menu.add_separator()
-        self.tree_menu.add_command(label=t("menu_clear"), command=self.clear_all_finished)
-        self.tree.bind("<Button-3>", self.show_tree_menu)
-        self.tree.bind("<Delete>", self._handle_delete_key)
-        self.tree.bind("<BackSpace>", self._handle_delete_key)
-        self.tree.bind("<Control-a>", self.select_all_tasks)
-        self.tree.bind("<Control-A>", self.select_all_tasks)
-        self.tree.bind("<ButtonPress-1>", self._begin_tree_reorder)
-        self.tree.bind("<B1-Motion>", self._drag_reorder_tree)
-        self.tree.bind("<ButtonRelease-1>", self._end_tree_reorder)
-        self.tree.bind("<<TreeviewSelect>>", self._handle_tree_select)
-        self.root.bind_all("<Control-a>", self._handle_select_all_shortcut, add="+")
-        self.root.bind_all("<Control-A>", self._handle_select_all_shortcut, add="+")
-        self.root.bind_all("<Delete>", self._handle_delete_shortcut, add="+")
-        self._refresh_ui_summary()
-
-    def _configure_task_tree_columns(self):
-        if self.tree is None:
-            return
-        column_specs = (
-            ("name", "col_name", 220, "w"),
-            ("progress", "col_progress", 90, "center"),
-            ("size", "col_size", 100, "center"),
-            ("speed_eta", "col_speed_eta", 180, "center"),
-            ("status", "col_status", 120, "center"),
-        )
-        for column_id, heading_key, width, anchor in column_specs:
-            self.tree.heading(column_id, text=t(heading_key))
-            self.tree.column(column_id, width=width, anchor=anchor)
-
-    def _register_drop_target_widget(self, widget):
-        if widget is None:
-            return
-        try:
-            supported_types = [token for token in (DND_TEXT, DND_FILES) if token]
-            if supported_types and hasattr(widget, "drop_target_register"):
-                widget.drop_target_register(*supported_types)
-                widget.dnd_bind("<<Drop>>", self.handle_drop)
-                if widget not in self._drop_target_widgets:
-                    self._drop_target_widgets.append(widget)
-        except Exception:
-            pass
-
-    def _register_primary_drop_targets(self):
-        seen = set()
-        for widget in (self.root, self.url_entry):
-            if widget is None:
-                continue
-            widget_id = id(widget)
-            if widget_id in seen:
-                continue
-            seen.add(widget_id)
-            self._register_drop_target_widget(widget)
-
-    def _unregister_drop_targets(self):
-        widgets = list(reversed(getattr(self, "_drop_target_widgets", [])))
-        self._drop_target_widgets = []
-        for widget in widgets:
-            try:
-                if hasattr(widget, "dnd_unbind"):
-                    widget.dnd_unbind("<<Drop>>")
-            except Exception:
-                pass
-            try:
-                if hasattr(widget, "drop_target_unregister"):
-                    widget.drop_target_unregister()
-            except TypeError:
-                try:
-                    supported_types = [token for token in (DND_TEXT, DND_FILES) if token]
-                    if supported_types and hasattr(widget, "drop_target_unregister"):
-                        widget.drop_target_unregister(*supported_types)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-    def _prepare_ui_for_shutdown(self):
-        self._shutdown_started = True
-        try:
-            if self.ui_throttler is not None:
-                self.ui_throttler.stop()
-        except Exception:
-            pass
-        self._pending_status_styles = {}
-        self._status_style_flush_scheduled = False
-        self._summary_refresh_scheduled = False
-        self._queue_process_scheduled = False
-        self._startup_resume_pending = False
-        self._startup_resume_scheduled = False
-        try:
-            self.root.unbind_all("<Control-a>")
-            self.root.unbind_all("<Control-A>")
-            self.root.unbind_all("<Delete>")
-        except Exception:
-            pass
-        try:
-            self._unregister_drop_targets()
-        except Exception:
-            pass
 
     def _track_network_session(self, session):
         if session is None:
@@ -22086,43 +21420,6 @@ class DownloadManagerApp(DownloadCoordinator):
             )
         )
 
-    def _fetch_tinyavideo_page_text(self, page_url, origin=None, timeout=14):
-        variants = _tinyavideo_video_page_variants(page_url)
-        if not variants:
-            raise Exception("TinyAVideo page URL missing")
-        c_req = get_curl_cffi_requests()
-        last_exc = None
-        for candidate_url in variants:
-            try:
-                parsed = urllib.parse.urlsplit(candidate_url)
-                candidate_origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'tinyavideo.com'}"
-            except Exception:
-                candidate_origin = origin or "https://tinyavideo.com"
-            page_headers = _make_browser_page_headers(
-                referer=(origin or candidate_origin).rstrip("/") + "/",
-                origin=candidate_origin,
-            )
-            for browser in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
-                session = None
-                try:
-                    session = self._track_network_session(c_req.Session(impersonate=browser))
-                    resp = session.get(candidate_url, timeout=timeout, headers=page_headers)
-                    status_code = int(getattr(resp, "status_code", 0) or 0)
-                    page_text = _response_text_utf8(resp)
-                    if status_code >= 400:
-                        raise Exception(f"TinyAVideo page HTTP {status_code}")
-                    if page_text and ("<html" in page_text.lower() or "m3u8" in page_text.lower() or "video" in page_text.lower()):
-                        return page_text, str(getattr(resp, "url", candidate_url) or candidate_url), candidate_origin
-                    raise Exception("TinyAVideo empty page response")
-                except Exception as exc:
-                    last_exc = exc
-                    continue
-                finally:
-                    self._close_network_session(session)
-        if last_exc is not None:
-            raise last_exc
-        raise Exception("TinyAVideo page fetch failed")
-
     def _fetch_getav_page_text(self, page_url, origin=None, referer=None, timeout=20):
         c_req = get_curl_cffi_requests()
         origin = origin or _url_origin(page_url) or "https://getav.net"
@@ -22205,286 +21502,16 @@ class DownloadManagerApp(DownloadCoordinator):
         return [item[-1] for item in scored]
 
     def _fetch_getav_media_candidates(self, page_url, fallback_name="GetAV"):
-        normalized_page_url = _normalize_download_url(page_url)
-        if not normalized_page_url or not _is_getav_video_page_url(normalized_page_url):
-            raise DownloadSourceUnavailableException("GetAV video page URL invalid")
-        origin = _url_origin(normalized_page_url) or "https://getav.net"
-        page_text, final_page_url = self._fetch_getav_page_text(normalized_page_url, origin=origin, referer=origin + "/")
-        page_title = _clean_getav_title(
-            _extract_html_title(page_text, fallback_name or "GetAV"),
-            page_url=final_page_url,
-            fallback_title=fallback_name or "GetAV",
-        )
-        candidates = _extract_getav_index_urls(page_text)
-        embed_urls = _extract_getav_embed_urls(page_text, base_url=final_page_url)
-        embed_url = embed_urls[0] if embed_urls else ""
-        embed_attempts = []
-        for candidate_embed_url in embed_urls[:3]:
-            try:
-                embed_text, final_embed_url = self._fetch_getav_page_text(
-                    candidate_embed_url,
-                    origin=origin,
-                    referer=final_page_url,
-                    timeout=20,
-                )
-                embed_candidates = _extract_getav_index_urls(embed_text)
-                if not embed_url:
-                    embed_url = final_embed_url
-                candidates.extend(embed_candidates)
-                embed_attempts.append({"url": final_embed_url, "index_count": len(embed_candidates)})
-            except Exception as embed_exc:
-                embed_attempts.append({"url": candidate_embed_url, "error": _summarize_log_exception(embed_exc)})
-        candidates = _dedupe_download_urls(candidates)
-        candidates = self._order_getav_index_candidates(
-            candidates,
-            referer=embed_url or final_page_url,
-            origin=origin,
-        )
-        if not candidates:
-            write_error_log(
-                "getav media candidates missing",
-                DownloadSourceUnavailableException("GetAV page did not expose worldstatic HLS index playlists"),
-                source_page=final_page_url,
-                source_site="getav",
-                embed_urls=embed_urls[:3],
-                embed_attempts=embed_attempts,
-                preview_candidates=[
-                    candidate
-                    for candidate in _extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
-                    if "preview" in str(candidate or "").lower()
-                ][:3],
-            )
-            raise DownloadSourceUnavailableException("GetAV media URL missing")
-        return page_title, candidates, embed_url or final_page_url
+        return self._fetch_decoupled_media_candidates("getav", page_url, fallback_name)
 
     def _fetch_avjoy_media_candidates(self, page_url, fallback_name="AVJOY"):
-        parsed = urllib.parse.urlsplit(str(page_url or ""))
-        site_root = f"{parsed.scheme or 'https'}://{parsed.netloc or 'avjoy.me'}/"
-        headers = _make_ytdlp_http_headers(referer=site_root)
-        c_req = get_curl_cffi_requests()
-        last_exc = None
-        for browser in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
-            try:
-                resp = c_req.get(page_url, impersonate=browser, timeout=20, headers=headers)
-                page_text = str(getattr(resp, "text", "") or "")
-                candidates = _extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd"))
-                unpacked = unpack_packed_javascript(page_text)
-                if unpacked:
-                    candidates.extend(_extract_candidate_media_urls(unpacked, allowed_exts=(".mp4", ".m3u8", ".mpd")))
-                candidates = _dedupe_download_urls(candidates)
-                slug_title = _avjoy_title_from_url_slug(page_url)
-                title = _clean_avjoy_title(_extract_html_title(page_text, slug_title or fallback_name), slug_title or fallback_name)
-                title_code_only = bool(re.fullmatch(r"[A-Z]{2,10}-\d{2,6}", str(title or "").strip()))
-                if slug_title and (title_code_only or len(str(title or "")) < len(slug_title) * 0.45):
-                    title = slug_title
-                if candidates:
-                    return title, candidates
-            except Exception as exc:
-                last_exc = exc
-                continue
-        if last_exc is not None:
-            raise last_exc
-        return fallback_name, []
+        return self._fetch_decoupled_media_candidates("avjoy", page_url, fallback_name)
 
     def _fetch_bestjavporn_media_candidates(self, page_url, fallback_name="BestJavPorn"):
-        parsed = urllib.parse.urlsplit(str(page_url or ""))
-        origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'www.bestjavporn.com'}"
-        c_req = get_curl_cffi_requests()
-        last_exc = None
-        for browser in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
-            session = None
-            try:
-                session = self._track_network_session(c_req.Session(impersonate=browser))
-                page_headers = _make_browser_page_headers(referer=origin + "/zh/", origin=origin)
-                resp = session.get(page_url, timeout=25, headers=page_headers)
-                page_text = _response_text_utf8(resp)
-                final_page_url = str(getattr(resp, "url", page_url) or page_url)
-                video_id_match = re.search(r'\bvideo-id=["\']([^"\']+)["\']', page_text, re.IGNORECASE)
-                video_ver_match = re.search(r'\bvideo_ver=["\']([^"\']+)["\']', page_text, re.IGNORECASE)
-                data_mpu_match = re.search(r'id=["\']video-player["\'][^>]+data-mpu=["\']([^"\']+)', page_text, re.IGNORECASE | re.DOTALL)
-                if not video_id_match or not data_mpu_match:
-                    raise Exception("BestJavPorn player data missing")
-                video_id = html.unescape(video_id_match.group(1)).strip()
-                video_ver = html.unescape(video_ver_match.group(1)).strip() if video_ver_match else "2"
-                sources = _bestjavporn_dex(video_id, html.unescape(data_mpu_match.group(1)))
-                api_headers = _make_ajax_http_headers(referer=final_page_url, origin=origin)
-                api_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
-                api_resp = session.post(
-                    origin.rstrip("/") + "/api/play/",
-                    data={"sources": sources, "ver": video_ver or "2"},
-                    timeout=25,
-                    headers=api_headers,
-                )
-                payload = api_resp.json() or {}
-                if not payload.get("status") or not payload.get("data"):
-                    raise Exception("BestJavPorn API returned no playable source")
-                player_path = _bestjavporn_dex(video_id, payload.get("data", ""))
-                player_url = urllib.parse.urljoin(origin + "/", player_path)
-                player_headers = _make_browser_page_headers(referer=final_page_url, origin=origin)
-                player_resp = session.get(player_url, timeout=25, headers=player_headers)
-                player_text = _response_text_utf8(player_resp)
-                config_match = re.search(r'\bdata-config=["\']([^"\']+)["\']', player_text, re.IGNORECASE | re.DOTALL)
-                if not config_match:
-                    raise Exception("BestJavPorn player config missing")
-                _config, source_entries = _bestjavporn_decode_player_config(html.unescape(config_match.group(1)), player_url)
-                candidates = []
-                for entry in source_entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    candidate = _normalize_download_url(entry.get("file") or entry.get("src") or entry.get("url"))
-                    if candidate:
-                        candidates.append(candidate)
-                candidates.extend(_extract_candidate_media_urls(player_text, allowed_exts=(".m3u8", ".mp4", ".mpd")))
-                expanded_candidates = []
-                hls_headers = _make_hls_http_headers(referer=player_url, origin=origin)
-                for candidate in _dedupe_download_urls(candidates):
-                    if _looks_like_manifest_url(candidate):
-                        try:
-                            manifest_resp = session.get(candidate, timeout=20, headers=hls_headers)
-                            manifest_text = _response_text_utf8(manifest_resp)
-                            variants = _extract_hls_variant_urls_by_quality(str(getattr(manifest_resp, "url", candidate) or candidate), manifest_text)
-                            if variants:
-                                expanded_candidates.extend(variants)
-                                expanded_candidates.append(candidate)
-                                continue
-                        except Exception:
-                            pass
-                    expanded_candidates.append(candidate)
-                candidates = _dedupe_download_urls(expanded_candidates)
-                title = _clean_bestjavporn_title(_extract_html_title(page_text, fallback_name), final_page_url, fallback_name)
-                if candidates:
-                    return title, candidates, player_url
-                raise Exception("BestJavPorn media URL missing")
-            except Exception as exc:
-                last_exc = exc
-            finally:
-                if session is not None:
-                    self._close_network_session(session)
-        if last_exc is not None:
-            raise last_exc
-        return fallback_name, [], ""
+        return self._fetch_decoupled_media_candidates("bestjavporn", page_url, fallback_name)
 
     def _fetch_javdock_media_candidates(self, page_url, fallback_name="JavDock"):
-        parsed = urllib.parse.urlsplit(str(page_url or ""))
-        origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'www.javdock.com'}"
-        c_req = get_curl_cffi_requests()
-        last_exc = None
-        for browser in PARALLEL_HLS_EXTENDED_IMPERSONATE_BROWSERS:
-            session = None
-            try:
-                session = self._track_network_session(c_req.Session(impersonate=browser))
-                page_headers = _make_browser_page_headers(referer=origin.rstrip("/") + "/zh/", origin=origin)
-                resp = session.get(page_url, timeout=25, headers=page_headers)
-                page_text = _response_text_utf8(resp)
-                final_page_url = str(getattr(resp, "url", page_url) or page_url)
-                player_match = re.search(r'id=["\']player-wrapper["\'][^>]*', page_text, re.IGNORECASE | re.DOTALL)
-                player_html = player_match.group(0) if player_match else ""
-                if not player_html:
-                    # Fallback to any tag containing data-ts-id
-                    tag_match = re.search(r'<[^>]*\bdata-ts-id=["\'][^"\']+(?:[^>]*>)?', page_text, re.IGNORECASE)
-                    player_html = tag_match.group(0) if tag_match else ""
-                video_id_match = re.search(r'\bdata-ts-id=["\']([^"\']+)', player_html, re.IGNORECASE)
-                data_live_match = re.search(r'\bdata-ts-live=["\']([^"\']+)', player_html, re.IGNORECASE | re.DOTALL)
-                data_ep_match = re.search(r'\bdata-ts-ep=["\']([^"\']+)', player_html, re.IGNORECASE)
-                if not video_id_match or not data_live_match:
-                    raise Exception("JavDock player data missing")
-                video_id = html.unescape(video_id_match.group(1)).strip()
-                data_live = html.unescape(data_live_match.group(1)).strip()
-                ep_value = 1
-                if data_ep_match:
-                    try:
-                        ep_value = max(1, int(str(html.unescape(data_ep_match.group(1))).strip()) - 1)
-                    except Exception:
-                        ep_value = 1
-                sources = _javdock_fme(video_id, data_live, encode_sources=True)
-                api_headers = _make_ajax_http_headers(referer=final_page_url, origin=origin)
-                api_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
-                api_resp = session.post(
-                    origin.rstrip("/") + "/api/play/",
-                    data={"sources": sources, "ep": ep_value, "ver": "2"},
-                    timeout=25,
-                    headers=api_headers,
-                )
-                payload = api_resp.json() or {}
-                if not payload.get("status") or not payload.get("data"):
-                    raise Exception("JavDock API returned no playable source")
-                player_path = _javdock_fme(video_id, payload.get("data", ""), encode_sources=False)
-                player_url = urllib.parse.urljoin(origin + "/", player_path)
-                player_origin = _url_origin(player_url) or origin
-                player_resp = session.get(
-                    player_url,
-                    timeout=25,
-                    headers=_make_browser_page_headers(referer=final_page_url, origin=origin),
-                )
-                player_text = _response_text_utf8(player_resp)
-                final_player_url = str(getattr(player_resp, "url", player_url) or player_url)
-                config_match = re.search(r'\bdata-config=["\']([^"\']+)', player_text, re.IGNORECASE | re.DOTALL)
-                if not config_match:
-                    raise Exception("JavDock player config missing")
-                _config, source_entries = _bestjavporn_decode_player_config(html.unescape(config_match.group(1)), final_player_url)
-                candidates = []
-                for entry in source_entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    candidate = _normalize_download_url(entry.get("file") or entry.get("src") or entry.get("url"))
-                    if candidate:
-                        candidates.append(candidate)
-                expanded_candidates = []
-                hls_headers = _make_hls_http_headers(referer=final_player_url, origin=player_origin)
-                for candidate in _dedupe_download_urls(candidates):
-                    if _looks_like_manifest_url(candidate):
-                        try:
-                            manifest_resp = session.get(candidate, timeout=20, headers=hls_headers)
-                            manifest_text = _response_text_utf8(manifest_resp)
-                            variants = _extract_hls_variant_urls_by_quality(str(getattr(manifest_resp, "url", candidate) or candidate), manifest_text)
-                            if variants:
-                                expanded_candidates.extend(variants)
-                                expanded_candidates.append(candidate)
-                                continue
-                        except Exception:
-                            pass
-                    expanded_candidates.append(candidate)
-                candidates = _dedupe_download_urls(expanded_candidates)
-                title = _clean_javdock_title(_extract_html_title(page_text, fallback_name), final_page_url, fallback_name)
-                if candidates:
-                    cookies_dict = session.cookies.get_dict()
-                    if cookies_dict:
-                        cookie_str = "; ".join(f"{k}={v}" for k, v in cookies_dict.items())
-                        self._javdock_cookies_cache[page_url] = cookie_str
-                    return title, candidates, final_player_url
-                raise Exception("JavDock media URL missing")
-            except Exception as exc:
-                last_exc = exc
-            finally:
-                if session is not None:
-                    self._close_network_session(session)
-        if last_exc is not None:
-            try:
-                with ytdl_init_lock:
-                    import yt_dlp
-                    ydl_opts = {
-                        "quiet": True,
-                        "no_warnings": True,
-                        "skip_download": True,
-                        "nocheckcertificate": True,
-                    }
-                    cookie_sources = _preferred_browser_cookie_sources()
-                    for src in cookie_sources or []:
-                        ydl_opts["cookiesfrombrowser"] = src
-                        break
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(page_url, download=False)
-                        if info:
-                            formats = info.get("formats") or []
-                            urls = [f.get("url") for f in formats if f.get("url")]
-                            title = info.get("title") or fallback_name
-                            if urls:
-                                return title, urls, page_url
-            except Exception:
-                pass
-            raise last_exc
-        return fallback_name, [], ""
-        return fallback_name, [], ""
+        return self._fetch_decoupled_media_candidates("javdock", page_url, fallback_name)
 
     def _fetch_decoupled_media_candidates(self, site_key, page_url, fallback_name=""):
         from extractors import EXTRACTORS_REGISTRY
@@ -22507,33 +21534,6 @@ class DownloadManagerApp(DownloadCoordinator):
             return "", []
         remaining = [candidate for candidate in ordered if candidate != media_url and candidate not in fallback_urls]
         return media_url, _dedupe_download_urls(fallback_urls + remaining)
-
-    def _fetch_eyny_page_text(self, session, page_url, referer=None, timeout=20):
-        origin = _eyny_origin_for_url(page_url)
-        headers = _make_browser_page_headers(referer=referer or origin + "/", origin=origin)
-        resp = session.get(page_url, timeout=timeout, headers=headers)
-        page_text = _response_text_utf8(resp)
-        challenge = _extract_eyny_pow_challenge(page_text)
-        if not challenge:
-            return page_text, str(getattr(resp, "url", page_url))
-        challenge_value, timestamp, difficulty = challenge
-        nonce = _solve_eyny_pow_nonce(challenge_value, timestamp, difficulty)
-        if nonce is None:
-            return page_text, str(getattr(resp, "url", page_url))
-        cookie_values = {
-            "181882d_n": str(nonce),
-            "181882d_ts": str(timestamp),
-            "181882d_ch": str(challenge_value),
-        }
-        for name, value in cookie_values.items():
-            try:
-                session.cookies.set(name, value, domain=".eyny.com", path="/")
-            except Exception:
-                pass
-        retry_headers = dict(headers)
-        retry_headers["Cookie"] = "; ".join(f"{name}={value}" for name, value in cookie_values.items())
-        resp = session.get(page_url, timeout=timeout, headers=retry_headers)
-        return _response_text_utf8(resp), str(getattr(resp, "url", page_url))
 
     def _select_eyny_media_candidate(self, candidates, failed_urls=None):
         failed_set = set(_dedupe_download_urls(failed_urls or []))
@@ -23243,6 +22243,7 @@ class DownloadManagerApp(DownloadCoordinator):
             raise ParallelHlsUnsupportedSegmentContentException(
                 f"parallel HLS unsupported encryption method: {method}"
             )
+        key_url = key_info.get("uri")
         key_data = (key_cache or {}).get(key_url)
         if not key_data and key_url:
             try:
@@ -32500,21 +31501,17 @@ class DownloadManagerApp(DownloadCoordinator):
 
         if _is_tinyavideo_video_page_url(url):
             self._set_task_parse_ui(item_id, key="eta_direct_media", fallback="正在解析 TinyAVideo 影片...")
-            tiny_origin = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc or 'tinyavideo.com'}"
-            page_text, source_page, tiny_origin = self._fetch_tinyavideo_page_text(url, origin=tiny_origin)
-            page_title = _clean_tinyavideo_title(
-                _extract_html_title(page_text, short_name or "TinyAVideo"),
-                page_url=source_page,
-                fallback_title=short_name or "TinyAVideo",
-            )
-            candidates = _dedupe_download_urls(
-                _extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
-            )
+            try:
+                page_title, candidates = self._fetch_decoupled_media_candidates("tinyavideo", url, short_name or "TinyAVideo")
+            except Exception as exc:
+                self._set_task_parse_ui(item_id, error=str(exc))
+                raise exc
             media_url, fallback_urls = _pick_primary_with_fallbacks(candidates, source_site="tinyavideo")
             if not media_url:
                 raise DownloadSourceUnavailableException("TinyAVideo media URL missing")
-            _set_task_identity(name=page_title, source_site="tinyavideo", source_page=source_page, fallback_urls=fallback_urls)
-            hls_headers = _make_hls_http_headers(referer=source_page, origin=tiny_origin)
+            _set_task_identity(name=page_title, source_site="tinyavideo", source_page=url, fallback_urls=fallback_urls)
+            tiny_origin = _url_origin(url) or "https://tinyavideo.com"
+            hls_headers = _make_hls_http_headers(referer=url, origin=tiny_origin)
             if _looks_like_manifest_url(media_url):
                 try:
                     source_unavailable, unavailable_details = self._hls_manifest_has_unavailable_segments(
@@ -32539,7 +31536,7 @@ class DownloadManagerApp(DownloadCoordinator):
                         DownloadSourceUnavailableException("TinyAVideo HLS segments are unavailable"),
                         item_id=item_id,
                         url=media_url,
-                        source_page=source_page,
+                        source_page=url,
                         source_site="tinyavideo",
                         details=unavailable_details,
                     )
@@ -32553,7 +31550,7 @@ class DownloadManagerApp(DownloadCoordinator):
                 is_mp3=is_mp3,
                 source_site="tinyavideo",
                 fallback_urls=fallback_urls,
-                referer=source_page,
+                referer=url,
                 origin=tiny_origin,
                 manifest_downloader=_download_manifest_with_site_strategy,
                 manifest_default_route="ffmpeg",
