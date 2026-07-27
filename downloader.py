@@ -71,7 +71,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260718-3780"
+APP_BUILD = "20260718-3790"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -942,6 +942,8 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "oag7h",
     "ryiplay",
     "vodcnd",
+    "pianopic.com",
+    "pianopic",
 )
 PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com", "ctyunxs.cn", "yximgs.com", "tiktokcdn.com", "byteoversea.com")
 PARALLEL_HLS_FMP4_BOX_MARKERS = (b"ftyp", b"moof", b"mdat", b"styp", b"sidx", b"free")
@@ -10672,10 +10674,128 @@ def make_context_menu(widget):
 from downloader_job_object import _init_windows_job_object, _assign_process_to_job, _posix_cleanup
 
 
-class DownloadManagerApp:
+class DownloadCoordinator:
+    """Download orchestrator / engine coordinating all download sessions, states, and threads."""
+
+    def __init__(self):
+        self.tasks = {}
+        self._m3u8_total_bytes_cache = {}
+        self._javdock_cookies_cache = {}
+        self._last_reported_domain_limit = None
+        self._resume_artifact_locks = {}
+        self._resume_artifact_locks_guard = threading.Lock()
+        self._ffmpeg_remux_lock = threading.Lock()
+        self.config = load_config()
+        self._ffmpeg_install_started = False
+        self._last_state_persist_at = 0.0
+        self._last_state_persist_signature = None
+        self._resume_progress_cache = {}
+        self._resume_progress_lock = threading.Lock()
+        self._media_probe_cache = {}
+        self._media_probe_cache_lock = threading.Lock()
+        self._pending_status_styles = {}
+        self._status_style_flush_scheduled = False
+        self._summary_refresh_scheduled = False
+        self._queue_process_scheduled = False
+        self._last_overview_text = None
+        self._shutdown_started = False
+        self._shutdown_stop_requested = False
+        self._shutdown_queue_blocked = False
+        self._shutdown_finalized = False
+        self._forced_exit_timer = None
+        self._final_exit_timer = None
+        self._active_network_sessions = {}
+        self._active_network_sessions_lock = threading.Lock()
+        self._active_download_item_ids = set()
+        self._active_download_item_ids_lock = threading.Lock()
+        self._parallel_hls_stop_events = {}
+        self._parallel_hls_stop_events_lock = threading.Lock()
+        self._http_multipart_stop_events = {}
+        self._http_multipart_stop_events_lock = threading.Lock()
+        self._background_threads = set()
+        self._background_threads_lock = threading.Lock()
+        self._startup_resume_pending = False
+        self._startup_resume_scheduled = False
+        self._startup_started_at = time.time()
+        self._startup_resume_warmup_active = False
+        try:
+            threading.Thread(target=self._cleanup_orphaned_hls_segment_directories, daemon=True).start()
+        except Exception:
+            pass
+
+    def _cleanup_orphaned_hls_segment_directories(self):
+        time.sleep(5)
+        try:
+            save_dir = self.config.get("save_dir", "")
+            if not save_dir:
+                save_dir = self._safe_get_save_dir()
+        except Exception:
+            return
+        if not save_dir or not os.path.isdir(save_dir):
+            return
+        try:
+            for name in os.listdir(save_dir):
+                if name.lower().endswith(".segments"):
+                    full_path = os.path.join(save_dir, name)
+                    if not os.path.isdir(full_path):
+                        continue
+                    matched = False
+                    base_name = name[:-9]
+                    for task in list(self.tasks.values()):
+                        for key in ("filename", "temp_filename", "name", "short_name"):
+                            val = str(_task_field_value(task, key) or "")
+                            if val:
+                                task_base = os.path.splitext(os.path.basename(val))[0]
+                                if task_base.lower() == base_name.lower():
+                                    matched = True
+                                    break
+                        if matched:
+                            break
+                    if not matched:
+                        shutil.rmtree(full_path, ignore_errors=True)
+        except Exception as e:
+            try:
+                write_error_log("Background stale segments cleanup error", e)
+            except Exception:
+                pass
+
+    # Headless fallback stubs for UI methods to allow testing without GUI:
+    def _schedule_ui_call(self, callback):
+        callback()
+
+    def _schedule_tree_update(self, item_id, col, value, force=False):
+        pass
+
+    def update_tree(self, item_id, col, value, force=False):
+        pass
+
+    def update_tree_many(self, item_id, updates, force=False):
+        pass
+
+    def _set_task_status_mode_ui(self, item_id, status_text, eta_text):
+        pass
+
+    def _set_task_parse_ui(self, item_id, message):
+        pass
+
+    def _clear_url_entry(self):
+        pass
+
+    def show_error_dialog(self, title, message):
+        print(f"[ERROR DIALOG] {title}: {message}")
+
+    def show_info_dialog(self, title, message):
+        print(f"[INFO DIALOG] {title}: {message}")
+
+    def ask_confirmation_dialog(self, title, message):
+        return True
+
+
+class DownloadManagerApp(DownloadCoordinator):
     """Main desktop downloader application."""
 
     def __init__(self, root):
+        DownloadCoordinator.__init__(self)
         _init_windows_job_object()
         self.root = root
         self.root.title(f"{t('app_title')} v{APP_BUILD.split('-')[-1]}")
@@ -10695,14 +10815,6 @@ class DownloadManagerApp:
         self.root.configure(bg="#f4f7fb")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(2, weight=1)
-        self.tasks = {}
-        self._m3u8_total_bytes_cache = {}
-        self._javdock_cookies_cache = {}
-        self._last_reported_domain_limit = None
-        self._resume_artifact_locks = {}
-        self._resume_artifact_locks_guard = threading.Lock()
-        self._ffmpeg_remux_lock = threading.Lock()
-        self.config = load_config()
         global CURRENT_LANG
         CURRENT_LANG = detect_default_language()
         configured_save_dir = self.config.get("save_dir", os.path.expanduser("~/Downloads"))
@@ -10727,39 +10839,7 @@ class DownloadManagerApp:
         self.list_frame = None
         self.format_dropdown = None
         self.action_buttons = {}
-        self._ffmpeg_install_started = False
-        self._last_state_persist_at = 0.0
-        self._last_state_persist_signature = None
-        self._resume_progress_cache = {}
-        self._resume_progress_lock = threading.Lock()
-        self._media_probe_cache = {}
-        self._media_probe_cache_lock = threading.Lock()
-        self._pending_status_styles = {}
-        self._status_style_flush_scheduled = False
-        self._summary_refresh_scheduled = False
-        self._queue_process_scheduled = False
-        self._last_overview_text = None
-        self._shutdown_started = False
-        self._shutdown_stop_requested = False
-        self._shutdown_queue_blocked = False
-        self._shutdown_finalized = False
-        self._forced_exit_timer = None
-        self._final_exit_timer = None
         self._drop_target_widgets = []
-        self._active_network_sessions = {}
-        self._active_network_sessions_lock = threading.Lock()
-        self._active_download_item_ids = set()
-        self._active_download_item_ids_lock = threading.Lock()
-        self._parallel_hls_stop_events = {}
-        self._parallel_hls_stop_events_lock = threading.Lock()
-        self._http_multipart_stop_events = {}
-        self._http_multipart_stop_events_lock = threading.Lock()
-        self._background_threads = set()
-        self._background_threads_lock = threading.Lock()
-        self._startup_resume_pending = False
-        self._startup_resume_scheduled = False
-        self._startup_started_at = time.time()
-        self._startup_resume_warmup_active = False
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_ui()
         if self.tree is not None:
@@ -22406,6 +22486,14 @@ class DownloadManagerApp:
         return fallback_name, [], ""
         return fallback_name, [], ""
 
+    def _fetch_decoupled_media_candidates(self, site_key, page_url, fallback_name=""):
+        from extractors import EXTRACTORS_REGISTRY
+        extractor_cls = EXTRACTORS_REGISTRY.get(site_key)
+        if not extractor_cls:
+            raise ValueError(f"Unknown extractor site key: {site_key}")
+        extractor_inst = extractor_cls(self)
+        return extractor_inst.extract(page_url, fallback_name)
+
     def _select_avjoy_media_candidate(self, candidates, failed_urls=None):
         failed_set = set(_dedupe_download_urls(failed_urls or []))
         ordered = [candidate for candidate in _dedupe_download_urls(candidates) if candidate not in failed_set]
@@ -24084,1237 +24172,9 @@ class DownloadManagerApp:
         raise Exception(f"parallel HLS concat remux failed: {' | '.join(errors)[:360]}")
 
     def _try_parallel_hls_segment_download(self, item_id, url, out_path, temp_out_path, progress_path, headers, ffmpeg_path, ffmpeg_version=""):
-        parallel_hls_entered_at = time.time()
-        task = self.tasks.get(item_id, {})
-        task = self._ensure_task_active_transfer_state(item_id, task, reason="parallel_hls")
-        if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
-            raise StopDownloadException("shutdown requested")
-        if not self._should_try_parallel_hls_segments(url, task):
-            return False
-        if bool(_task_field_value(task, "is_mp3", False)):
-            return False
-        media_url, playlist_text = self._resolve_parallel_hls_media_playlist(url, headers)
-        playlist_resolved_at = time.time()
-        if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
-            raise StopDownloadException("shutdown requested")
-        # Enforce parallel HLS for fragmented MP4 playlists containing #EXT-X-MAP
-        # We will parse and download the init segment as part of the segment list.
-        segments = self._parse_parallel_hls_segments(media_url, playlist_text)
-        original_segment_count = len(segments)
-        if original_segment_count > PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE:
-            write_error_log(
-                "parallel hls skipped huge playlist",
-                Exception("parallel HLS skipped huge playlist"),
-                url=media_url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                segments=original_segment_count,
-                max_segments=PARALLEL_HLS_MAX_SEGMENTS_FOR_NATIVE,
-            )
-            return False
-        segments, skipped_leading_segments, skipped_trailing_segments = self._drop_unsupported_edge_parallel_hls_segments(segments, headers)
-        segments_ready_at = time.time()
-        if skipped_leading_segments or skipped_trailing_segments:
-            write_error_log(
-                "parallel hls skipped unsupported edge segments",
-                Exception("parallel HLS skipped non-video edge segments"),
-                url=media_url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                original_segments=original_segment_count,
-                skipped_leading_segments=skipped_leading_segments,
-                skipped_trailing_segments=skipped_trailing_segments,
-                remaining_segments=len(segments),
-            )
-            self._set_task_parse_ui(
-                item_id,
-                message=f"已跳過來源非影片片段，開始下載 {len(segments)}/{original_segment_count} 段...",
-            )
-        if not segments:
-            raise ParallelHlsUnsupportedSegmentContentException("HLS playlist contains no usable video segments")
-        part_dir = f"{os.path.splitext(temp_out_path)[0]}.segments"
-        os.makedirs(part_dir, exist_ok=True)
-        if _task_source_site_name(task) == "avbebe":
-            purged_invalid_parts = self._purge_invalid_parallel_hls_resume_parts(part_dir)
-            if purged_invalid_parts:
-                os.makedirs(part_dir, exist_ok=True)
-                write_error_log(
-                    "parallel hls purged invalid resume segments",
-                    Exception("parallel HLS purged invalid resume segments"),
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    purged_segments=purged_invalid_parts,
-                    part_dir=part_dir,
-                )
-                self._set_task_parse_ui(
-                    item_id,
-                    message=f"已清除錯誤續傳片段 {purged_invalid_parts} 段，重新開始下載...",
-                )
-            segments, skipped_missing_leading_segments = self._drop_missing_leading_resume_hls_segments(segments, part_dir)
-            if skipped_missing_leading_segments:
-                write_error_log(
-                    "parallel hls skipped missing leading resume segments",
-                    Exception("parallel HLS skipped missing leading resume segments"),
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    original_segments=original_segment_count,
-                    skipped_missing_leading_segments=skipped_missing_leading_segments,
-                    remaining_segments=len(segments),
-                    part_dir=part_dir,
-                )
-                self._set_task_parse_ui(
-                    item_id,
-                    message=f"續傳缺少開頭 {skipped_missing_leading_segments} 段，已跳過並開始合併...",
-                )
-        if not segments:
-            raise ParallelHlsUnsupportedSegmentContentException("HLS playlist contains no usable resume segments")
-        stop_event = threading.Event()
-        self._register_parallel_hls_stop_event(item_id, stop_event)
-        key_cache = {}
-        thread_local = threading.local()
-        sessions_to_clean = []
-        sessions_lock = threading.Lock()
-        transport_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ts"
-        merged_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.mp4"
-        concat_list_path = f"{os.path.splitext(temp_out_path)[0]}.parallel.ffconcat"
-        total_segments = len(segments)
-        total_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in segments)
-        hls_host, representative_segment_url = self._dominant_parallel_hls_segment_host(media_url, segments)
-        if representative_segment_url:
-            self._set_task_active_media_url(task, representative_segment_url)
-
-        def _part_path(segment):
-            return os.path.join(part_dir, f"{int(segment['index']):06d}.ts")
-
-        stored_progress_info = self._load_resume_progress_info(progress_path)
-        stored_hls_info = stored_progress_info.get("progress_info", {}) if isinstance(stored_progress_info.get("progress_info", {}), dict) else {}
-        stored_hls_total_segments = 0
-        stored_hls_total_duration = 0.0
-        stored_hls_completed_segments = 0
-        stored_hls_resume_validation_version = 0
-        if str(stored_hls_info.get("type", "") or "") == "parallel_hls":
-            try:
-                stored_hls_total_segments = max(int(stored_hls_info.get("hls_total_segments", 0) or 0), 0)
-            except Exception:
-                stored_hls_total_segments = 0
-            try:
-                stored_hls_total_duration = max(float(stored_hls_info.get("hls_total_duration_seconds", 0.0) or 0.0), 0.0)
-            except Exception:
-                stored_hls_total_duration = 0.0
-            try:
-                stored_hls_completed_segments = max(int(stored_hls_info.get("hls_completed_segments", 0) or 0), 0)
-            except Exception:
-                stored_hls_completed_segments = 0
-            try:
-                stored_hls_resume_validation_version = max(int(stored_hls_info.get("hls_resume_validation_version", 0) or 0), 0)
-            except Exception:
-                stored_hls_resume_validation_version = 0
-        hls_total_duration_mismatch = False
-        if stored_hls_total_duration > 0.0 and total_duration > 0.0:
-            duration_tolerance = max(2.0, float(total_duration or 0.0) * 0.005)
-            hls_total_duration_mismatch = abs(stored_hls_total_duration - float(total_duration or 0.0)) > duration_tolerance
-        if (stored_hls_total_segments and stored_hls_total_segments != int(total_segments or 0)) or hls_total_duration_mismatch:
-            stale_parts = 0
-            try:
-                stale_parts = len(glob.glob(os.path.join(part_dir, "*.ts")))
-            except Exception:
-                stale_parts = 0
-            shutil.rmtree(part_dir, ignore_errors=True)
-            os.makedirs(part_dir, exist_ok=True)
-            self._remove_artifact_paths(progress_path)
-            write_error_log(
-                "parallel hls purged mismatched resume metadata",
-                Exception("parallel HLS purged mismatched resume metadata"),
-                url=media_url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                stored_total_segments=stored_hls_total_segments,
-                current_total_segments=int(total_segments or 0),
-                stored_total_duration_seconds=round(stored_hls_total_duration, 3),
-                current_total_duration_seconds=round(float(total_duration or 0.0), 3),
-                duration_mismatch=bool(hls_total_duration_mismatch),
-                stale_parts=stale_parts,
-                part_dir=part_dir,
-            )
-
-        completed_segment_indexes = set()
-        existing_segments = []
-        existing_segment_sizes = {}
-        resume_scan_started_at = time.time()
-        try:
-            existing_part_file_names = {
-                name
-                for name in os.listdir(part_dir)
-                if str(name or "").lower().endswith(".ts")
-            }
-        except OSError:
-            existing_part_file_names = set()
-        expected_part_file_names = set()
-        for segment in segments:
-            try:
-                expected_part_file_names.add(f"{int(segment['index']):06d}.ts")
-            except Exception:
-                continue
-        orphan_part_file_names = sorted(existing_part_file_names - expected_part_file_names)
-        if orphan_part_file_names:
-            removed_orphan_parts = 0
-            failed_orphan_parts = 0
-            removed_orphan_part_names = []
-            for part_name in orphan_part_file_names:
-                part_path = os.path.join(part_dir, part_name)
-                try:
-                    os.remove(part_path)
-                    removed_orphan_parts += 1
-                    removed_orphan_part_names.append(part_name)
-                except OSError:
-                    failed_orphan_parts += 1
-                    continue
-            if removed_orphan_parts:
-                write_error_log(
-                    "parallel hls purged orphan resume segments",
-                    Exception("parallel HLS purged orphan resume segments"),
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    removed_orphan_parts=removed_orphan_parts,
-                    failed_orphan_parts=failed_orphan_parts,
-                    orphan_sample=", ".join(orphan_part_file_names[:8]),
-                    part_dir=part_dir,
-                )
-                existing_part_file_names.difference_update(removed_orphan_part_names)
-        resume_fast_scan_used = False
-        present_expected_part_file_names = existing_part_file_names.intersection(expected_part_file_names)
-        resume_metadata_matches = (
-            stored_hls_total_segments == int(total_segments or 0)
-            and not hls_total_duration_mismatch
-        )
-        resume_fast_scan_allowed = (
-            resume_metadata_matches
-            and stored_hls_resume_validation_version >= PARALLEL_HLS_RESUME_VALIDATION_VERSION
-            and stored_hls_completed_segments > 0
-            and len(present_expected_part_file_names) == stored_hls_completed_segments
-        )
-        if resume_fast_scan_allowed:
-            fast_scan_empty_part = False
-            for segment in segments:
-                try:
-                    part_name = f"{int(segment['index']):06d}.ts"
-                except Exception:
-                    continue
-                if part_name not in present_expected_part_file_names:
-                    continue
-                part_path = os.path.join(part_dir, part_name)
-                part_size = self._get_existing_file_size(part_path)
-                if part_size <= 0:
-                    fast_scan_empty_part = True
-                    break
-                existing_segments.append(segment)
-                segment_index = int(segment["index"])
-                completed_segment_indexes.add(segment_index)
-                existing_segment_sizes[segment_index] = part_size
-            resume_fast_scan_used = (
-                not fast_scan_empty_part
-                and len(existing_segments) == stored_hls_completed_segments
-            )
-            if not resume_fast_scan_used:
-                existing_segments.clear()
-                completed_segment_indexes.clear()
-                existing_segment_sizes.clear()
-        if not resume_fast_scan_used:
-            invalid_part_file_names = []
-            for segment in segments:
-                try:
-                    part_name = f"{int(segment['index']):06d}.ts"
-                except Exception:
-                    continue
-                part_path = os.path.join(part_dir, part_name)
-                if part_name not in existing_part_file_names:
-                    continue
-                if self._is_valid_parallel_hls_part_file(part_path):
-                    existing_segments.append(segment)
-                    segment_index = int(segment["index"])
-                    completed_segment_indexes.add(segment_index)
-                    existing_segment_sizes[segment_index] = self._get_existing_file_size(part_path)
-                else:
-                    invalid_part_file_names.append(part_name)
-            if invalid_part_file_names:
-                removed_invalid_parts = 0
-                failed_invalid_parts = 0
-                removed_invalid_part_names = []
-                for part_name in invalid_part_file_names:
-                    part_path = os.path.join(part_dir, part_name)
-                    try:
-                        os.remove(part_path)
-                        removed_invalid_parts += 1
-                        removed_invalid_part_names.append(part_name)
-                    except OSError:
-                        failed_invalid_parts += 1
-                        continue
-                if removed_invalid_parts:
-                    write_error_log(
-                        "parallel hls purged invalid resume segments",
-                        Exception("parallel HLS purged invalid resume segments"),
-                        url=media_url,
-                        item_id=item_id,
-                        source_site=_task_source_site_name(task) or None,
-                        removed_invalid_parts=removed_invalid_parts,
-                        failed_invalid_parts=failed_invalid_parts,
-                        invalid_sample=", ".join(invalid_part_file_names[:8]),
-                        part_dir=part_dir,
-                    )
-                    existing_part_file_names.difference_update(removed_invalid_part_names)
-        resume_existing_segment_count = len(existing_segments)
-        if stored_hls_total_segments and stored_hls_total_segments == int(total_segments or 0):
-            if stored_hls_completed_segments and stored_hls_completed_segments != resume_existing_segment_count:
-                actual_completed_bytes = 0
-                actual_completed_duration = 0.0
-                try:
-                    actual_completed_bytes = sum(
-                        int(existing_segment_sizes.get(int(segment["index"]), 0) or 0)
-                        for segment in existing_segments
-                    )
-                    actual_completed_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in existing_segments)
-                except Exception:
-                    actual_completed_bytes = 0
-                    actual_completed_duration = 0.0
-                if resume_existing_segment_count > 0:
-                    self._save_resume_progress(
-                        progress_path,
-                        actual_completed_duration,
-                        source_url=_normalize_download_url(url) or url,
-                        bytes_done=actual_completed_bytes,
-                        progress_info={
-                            "type": "parallel_hls",
-                            "hls_total_segments": int(total_segments or 0),
-                            "hls_completed_segments": int(resume_existing_segment_count or 0),
-                            "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
-                            "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
-                        },
-                        min_interval_seconds=0.0,
-                        min_bytes_delta=0,
-                        force=True,
-                    )
-                else:
-                    self._remove_artifact_paths(progress_path)
-                write_error_log(
-                    "parallel hls resume metadata differs from parts",
-                    Exception("parallel HLS resume metadata differs from actual part files"),
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    stored_completed_segments=stored_hls_completed_segments,
-                    existing_part_segments=resume_existing_segment_count,
-                    total_segments=int(total_segments or 0),
-                    part_dir=part_dir,
-                )
-                write_error_log(
-                    "parallel hls resume progress corrected from parts",
-                    Exception("parallel HLS resume progress corrected from actual part files"),
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    stored_completed_segments=stored_hls_completed_segments,
-                    corrected_completed_segments=resume_existing_segment_count,
-                    corrected_bytes=actual_completed_bytes,
-                    corrected_duration_seconds=round(actual_completed_duration, 3),
-                    progress_path=progress_path,
-                    progress_removed=resume_existing_segment_count <= 0,
-                )
-        resume_scan_finished_at = time.time()
-        has_google_segments = any(
-            "googleusercontent.com" in urllib.parse.urlsplit(_normalize_download_url(segment.get("url", "")) or "").netloc.lower()
-            for segment in segments
-        )
-        source_site = _task_source_site_name(task)
-        prefer_curl_segments = source_site in (
-            "99itv",
-            "18av",
-            "movieffm",
-            "avbebe",
-            "85xvideo",
-            "bestjavporn",
-            "dramasq",
-            "getav",
-            "gimy",
-            "goodav17",
-            "hayav",
-            "hohoj",
-            "ikanbot",
-            "jable",
-            "javdock",
-            "missav",
-            "njav",
-            "njavtv",
-            "nnyy",
-            "olevod",
-            "supjav",
-            "thanju",
-            "tinyavideo",
-            "xiaoyakankan",
-        )
-        try:
-            preflight_started_at = time.time()
-            if any((segment.get("key") or {}).get("uri") for segment in segments) and CryptoAES is None:
-                return False
-            key_cache = self._fetch_parallel_hls_keys(segments, headers, stop_event=stop_event)
-            if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False) or stop_event.is_set():
-                raise StopDownloadException("shutdown requested")
-            self._preflight_parallel_hls_segments(
-                segments,
-                headers,
-                sample_limit=1 if resume_existing_segment_count else 3,
-                stop_event=stop_event,
-                prefer_curl=prefer_curl_segments,
-            )
-            if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False) or stop_event.is_set():
-                raise StopDownloadException("shutdown requested")
-            preflight_finished_at = time.time()
-        except ParallelHlsUnsupportedSegmentContentException as exc:
-            write_error_log(
-                "parallel hls unsupported segment content",
-                exc,
-                url=media_url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                segments=total_segments,
-                google_segments=has_google_segments,
-            )
-            raise
-        completed_bytes = 0
-        completed_duration = 0.0
-        completed_segments = 0
-        started_at = time.time()
-        last_segment_ui_update = 0.0
-        last_segment_ui_bytes = 0
-        completed_lock = threading.Lock()
-        if existing_segments:
-            completed_bytes = sum(
-                int(existing_segment_sizes.get(int(segment["index"]), 0) or 0)
-                for segment in existing_segments
-            )
-            completed_duration = sum(max(float(segment.get("duration", 0.0) or 0.0), 0.0) for segment in existing_segments)
-            completed_segments = len(existing_segments)
-            write_error_log(
-                "parallel hls resume segments loaded",
-                Exception("parallel HLS resume segments loaded"),
-                url=media_url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                loaded_segments=completed_segments,
-                total_segments=total_segments,
-                loaded_bytes=completed_bytes,
-                loaded_duration_seconds=round(completed_duration, 3),
-                resume_fast_scan_used=bool(resume_fast_scan_used),
-                resume_validation_version=int(stored_hls_resume_validation_version or 0),
-                part_dir=part_dir,
-            )
-            if total_duration > 0:
-                percent = min((completed_duration / total_duration) * 100.0, 99.0)
-                self.update_tree_many(item_id, {
-                    "progress": f"{percent:.1f}%",
-                    "size": f"{completed_segments}/{total_segments}",
-                    "speed_eta": f"續傳已載入 {completed_segments}/{total_segments} 段",
-                }, force=True)
-            self._save_resume_progress(
-                progress_path,
-                completed_duration,
-                source_url=_normalize_download_url(url) or url,
-                bytes_done=completed_bytes,
-                progress_info={
-                    "type": "parallel_hls",
-                    "hls_total_segments": int(total_segments or 0),
-                    "hls_completed_segments": int(completed_segments or 0),
-                    "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
-                    "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
-                },
-            )
-
-        pending_segments = [segment for segment in segments if int(segment["index"]) not in completed_segment_indexes]
-        pending_segment_count = len(pending_segments)
-        session_start_completed_bytes = int(completed_bytes or 0)
-        session_start_completed_segments = int(completed_segments or 0)
-        last_segment_speed_update = time.time()
-        last_segment_speed_bytes = int(completed_bytes or 0)
-        last_progress_activity_at = time.time()
-        last_progress_completed_segments = int(completed_segments or 0)
-        worker_plan_segments = pending_segments
-        worker_plan = self._parallel_hls_worker_plan(
-            source_site,
-            media_url,
-            worker_plan_segments,
-            total_segment_count=total_segments,
-        )
-        worker_count = (
-            min(int(worker_plan.get("workers", 1)), pending_segment_count)
-            if pending_segment_count > 0
-            else 0
-        )
-        hls_host_active_downloads = self._active_hls_downloads_for_host(hls_host)
-        hls_host_worker_budget = self._hls_host_worker_budget(hls_host)
-        try:
-            representative_segment_url = str((worker_plan_segments or segments or [{}])[0].get("url") or media_url)
-        except Exception:
-            representative_segment_url = media_url
-        segment_timeout_seconds = self._parallel_hls_segment_timeout(representative_segment_url, stop_event=stop_event)
-        segment_retry_count = self._parallel_hls_segment_retry_count(representative_segment_url)
-        _set_task_aux_fields(
-            task,
-            _parallel_hls_total_segments=int(total_segments),
-            _parallel_hls_completed_segments=int(completed_segments),
-            _parallel_hls_pending_segments=int(pending_segment_count),
-            _parallel_hls_workers=int(worker_count),
-            _parallel_hls_updated_at=time.time(),
-        )
-        parallel_start_logged_at = time.time()
-        try:
-            route_selected_at = float(_task_field_value(task, "_m3u8_route_selected_at", 0.0) or 0.0)
-        except Exception:
-            route_selected_at = 0.0
-        if pending_segment_count > 0:
-            self._log_ffmpeg_event(
-                "parallel hls download started",
-                Exception("parallel hls started"),
-                task,
-                item_id,
-                media_url,
-                segments=total_segments,
-                pending_segments=pending_segment_count,
-                completed_segments_at_start=completed_segments,
-                workers=worker_count,
-                route_start_delay_seconds=self._m3u8_route_start_delay_seconds(task),
-                route_selected_to_parallel_entry_seconds=(round(max(parallel_hls_entered_at - route_selected_at, 0.0), 3) if route_selected_at > 0 else 0.0),
-                parallel_entry_to_download_start_seconds=round(max(parallel_start_logged_at - parallel_hls_entered_at, 0.0), 3),
-                playlist_resolve_seconds=round(max(playlist_resolved_at - parallel_hls_entered_at, 0.0), 3),
-                segment_parse_seconds=round(max(segments_ready_at - playlist_resolved_at, 0.0), 3),
-                resume_scan_seconds=round(max(resume_scan_finished_at - resume_scan_started_at, 0.0), 3),
-                resume_fast_scan_used=bool(resume_fast_scan_used),
-                resume_validation_version=int(stored_hls_resume_validation_version or 0),
-                preflight_seconds=round(max(preflight_finished_at - preflight_started_at, 0.0), 3),
-                requested_workers=int(worker_plan.get("requested_workers", worker_count) or worker_count),
-                site_worker_cap=int(worker_plan.get("site_worker_cap", 0) or 0),
-                host_worker_cap=int(worker_plan.get("host_worker_cap", 0) or 0),
-                host_worker_marker=str(worker_plan.get("host_worker_marker", "") or ""),
-                per_task_worker_budget=int(worker_plan.get("per_task_worker_budget", hls_host_worker_budget) or hls_host_worker_budget),
-                worker_budget_limited=bool(worker_plan.get("budget_limited", False)),
-                single_task_boost_applied=bool(worker_plan.get("boost_applied", False)),
-                boost_segment_count=int(worker_plan.get("boost_segment_count", 0) or 0),
-                boost_worker_cap=int(worker_plan.get("boost_worker_cap", 0) or 0),
-                tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
-                tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
-                resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
-                hls_host=hls_host,
-                manifest_host=urllib.parse.urlsplit(_normalize_download_url(media_url) or "").netloc.lower(),
-                segment_timeout_seconds=round(float(segment_timeout_seconds or 0.0), 3),
-                segment_retry_count=int(segment_retry_count or 0),
-                hls_host_active_downloads=hls_host_active_downloads,
-                hls_host_worker_budget=hls_host_worker_budget,
-                total_duration=total_duration,
-                **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
-            )
-
-        def _should_retry_slow_parallel_candidate(speed_bps, session_bytes, session_segments, now):
-            source_site = _task_source_site_name(task)
-            threshold_bps = int(PARALLEL_HLS_SLOW_CANDIDATE_RETRY_THRESHOLD_BPS_BY_SITE.get(source_site, 500 * 1024) or 0)
-            if threshold_bps <= 0 or float(speed_bps or 0.0) >= threshold_bps:
-                return False
-            if bool(_task_field_value(task, "_parallel_hls_slow_candidate_retry_attempted", False)):
-                return False
-            if max(float(now or time.time()) - float(started_at or 0.0), 0.0) < PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SECONDS:
-                return False
-            if int(session_bytes or 0) < PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_BYTES:
-                return False
-            if int(session_segments or 0) < PARALLEL_HLS_SLOW_CANDIDATE_RETRY_MIN_SEGMENTS:
-                return False
-            alternate_candidates = _dedupe_download_urls(
-                list(_task_field_value(task, "fallback_urls", []) or [])
-                + list(_task_field_value(task, "page_refresh_candidates", []) or []),
-                primary_url=media_url,
-            )
-            if not alternate_candidates:
-                return False
-            _set_task_aux_fields(task, _parallel_hls_slow_candidate_retry_attempted=True)
-            write_error_log(
-                "parallel hls slow candidate retry requested",
-                ResumeLowSpeedReanalysisException("parallel HLS candidate stayed below site speed threshold"),
-                url=media_url,
-                item_id=item_id,
-                source_site=source_site or None,
-                hls_host=hls_host,
-                speed_bps=int(speed_bps or 0),
-                threshold_bps=threshold_bps,
-                elapsed_seconds=round(max(float(now or time.time()) - float(started_at or 0.0), 0.0), 3),
-                session_segment_bytes=int(session_bytes or 0),
-                session_completed_segments=int(session_segments or 0),
-                alternate_candidate_count=len(alternate_candidates),
-            )
-            return True
-
-        def _download_one(segment):
-            nonlocal completed_bytes, completed_duration, completed_segments, last_segment_ui_update, last_segment_ui_bytes, last_segment_speed_update, last_segment_speed_bytes, last_progress_activity_at, last_progress_completed_segments, dynamic_in_flight_limit
-            if getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False):
-                stop_event.set()
-                raise StopDownloadException("shutdown requested")
-            task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
-            if self._is_pause_requested_state(task_state) or self._is_delete_requested_state(task_state):
-                stop_event.set()
-                raise StopDownloadException("stop requested")
-            if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=self._disk_full_pause_note()):
-                stop_event.set()
-                raise StopDownloadException("disk space low")
-            session = getattr(thread_local, "session", None)
-            if session is not None and getattr(session, "_closed", False):
-                session = None
-            if session is None:
-                c_req = get_curl_cffi_requests()
-                session = c_req.Session(impersonate="chrome120")
-                try:
-                    from curl_cffi import CurlOpt
-                    session.curl_options = {
-                        CurlOpt.BUFFERSIZE: 262144,
-                        CurlOpt.TCP_NODELAY: 1,
-                        CurlOpt.DNS_CACHE_TIMEOUT: 600,
-                        CurlOpt.PIPEWAIT: 1,
-                    }
-                except Exception:
-                    session.curl_options = {
-                        98: 262144,
-                        121: 1,
-                        92: 600,
-                        237: 1,
-                    }
-                try:
-                    session = self._track_network_session(session)
-                except Exception:
-                    pass
-                thread_local.session = session
-                with sessions_lock:
-                    sessions_to_clean.append(session)
-            t0 = time.time()
-            try:
-                part_size = self._download_parallel_hls_segment(
-                    segment,
-                    _part_path(segment),
-                    headers,
-                    key_cache,
-                    stop_event,
-                    prefer_curl=prefer_curl_segments,
-                    session=session,
-                )
-                dur = max(time.time() - t0, 0.001)
-                with completed_lock:
-                    if dur > 5.0:
-                        dynamic_in_flight_limit = max(2, dynamic_in_flight_limit // 2)
-                    else:
-                        dynamic_in_flight_limit = min(dynamic_in_flight_limit + 1, max_in_flight_limit)
-            except OSError as exc:
-                with completed_lock:
-                    dynamic_in_flight_limit = max(2, dynamic_in_flight_limit // 2)
-                if _is_no_space_left_error(exc):
-                    stop_event.set()
-                    free_bytes = self._get_disk_free_bytes(out_path)
-                    self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=self._disk_full_pause_note())
-                    raise StopDownloadException("disk space low")
-                thread_local.session = None
-                raise
-            except StopDownloadException:
-                raise
-            except Exception:
-                with completed_lock:
-                    dynamic_in_flight_limit = max(2, dynamic_in_flight_limit // 2)
-                thread_local.session = None
-                raise
-            if self._maybe_auto_pause_for_disk_space(item_id, out_path, note=self._disk_full_pause_note()):
-                stop_event.set()
-                raise StopDownloadException("disk space low")
-            with completed_lock:
-                completed_segment_indexes.add(int(segment["index"]))
-                completed_bytes += int(part_size or 0)
-                completed_duration += max(float(segment.get("duration", 0.0) or 0.0), 0.0)
-                completed_segments += 1
-                last_progress_activity_at = now = time.time()
-                last_progress_completed_segments = int(completed_segments or 0)
-                _set_task_aux_fields(
-                    task,
-                    downloaded_bytes=int(completed_bytes or 0),
-                    _parallel_hls_total_segments=int(total_segments),
-                    _parallel_hls_completed_segments=int(completed_segments),
-                    _parallel_hls_pending_segments=max(int(total_segments) - int(completed_segments), 0),
-                    _parallel_hls_workers=int(worker_count),
-                    _parallel_hls_updated_at=time.time(),
-                )
-                elapsed = max(now - started_at, 0.001)
-                session_segment_bytes = max(int(completed_bytes or 0) - int(session_start_completed_bytes or 0), 0)
-                session_completed_segments = max(int(completed_segments or 0) - int(session_start_completed_segments or 0), 0)
-                speed_bps = session_segment_bytes / elapsed if session_segment_bytes > 0 else 0.0
-                if _should_retry_slow_parallel_candidate(speed_bps, session_segment_bytes, session_completed_segments, now):
-                    stop_event.set()
-                    raise ResumeLowSpeedReanalysisException("parallel HLS candidate too slow; trying next candidate")
-                is_complete = completed_segments >= total_segments
-                should_refresh_progress_ui = (
-                    is_complete
-                    or last_segment_ui_update <= 0.0
-                    or (now - last_segment_ui_update) >= FFMPEG_PROGRESS_UI_UPDATE_INTERVAL_SECONDS
-                    or abs(completed_bytes - last_segment_ui_bytes) >= FFMPEG_PROGRESS_UI_MIN_BYTES_DELTA
-                )
-                if total_duration > 0 and should_refresh_progress_ui:
-                    interval_seconds = max(now - last_segment_speed_update, 0.001)
-                    interval_bytes = max(int(completed_bytes or 0) - int(last_segment_speed_bytes or 0), 0)
-                    display_speed_bps = interval_bytes / interval_seconds if interval_bytes > 0 else speed_bps
-                    last_segment_speed_update = now
-                    last_segment_speed_bytes = int(completed_bytes or 0)
-                    average_segment_bytes = (session_segment_bytes / session_completed_segments) if session_completed_segments > 0 else 0.0
-                    remaining_bytes = max(int(average_segment_bytes * max(total_segments - completed_segments, 0)), 0)
-                    eta = (remaining_bytes / max(display_speed_bps, 1.0)) if remaining_bytes > 0 and display_speed_bps > 0 else None
-                    self._set_task_last_speed(task, display_speed_bps)
-                    percent = min((completed_duration / total_duration) * 100.0, 99.0)
-                    self.update_tree_many(item_id, {
-                        "progress": f"{percent:.1f}%",
-                        "size": f"{completed_segments}/{total_segments}",
-                        "speed_eta": f"{format_transfer_rate(display_speed_bps)} | {format_eta(eta)}" if eta else format_transfer_rate(display_speed_bps),
-                    }, force=False)
-                    last_segment_ui_update = now
-                    last_segment_ui_bytes = completed_bytes
-                if should_refresh_progress_ui:
-                    self._save_resume_progress(
-                        progress_path,
-                        completed_duration,
-                        source_url=_normalize_download_url(url) or url,
-                        bytes_done=completed_bytes,
-                        progress_info={
-                            "type": "parallel_hls",
-                            "hls_total_segments": int(total_segments or 0),
-                            "hls_completed_segments": int(completed_segments or 0),
-                            "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
-                            "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
-                        },
-                        min_interval_seconds=RESUME_PROGRESS_PERSIST_INTERVAL_SECONDS,
-                        min_bytes_delta=RESUME_PROGRESS_MIN_BYTES_DELTA,
-                    )
-            return part_size
-
-        shutdown_finalize_guard_logged = False
-
-        def _all_segments_ready_for_finalization():
-            try:
-                with completed_lock:
-                    return total_segments > 0 and len(completed_segment_indexes) >= total_segments
-            except Exception:
-                return False
-
-        def _shutdown_can_finalize_completed_segments(current_task_state=""):
-            nonlocal shutdown_finalize_guard_logged
-            if self._is_delete_requested_state(current_task_state) or self._is_pause_requested_state(current_task_state):
-                return False
-            if not (getattr(self, "_shutdown_stop_requested", False) or getattr(self, "_shutdown_started", False) or stop_event.is_set()):
-                return False
-            if not _all_segments_ready_for_finalization():
-                return False
-            if not shutdown_finalize_guard_logged:
-                shutdown_finalize_guard_logged = True
-                try:
-                    self._log_ffmpeg_event(
-                        "parallel hls shutdown finalize guard activated",
-                        Exception("parallel HLS has all segments during shutdown; finalizing output"),
-                        task,
-                        item_id,
-                        media_url,
-                        segments=total_segments,
-                        completed_segments=len(completed_segment_indexes),
-                        shutdown_started=bool(getattr(self, "_shutdown_started", False)),
-                        shutdown_stop_requested=bool(getattr(self, "_shutdown_stop_requested", False)),
-                    )
-                except Exception:
-                    pass
-            return True
-
-        try:
-            remux_strategy = "concat"
-            if pending_segments:
-                executor = DaemonThreadPoolExecutor(max_workers=worker_count)
-                pending_iter = iter(pending_segments)
-                in_flight = set()
-                stop_requested = False
-                max_in_flight_limit = max(
-                    int(worker_count),
-                    int(worker_count) * int(PARALLEL_HLS_IN_FLIGHT_MULTIPLIER),
-                )
-                dynamic_in_flight_limit = max_in_flight_limit
-
-                def _submit_next_segment():
-                    try:
-                        next_segment = next(pending_iter)
-                    except StopIteration:
-                        return False
-                    in_flight.add(executor.submit(_download_one, next_segment))
-                    return True
-
-                try:
-                    for _ in range(min(dynamic_in_flight_limit, len(pending_segments))):
-                        if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
-                            if _shutdown_can_finalize_completed_segments():
-                                stop_event.clear()
-                                break
-                            stop_requested = True
-                            raise StopDownloadException("stop requested")
-                        if not _submit_next_segment():
-                            break
-                    while in_flight:
-                        current_task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
-                        if stop_event.is_set() or self._is_pause_requested_state(current_task_state) or self._is_delete_requested_state(current_task_state) or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
-                            if _shutdown_can_finalize_completed_segments(current_task_state):
-                                stop_event.clear()
-                                break
-                            stop_requested = True
-                            stop_event.set()
-                            for pending_future in in_flight:
-                                pending_future.cancel()
-                            raise StopDownloadException("stop requested")
-                        done, in_flight = concurrent.futures.wait(
-                            in_flight,
-                            timeout=PARALLEL_HLS_SCHEDULER_POLL_SECONDS,
-                            return_when=concurrent.futures.FIRST_COMPLETED,
-                        )
-                        if not done:
-                            now = time.time()
-                            try:
-                                stalled_seconds = max(now - float(last_progress_activity_at or started_at), 0.0)
-                            except Exception:
-                                stalled_seconds = 0.0
-                            no_progress_reanalysis_delay = min(
-                                float(SLOW_SOURCE_REANALYZE_DELAY_SECONDS),
-                                float(RESUME_LOW_SPEED_REANALYZE_DELAY_SECONDS),
-                            )
-                            short_playlist_grace_applied = False
-                            if 0 < int(total_segments or 0) <= int(PARALLEL_HLS_SHORT_PLAYLIST_NO_PROGRESS_SEGMENTS):
-                                short_playlist_grace_applied = True
-                                # Let segment-level retries finish first; short playlists otherwise
-                                # reanalyze too early and lose useful resume progress.
-                                no_progress_reanalysis_delay = max(
-                                    no_progress_reanalysis_delay,
-                                    float(PARALLEL_HLS_SHORT_PLAYLIST_NO_PROGRESS_DELAY_SECONDS),
-                                )
-                            if stalled_seconds >= no_progress_reanalysis_delay:
-                                current_completed = int(completed_segments or 0)
-                                if current_completed <= int(last_progress_completed_segments or 0) and self._should_trigger_resume_low_speed_reanalysis(
-                                    task,
-                                    _normalize_download_url(_task_field_value(task, "url", "")) or media_url,
-                                    os.path.dirname(out_path) or _APP_DIR,
-                                    0.0,
-                                    now=now,
-                                    allow_zero_progress=True,
-                                ):
-                                    stop_event.set()
-                                    for pending_future in in_flight:
-                                        pending_future.cancel()
-                                    write_error_log(
-                                        "parallel hls no progress reanalysis requested",
-                                        Exception("parallel HLS made no segment progress and requested source reanalysis"),
-                                        url=media_url,
-                                        item_id=item_id,
-                                        source_site=_task_source_site_name(task) or None,
-                                        stalled_seconds=round(stalled_seconds, 3),
-                                        no_progress_reanalysis_delay_seconds=round(float(no_progress_reanalysis_delay), 3),
-                                        short_playlist_grace_applied=bool(short_playlist_grace_applied),
-                                        completed_segments=current_completed,
-                                        total_segments=total_segments,
-                                        in_flight=len(in_flight),
-                                    )
-                                    raise ResumeLowSpeedReanalysisException("parallel HLS made no progress; reanalyzing source")
-                            continue
-                        for future in done:
-                            if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
-                                current_task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
-                                if _shutdown_can_finalize_completed_segments(current_task_state):
-                                    stop_event.clear()
-                                    break
-                                stop_requested = True
-                                raise StopDownloadException("stop requested")
-                            future.result()
-                        if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
-                            current_task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
-                            if _shutdown_can_finalize_completed_segments(current_task_state):
-                                stop_event.clear()
-                                break
-                            stop_requested = True
-                            raise StopDownloadException("stop requested")
-                        while len(in_flight) < dynamic_in_flight_limit:
-                            if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
-                                current_task_state = str(_task_field_value(self.tasks.get(item_id, {}), "state", "") or "")
-                                if _shutdown_can_finalize_completed_segments(current_task_state):
-                                    stop_event.clear()
-                                    break
-                                stop_requested = True
-                                raise StopDownloadException("stop requested")
-                            if not _submit_next_segment():
-                                break
-                except BaseException:
-                    stop_requested = True
-                    stop_event.set()
-                    for future in in_flight:
-                        future.cancel()
-                    raise
-                finally:
-                    executor.shutdown(wait=not stop_requested and not self._shutdown_started, cancel_futures=True)
-                    with sessions_lock:
-                        for s in sessions_to_clean:
-                            try:
-                                self._close_network_session(s)
-                            except Exception:
-                                pass
-            else:
-                self._log_ffmpeg_event(
-                    "parallel hls resume complete before download",
-                    Exception("parallel HLS resume has all segments; remux only"),
-                    task,
-                    item_id,
-                    media_url,
-                    segments=total_segments,
-                    completed_segments_at_start=completed_segments,
-                    part_dir=part_dir,
-                    **self._build_ffmpeg_runtime_fields(ffmpeg_path, ffmpeg_version=ffmpeg_version),
-                )
-            self.update_tree_many(item_id, {
-                "progress": "99.9%",
-                "size": f"{completed_segments}/{total_segments}",
-                "speed_eta": "合併影片中...",
-            }, force=True)
-            current_task_state_before_remux = str(_task_field_value(self.tasks.get(item_id, task), "state", "") or "")
-            if (
-                _all_segments_ready_for_finalization()
-                and (
-                    getattr(self, "_shutdown_stop_requested", False)
-                    or getattr(self, "_shutdown_started", False)
-                    or stop_event.is_set()
-                )
-                and not self._is_delete_requested_state(current_task_state_before_remux)
-            ):
-                with completed_lock:
-                    deferred_completed_segments = int(completed_segments or 0)
-                    deferred_completed_bytes = int(completed_bytes or 0)
-                    deferred_completed_duration = float(completed_duration or 0.0)
-                self._save_resume_progress(
-                    progress_path,
-                    deferred_completed_duration,
-                    source_url=_normalize_download_url(url) or url,
-                    bytes_done=deferred_completed_bytes,
-                    progress_info={
-                        "type": "parallel_hls",
-                        "hls_total_segments": int(total_segments or 0),
-                        "hls_completed_segments": int(deferred_completed_segments or 0),
-                        "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
-                        "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
-                    },
-                    min_interval_seconds=0.0,
-                    min_bytes_delta=0,
-                    force=True,
-                )
-                self._log_ffmpeg_event(
-                    "parallel hls remux deferred during shutdown",
-                    Exception("parallel HLS remux deferred until next startup"),
-                    task,
-                    item_id,
-                    media_url,
-                    completed_segments=deferred_completed_segments,
-                    total_segments=total_segments,
-                    completed_bytes=deferred_completed_bytes,
-                    completed_duration_seconds=round(deferred_completed_duration, 3),
-                    progress_path=progress_path,
-                )
-                raise StopDownloadException("shutdown requested before remux")
-            ordered_part_paths = []
-            for segment in segments:
-                part_path = _part_path(segment)
-                if int(segment["index"]) not in completed_segment_indexes or not self._has_nonempty_file(part_path):
-                    raise Exception("parallel HLS segment missing after download")
-                ordered_part_paths.append(part_path)
-            prefer_transport_remux = int(total_segments or 0) >= int(PARALLEL_HLS_FAST_TRANSPORT_REMUX_MIN_SEGMENTS)
-
-            def _build_transport_stream_for_remux():
-                with open(transport_path, "wb") as merged_f:
-                    for part_path in ordered_part_paths:
-                        with open(part_path, "rb") as part_f:
-                            shutil.copyfileobj(part_f, merged_f, length=HTTP_FILE_COPY_CHUNK_SIZE)
-
-            self.update_tree_many(item_id, {"speed_eta": "正在合併影音檔案，請稍候..."}, force=True)
-            with self._ffmpeg_remux_lock:
-                if prefer_transport_remux:
-                    try:
-                        _build_transport_stream_for_remux()
-                        self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
-                        remux_strategy = "transport-fast"
-                    except Exception as transport_exc:
-                        write_error_log(
-                            "parallel hls transport remux fallback to concat",
-                            transport_exc,
-                            url=media_url,
-                            item_id=item_id,
-                            source_site=_task_source_site_name(task) or None,
-                            segments=total_segments,
-                        )
-                        self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
-                        remux_strategy = "concat-after-transport-fallback"
-                else:
-                    try:
-                        self._remux_parallel_hls_segment_files(ffmpeg_path, ordered_part_paths, concat_list_path, merged_path)
-                    except Exception as concat_exc:
-                        write_error_log(
-                            "parallel hls concat remux fallback to transport",
-                            concat_exc,
-                            url=media_url,
-                            item_id=item_id,
-                            source_site=_task_source_site_name(task) or None,
-                            segments=total_segments,
-                        )
-                        _build_transport_stream_for_remux()
-                        self._remux_parallel_hls_transport_stream(ffmpeg_path, transport_path, merged_path)
-                        remux_strategy = "transport"
-                final_info = self._probe_media_info(merged_path)
-            final_duration = float(final_info.get("duration", 0.0) or 0.0)
-            if not final_info.get("valid") or int(final_info.get("size", 0) or 0) <= 0:
-                raise Exception("parallel HLS remux produced invalid output")
-            if self._is_incomplete_hls_video_artifact(task, merged_path, expected_duration=total_duration):
-                raise Exception("parallel HLS remux produced incomplete output")
-            if total_duration > 300.0 and final_duration > 0.0 and final_duration + max(60.0, total_duration * 0.02) < total_duration:
-                raise Exception(f"parallel HLS output duration mismatch: duration={final_duration:.3f} expected={total_duration:.3f}")
-            if total_duration > 300.0 and final_duration <= 0.0:
-                raise Exception(f"parallel HLS output duration missing: expected={total_duration:.3f}")
-            current_task = self.tasks.get(item_id, task)
-            current_state = str(_task_field_value(current_task, "state", "") or "")
-            if current_state in ("DELETED", "DELETE_REQUESTED"):
-                self._discard_deleted_task(item_id)
-                raise KeyboardInterrupt()
-            if (
-                self._is_pause_requested_state(current_state)
-                and pending_segment_count <= 0
-                and self._has_nonempty_file(merged_path)
-            ):
-                task = current_task
-                _set_task_aux_fields(task, state="DOWNLOADING", _stop_reason=None, resume_requested=True, _manual_pause_requested=False)
-                self._update_task_state_entry(task, state="DOWNLOADING", resume_requested=True, _stop_reason=None)
-                write_error_log(
-                    "parallel hls completed remux finalizing during shutdown",
-                    Exception("parallel HLS completed remux is being finalized during shutdown"),
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    segments=total_segments,
-                    completed_segments=completed_segments,
-                    pending_segments=pending_segment_count,
-                    shutdown_started=bool(self._shutdown_started),
-                )
-            else:
-                task = self._ensure_task_can_continue(item_id)
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with self._resume_artifact_lock_for(merged_path, out_path):
-                if not os.path.exists(merged_path) and self._has_nonempty_file(out_path):
-                    pass
-                else:
-                    if os.path.exists(out_path):
-                        try:
-                            os.remove(out_path)
-                        except OSError:
-                            pass
-                    self._move_file_with_retry(merged_path, out_path, attempts=48, delay_seconds=0.5)
-            self._remove_artifact_paths(temp_out_path, transport_path, concat_list_path, progress_path)
-            shutil.rmtree(part_dir, ignore_errors=True)
-            self._set_task_output_file(task, item_id, out_path)
-            self._set_task_named_column_text(item_id, "progress", "100%")
-            if not self._mark_task_finished(item_id):
-                raise Exception("parallel HLS output failed final validation")
-            logged_output_path = self._task_output_path_or_default(task, out_path)
-            logged_output_size = self._get_existing_file_size(logged_output_path)
-            elapsed_seconds = max(time.time() - started_at, 0.001)
-            session_segment_bytes = max(int(completed_bytes or 0) - session_start_completed_bytes, 0)
-            session_completed_segments = max(int(completed_segments or 0) - session_start_completed_segments, 0)
-            session_segment_average_speed_bps = int(session_segment_bytes / elapsed_seconds) if session_segment_bytes > 0 else 0
-            _completion_elapsed_seconds, output_full_file_average_speed_bps, output_effective_average_speed_bps = self._set_task_completion_average_speed(
-                task,
-                logged_output_size,
-                started_at,
-                preferred_speed_bps=session_segment_average_speed_bps,
-            )
-            self._log_ffmpeg_event(
-                "parallel hls download finished",
-                Exception("parallel hls finished"),
-                task,
-                item_id,
-                media_url,
-                output=logged_output_path,
-                bytes=logged_output_size,
-                segments=total_segments,
-                workers=worker_count,
-                hls_host=hls_host,
-                hls_host_active_downloads=hls_host_active_downloads,
-                hls_host_worker_budget=hls_host_worker_budget,
-                tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
-                tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
-                resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
-                remux_strategy=remux_strategy,
-                elapsed_seconds=round(elapsed_seconds, 3),
-                session_segment_bytes=session_segment_bytes,
-                session_completed_segments=session_completed_segments,
-                session_segment_average_speed_bps=session_segment_average_speed_bps,
-                output_effective_average_speed_bps=output_effective_average_speed_bps,
-                output_full_file_average_speed_bps=output_full_file_average_speed_bps,
-            )
-            return True
-        except StopDownloadException:
-            stop_event.set()
-            try:
-                with completed_lock:
-                    interrupted_completed_segments = int(completed_segments or 0)
-                    interrupted_completed_bytes = int(completed_bytes or 0)
-                    interrupted_completed_duration = float(completed_duration or 0.0)
-                interrupted_elapsed_seconds = max(time.time() - started_at, 0.001)
-                interrupted_session_bytes = max(interrupted_completed_bytes - session_start_completed_bytes, 0)
-                interrupted_session_segments = max(interrupted_completed_segments - session_start_completed_segments, 0)
-                interrupted_average_speed_bps = int(interrupted_session_bytes / interrupted_elapsed_seconds) if interrupted_session_bytes > 0 else 0
-                self._save_resume_progress(
-                    progress_path,
-                    interrupted_completed_duration,
-                    source_url=_normalize_download_url(url) or url,
-                    bytes_done=interrupted_completed_bytes,
-                    progress_info={
-                        "type": "parallel_hls",
-                        "hls_total_segments": int(total_segments or 0),
-                        "hls_completed_segments": int(interrupted_completed_segments or 0),
-                        "hls_total_duration_seconds": round(float(total_duration or 0.0), 3),
-                        "hls_resume_validation_version": int(PARALLEL_HLS_RESUME_VALIDATION_VERSION),
-                    },
-                    min_interval_seconds=0.0,
-                    min_bytes_delta=0,
-                    force=True,
-                )
-                current_state = str(_task_field_value(self.tasks.get(item_id, task), "state", "") or "")
-                self._log_ffmpeg_event(
-                    "parallel hls download interrupted",
-                    Exception("parallel hls interrupted"),
-                    self.tasks.get(item_id, task),
-                    item_id,
-                    media_url,
-                    completed_segments=interrupted_completed_segments,
-                    pending_segments=max(int(total_segments or 0) - interrupted_completed_segments, 0),
-                    completed_bytes=interrupted_completed_bytes,
-                    completed_duration_seconds=round(interrupted_completed_duration, 3),
-                    segments=total_segments,
-                    workers=worker_count,
-                    elapsed_seconds=round(interrupted_elapsed_seconds, 3),
-                    session_segment_bytes=interrupted_session_bytes,
-                    session_completed_segments=interrupted_session_segments,
-                    session_segment_average_speed_bps=interrupted_average_speed_bps,
-                    hls_host=hls_host,
-                    hls_host_active_downloads=hls_host_active_downloads,
-                    hls_host_worker_budget=hls_host_worker_budget,
-                    tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
-                    tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
-                    resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
-                    state=current_state,
-                    shutdown_started=bool(self._shutdown_started),
-                    resume_progress_saved=os.path.exists(progress_path),
-                    progress_path=progress_path,
-                )
-            except Exception:
-                pass
-            raise
-        except RuntimeError as exc:
-            stop_event.set()
-            if "interpreter shutdown" in str(exc).lower():
-                raise StopDownloadException("application is shutting down")
-            raise
-        except Exception as exc:
-            stop_event.set()
-            if _is_no_space_left_error(exc):
-                free_bytes = self._get_disk_free_bytes(out_path)
-                self._pause_task_for_disk_full(item_id, out_path, free_bytes, None, note=self._disk_full_pause_note())
-                raise StopDownloadException("disk space low")
-            try:
-                task = self.tasks.get(item_id, task)
-                existing_info = self._probe_media_info(out_path) if self._has_nonempty_file(out_path) else {}
-                existing_duration = float(existing_info.get("duration", 0.0) or 0.0)
-                existing_size = int(existing_info.get("size", 0) or 0)
-                existing_valid = bool(existing_info.get("valid")) and existing_size > 0
-                duration_matches = (
-                    total_duration <= 300.0
-                    or existing_duration <= 0.0
-                    or existing_duration + max(60.0, total_duration * 0.02) >= total_duration
-                )
-                if (
-                    existing_valid
-                    and duration_matches
-                    and not self._is_incomplete_hls_video_artifact(task, out_path, expected_duration=total_duration)
-                ):
-                    self._set_task_output_file(task, item_id, out_path)
-                    self._set_task_named_column_text(item_id, "progress", "100%")
-                    if self._mark_task_finished(item_id):
-                        self._log_ffmpeg_event(
-                            "parallel hls output already finalized",
-                            Exception("parallel hls output already exists after remux race"),
-                            task,
-                            item_id,
-                            media_url,
-                            output=out_path,
-                            bytes=existing_size,
-                            segments=total_segments,
-                            workers=worker_count,
-                            hls_host=hls_host,
-                            hls_host_active_downloads=hls_host_active_downloads,
-                            hls_host_worker_budget=hls_host_worker_budget,
-                            tail_worker_cap=int(worker_plan.get("tail_worker_cap", 0) or 0),
-                            tail_worker_shrink_applied=bool(worker_plan.get("tail_worker_shrink_applied", False)),
-                            resume_tail_batch=bool(worker_plan.get("resume_tail_batch", False)),
-                            original_error=str(exc)[:240],
-                        )
-                        return True
-            except Exception:
-                pass
-            if isinstance(exc, ResumeLowSpeedReanalysisException):
-                write_error_log(
-                    "parallel hls slow candidate retry next",
-                    exc,
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    segments=total_segments,
-                    workers=worker_count,
-                    hls_host=hls_host,
-                    fallback_count=len(_task_field_value(task, "fallback_urls", []) or []),
-                    page_refresh_candidate_count=len(_task_field_value(task, "page_refresh_candidates", []) or []),
-                )
-                return False
-            fallback_count = len(_task_field_value(task, "fallback_urls", []) or [])
-            page_refresh_candidate_count = len(_task_field_value(task, "page_refresh_candidates", []) or [])
-            if not has_google_segments and (fallback_count > 0 or page_refresh_candidate_count > 0):
-                write_error_log(
-                    "parallel hls candidate failed retry next",
-                    exc,
-                    url=media_url,
-                    item_id=item_id,
-                    source_site=_task_source_site_name(task) or None,
-                    segments=total_segments,
-                    workers=worker_count,
-                    hls_host=hls_host,
-                    fallback_count=fallback_count,
-                    page_refresh_candidate_count=page_refresh_candidate_count,
-                )
-                return False
-            log_title = "parallel hls google retry later" if has_google_segments else "parallel hls fallback to ffmpeg"
-            write_error_log(
-                log_title,
-                exc,
-                url=media_url,
-                item_id=item_id,
-                source_site=_task_source_site_name(task) or None,
-                segments=total_segments,
-                workers=worker_count,
-                google_segments=has_google_segments,
-            )
-            if has_google_segments:
-                raise ParallelHlsRetryLaterException(str(exc)[:240] or "Google-backed HLS segments are temporarily rate-limited")
-            return False
-        finally:
-            self._unregister_parallel_hls_stop_event(item_id, stop_event)
+        from hls_downloader import HlsDownloader
+        downloader = HlsDownloader(self, item_id, url, out_path, temp_out_path, progress_path, headers, ffmpeg_path, ffmpeg_version)
+        return downloader.download()
 
     def _try_repair_native_hls_artifact_with_ffmpeg(self, item_id, media_url, artifact_path, expected_duration=0.0):
         clean_path = str(artifact_path or "").strip()
@@ -32925,21 +31785,11 @@ class DownloadManagerApp:
 
         if "avbebe.com" in parsed_url.netloc and "/archives/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="正在解析 Avbebe...")
-            c_req = get_curl_cffi_requests()
+            is_category, video_page_urls, page_title, stream_url, stream_referer, stream_origin, fallback_urls, direct_candidates, iframe_candidates = self._fetch_decoupled_media_candidates("avbebe", url, fallback_name=short_name or "Avbebe")
             site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
-            page_headers = _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root)
-            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=page_headers)
-            page_text = _response_text_utf8(resp)
-            if re.search(r"/archives/category(?:/|$)", parsed_url.path, re.IGNORECASE):
-                video_page_urls = _extract_avbebe_category_video_urls(page_text, url)
+            
+            if is_category:
                 if not video_page_urls:
-                    write_error_log(
-                        "avbebe category page candidates missing",
-                        Exception("Avbebe category page did not expose video detail URLs"),
-                        item_id=item_id,
-                        url=url,
-                        **_http_response_log_fields(resp),
-                    )
                     raise Exception("Failed to extract Avbebe category video URLs")
                 target_url = video_page_urls[0]
                 fallback_page_urls = video_page_urls[1:]
@@ -32952,128 +31802,11 @@ class DownloadManagerApp:
                     source_page=target_url,
                     fallback_urls=fallback_page_urls,
                 )
-                write_error_log(
-                    "avbebe category page retargeted",
-                    Exception("Avbebe category page was redirected to the first video detail URL"),
-                    item_id=item_id,
-                    original_url=url,
-                    target_url=target_url,
-                    fallback_count=len(fallback_page_urls),
-                )
                 self._set_task_parse_ui(item_id, message=f"Avbebe 分類頁已找到 {len(video_page_urls)} 個影片頁，改用第一個下載...")
                 self._download_task_internal(target_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
                 return
-            page_title = _extract_avbebe_page_title(page_text, short_name or "Avbebe")
-            media_candidates = _dedupe_download_urls(_extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd")))
-            candidate_referers = {_normalize_download_url(candidate): url for candidate in media_candidates}
-            iframe_candidates = []
-            for iframe_src in re.findall(r"<iframe[^>]+src=[\"']([^\"']+)[\"']", page_text, re.IGNORECASE):
-                iframe_url = _normalize_download_url(urllib.parse.urljoin(url, html.unescape(iframe_src).replace("\\/", "/")))
-                if iframe_url and not any(ad_marker in iframe_url.lower() for ad_marker in ("adserver", "widgets", "juicyads")):
-                    iframe_candidates.append(iframe_url)
-            iframe_candidates = sorted(_dedupe_download_urls(iframe_candidates), key=_avbebe_iframe_priority)
-            for iframe_url in iframe_candidates:
-                try:
-                    iframe_headers = _make_ytdlp_http_headers(referer=url, origin=site_root)
-                    iframe_resp = c_req.get(iframe_url, impersonate="chrome120", timeout=20, headers=iframe_headers)
-                    iframe_media_candidates = _extract_candidate_media_urls(
-                        iframe_resp.text,
-                        allowed_exts=(".mp4", ".m3u8", ".mpd"),
-                    )
-                    for candidate in iframe_media_candidates:
-                        normalized_candidate = _normalize_download_url(candidate)
-                        if not normalized_candidate:
-                            continue
-                        media_candidates.append(normalized_candidate)
-                        candidate_referers[normalized_candidate] = iframe_url
-                except Exception as exc:
-                    write_error_log(
-                        "avbebe iframe parser failed",
-                        exc,
-                        item_id=item_id,
-                        url=url,
-                        iframe_url=iframe_url,
-                    )
-            playable_iframe_streams = []
-            for iframe_url in iframe_candidates:
-                if not _avbebe_is_playable_iframe(iframe_url):
-                    continue
-                for candidate in media_candidates:
-                    normalized_candidate = _normalize_download_url(candidate)
-                    if (
-                        normalized_candidate
-                        and _looks_like_manifest_url(normalized_candidate)
-                        and candidate_referers.get(normalized_candidate) == iframe_url
-                    ):
-                        playable_iframe_streams.append(normalized_candidate)
-            playable_iframe_streams = _dedupe_download_urls(playable_iframe_streams)
-            if playable_iframe_streams:
-                valid_playable_iframe_streams = []
-                for candidate in sorted(playable_iframe_streams, key=_avbebe_stream_priority):
-                    candidate_referer = candidate_referers.get(_normalize_download_url(candidate), url) or url
-                    candidate_parts = urllib.parse.urlsplit(candidate_referer)
-                    candidate_origin = f"{candidate_parts.scheme}://{candidate_parts.netloc}" if candidate_parts.scheme and candidate_parts.netloc else site_root
-                    if _avbebe_manifest_looks_downloadable(candidate, referer=candidate_referer, origin=candidate_origin):
-                        valid_playable_iframe_streams.append(candidate)
-                        continue
-                    write_error_log(
-                        "avbebe rejected playable iframe stream",
-                        Exception("Avbebe playable iframe stream returned non-video segment content"),
-                        item_id=item_id,
-                        url=url,
-                        candidate_url=candidate,
-                        candidate_referer=candidate_referer,
-                    )
-                stream_url = valid_playable_iframe_streams[0] if valid_playable_iframe_streams else ""
-            if playable_iframe_streams and stream_url:
-                stream_referer = candidate_referers.get(_normalize_download_url(stream_url), url) or url
-                referer_parts = urllib.parse.urlsplit(stream_referer)
-                stream_origin = f"{referer_parts.scheme}://{referer_parts.netloc}" if referer_parts.scheme and referer_parts.netloc else site_root
-                fallback_urls = _dedupe_download_urls(
-                    [candidate for candidate in valid_playable_iframe_streams if candidate != stream_url],
-                    primary_url=stream_url,
-                )
-                _dispatch_manifest_download(
-                    stream_url,
-                    name=page_title,
-                    source_site="avbebe",
-                    source_page=url,
-                    fallback_urls=fallback_urls,
-                    referer=stream_referer,
-                    origin=stream_origin,
-                    default_route="ffmpeg",
-                    force_ffmpeg=True,
-                )
-                return
-            media_candidates = _dedupe_download_urls(media_candidates)
-            stream_candidates = sorted(
-                [candidate for candidate in media_candidates if _looks_like_manifest_url(candidate)],
-                key=_avbebe_stream_priority,
-            )
-            direct_candidates = [candidate for candidate in media_candidates if _looks_like_http_media_url(candidate) and not _looks_like_manifest_url(candidate)]
-            valid_stream_candidates = []
-            for candidate in stream_candidates:
-                candidate_referer = candidate_referers.get(_normalize_download_url(candidate), url) or url
-                candidate_parts = urllib.parse.urlsplit(candidate_referer)
-                candidate_origin = f"{candidate_parts.scheme}://{candidate_parts.netloc}" if candidate_parts.scheme and candidate_parts.netloc else site_root
-                if _avbebe_manifest_looks_downloadable(candidate, referer=candidate_referer, origin=candidate_origin):
-                    valid_stream_candidates.append(candidate)
-                    continue
-                write_error_log(
-                    "avbebe rejected non-video stream candidate",
-                    Exception("Avbebe stream candidate returned non-video segment content"),
-                    item_id=item_id,
-                    url=url,
-                    candidate_url=candidate,
-                    candidate_referer=candidate_referer,
-                )
-            stream_candidates = valid_stream_candidates
-            stream_url = stream_candidates[0] if stream_candidates else ""
+            
             if stream_url:
-                fallback_urls = _dedupe_download_urls(stream_candidates[1:] + direct_candidates + iframe_candidates, primary_url=stream_url)
-                stream_referer = candidate_referers.get(_normalize_download_url(stream_url), url) or url
-                referer_parts = urllib.parse.urlsplit(stream_referer)
-                stream_origin = f"{referer_parts.scheme}://{referer_parts.netloc}" if referer_parts.scheme and referer_parts.netloc else site_root
                 _dispatch_manifest_download(
                     stream_url,
                     name=page_title,
@@ -33086,12 +31819,13 @@ class DownloadManagerApp:
                     force_ffmpeg=True,
                 )
                 return
+
             if direct_candidates:
                 direct_url = direct_candidates[0]
                 fallback_urls = _dedupe_download_urls(direct_candidates[1:] + iframe_candidates, primary_url=direct_url)
-                direct_referer = candidate_referers.get(_normalize_download_url(direct_url), url) or url
-                direct_parts = urllib.parse.urlsplit(direct_referer)
-                direct_origin = f"{direct_parts.scheme}://{direct_parts.netloc}" if direct_parts.scheme and direct_parts.netloc else site_root
+                direct_referer = url
+                direct_origin = site_root
+                page_headers = _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root)
                 _set_task_identity(name=page_title, source_site="avbebe", source_page=url, fallback_urls=fallback_urls)
                 self._download_routed_media_url(
                     task,
@@ -33107,6 +31841,7 @@ class DownloadManagerApp:
                     headers=page_headers,
                 )
                 return
+
             if iframe_candidates:
                 retryable_iframe_candidates = [candidate for candidate in iframe_candidates if _avbebe_can_retry_iframe_directly(candidate)]
                 iframe_url = retryable_iframe_candidates[0] if retryable_iframe_candidates else ""
@@ -33124,16 +31859,7 @@ class DownloadManagerApp:
                 self._set_task_parse_ui(item_id, message="Avbebe 直連不可用，改用網頁可播放分流...")
                 self._download_task_internal(iframe_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
                 return
-            write_error_log(
-                "avbebe parser candidates missing",
-                Exception("Avbebe parser found no usable media candidates"),
-                item_id=item_id,
-                url=url,
-                **_http_response_log_fields(resp),
-                has_flowplayer="flowplayer" in (resp.text or "").lower(),
-                has_data_item="data-item" in (resp.text or "").lower(),
-                iframe_count=len(iframe_candidates),
-            )
+
             raise Exception("Failed to extract Avbebe stream URL")
 
         if "missav" in parsed_url.netloc:
@@ -33200,19 +31926,7 @@ class DownloadManagerApp:
 
         if "ppp.porn" in parsed_url.netloc and "/v/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
-            c_req = get_curl_cffi_requests()
-            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            resp = c_req.get(
-                url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_site_root_headers(site_root),
-            )
-            page_title = re.sub(r"\s+", " ", str(_extract_html_title(resp.text, short_name or "PPP.Porn") or "")).strip()
-            if page_title:
-                page_title = re.sub(r"\s*-\s*PPP\.Porn\s*\|.*$", "", page_title, flags=re.IGNORECASE)
-                page_title = page_title.strip(" -|/") or str(_extract_html_title(resp.text, short_name or "PPP.Porn") or "").strip()
-            candidate_urls = _extract_candidate_media_urls(resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
+            page_title, candidate_urls, site_root = self._fetch_decoupled_media_candidates("ppp", url, fallback_name=short_name or "PPP.Porn")
             _dispatch_extracted_media_candidates(
                 candidate_urls,
                 page_title,
@@ -33227,34 +31941,8 @@ class DownloadManagerApp:
 
         if "hohoj.tv" in parsed_url.netloc and parsed_url.path.startswith("/video"):
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback=self._ui_text("eta_found_stream", "已取得串流網址"))
+            page_title, candidate_urls, jav_code, embed_url, site_root = self._fetch_decoupled_media_candidates("hohoj", url, fallback_name=short_name or "HoHoJ")
             c_req = get_curl_cffi_requests()
-            site_root = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            resp = c_req.get(
-                url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_site_root_headers(site_root),
-            )
-            page_text = _response_text_utf8(resp)
-            page_title = _clean_hohoj_title(_extract_html_title(page_text, short_name or "HoHoJ"), short_name or "HoHoJ")
-            embed_url = urllib.parse.urljoin(url, f"/embed?{parsed_url.query}") if parsed_url.query else ""
-            embed_match = re.search(r'<iframe[^>]+class=["\']player["\'][^>]+src=["\']([^"\']+)', page_text, re.IGNORECASE)
-            if embed_match:
-                embed_url = urllib.parse.urljoin(url, embed_match.group(1))
-            if not embed_url:
-                raise Exception("HoHoJ embed URL missing")
-            embed_resp = c_req.get(
-                embed_url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_site_root_headers(site_root, referer=url),
-            )
-            jav_code = _extract_jav_code(page_title) or _extract_jav_code(url)
-            candidate_urls = _expand_ggjav_video_host_fallbacks(
-                _extract_candidate_media_urls(embed_resp.text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
-            )
-            candidate_urls.extend(_fetch_ggjav_related_candidate_urls(jav_code, c_req=c_req))
-            candidate_urls = _prefer_ggjav_media_group_matching_code(candidate_urls, jav_code)
             if jav_code and candidate_urls:
                 code_filtered_candidates = _filter_ggjav_media_groups_by_code(candidate_urls, jav_code, drop_mismatched=True)
                 if not code_filtered_candidates:

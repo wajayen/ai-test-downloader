@@ -2,7 +2,9 @@
 
 Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔名 / 番號搜尋、多站備援、續傳、佇列管理與自動封裝為 Windows 較容易播放的 MP4。程式主要整合 `yt-dlp`、`curl_cffi`、`requests`、`ffmpeg`、`ffprobe` 與站台專用解析規則。
 
-目前版本：`20260718-3780`
+目前版本：`20260718-3783`
+- **解析器解耦設計**：將 JAVDock, BestJavPorn, GetAV 與 AVJOY 等站台解析器程式碼解耦移至獨立的 `extractors/` 資料夾，主程式透過統一的 Extractor 介面動態載入，大幅提升程式碼維護性與錯誤容忍度。
+
 
 ## 目前狀態
 
