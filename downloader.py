@@ -101,7 +101,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260808-3800"
+APP_BUILD = "20260808-3801"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -9204,15 +9204,9 @@ _thread_local_sessions = threading.local()
 def get_curl_cffi_requests():
     try:
         from curl_cffi import requests as c_req
-        if not hasattr(_thread_local_sessions, "session"):
-            _thread_local_sessions.session = c_req.Session()
-        return _thread_local_sessions.session
-    except Exception:
-        try:
-            from curl_cffi import requests as c_req
-            return c_req
-        except Exception as exc:
-            raise RuntimeError("curl_cffi is unavailable in this environment") from exc
+        return c_req
+    except Exception as exc:
+        raise RuntimeError("curl_cffi is unavailable in this environment") from exc
 
 
 def get_yt_dlp_module():
