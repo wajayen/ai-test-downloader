@@ -2,8 +2,10 @@
 
 Windows 圖形介面影片下載工具，支援拖放網址、輸入網址、檔名 / 番號搜尋、多站備援、續傳、佇列管理與自動封裝為 Windows 較容易播放的 MP4。程式主要整合 `yt-dlp`、`curl_cffi`、`requests`、`ffmpeg`、`ffprobe` 與站台專用解析規則。
 
-目前版本：`20260727-3795`
-- **解析器解耦設計**：將 JAVDock, BestJavPorn, GetAV, AVJOY 以及 Legacy 站台（TinyAVideo、Eyny）等解析器程式碼解耦移至獨立的 `extractors/` 資料夾，主程式透過統一的 Extractor 介面動態載入。
+目前版本：`20260808-3800`
+- **解析器解耦設計與擴充**：新增獨立解耦的 DramasQ 與 Olevod 網站解析器，並納入 `extractors/` 資料夾與動態註冊管理。
+- **連線會話單例優化**：改進 `get_curl_cffi_requests()` 為執行緒安全的單例，減少重複建立 TLS 握手之連線與系統連接埠消耗。
+- **加密解密庫相容性**：支援自動相容 `PyCryptodome` (`Cryptodome`) 的 `AES` 模組導入，避免在未安裝傳統 `pycrypto` 的環境下發生執行期錯誤。
 - **並行 HLS 下載解耦**：將複雜的並行分段調度與 AES-128 解密核心邏輯提取至 `hls_downloader.py` 模組，大幅簡化主程式長度。
 - **GUI 介面佈局解耦**：將 Tkinter 視窗 UI 建置、欄位設定與 DnD 拖放註冊移至 `downloader_gui.py`。
 - **共享工具常數抽取**：建立 `common_utils.py`，集中收納日誌記錄器（`write_error_log`）、編碼轉換、URL 規範化等無狀態工具與常數，消除動態執行期查詢。

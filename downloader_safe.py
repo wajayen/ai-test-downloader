@@ -101,7 +101,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260727-3795"
+APP_BUILD = "20260808-3800"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -928,6 +928,12 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
     "vodcnd",
     "pianopic.com",
     "pianopic",
+    "lfthirtytwo",
+    "ffzy-bofang",
+    "ukubf8",
+    "rstu6",
+    "modujx17",
+    "wgslsw",
 )
 PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com", "ctyunxs.cn", "yximgs.com", "tiktokcdn.com", "byteoversea.com")
 PARALLEL_HLS_FMP4_BOX_MARKERS = (b"ftyp", b"moof", b"mdat", b"styp", b"sidx", b"free")
@@ -1000,6 +1006,7 @@ PARALLEL_HLS_INFERRED_SITE_MAPPINGS = (
     (("javfilms.com",), "javfilms"),
     (("18jav.tv",), "18jav"),
     (("18av.mm-cg.com",), "18av"),
+    (("dramasq.io",), "dramasq"),
 )
 PARALLEL_HLS_SEGMENT_WORKERS = 16
 PARALLEL_HLS_SEGMENT_WORKERS_BY_SITE = {
@@ -9184,13 +9191,20 @@ def _load_json_with_backup(path, default):
     return default
 
 
+_thread_local_sessions = threading.local()
+
 def get_curl_cffi_requests():
     try:
         from curl_cffi import requests as c_req
-
-        return c_req
-    except Exception as exc:
-        raise RuntimeError("curl_cffi is unavailable in this environment") from exc
+        if not hasattr(_thread_local_sessions, "session"):
+            _thread_local_sessions.session = c_req.Session()
+        return _thread_local_sessions.session
+    except Exception:
+        try:
+            from curl_cffi import requests as c_req
+            return c_req
+        except Exception as exc:
+            raise RuntimeError("curl_cffi is unavailable in this environment") from exc
 
 
 def get_yt_dlp_module():
@@ -9283,6 +9297,171 @@ def _preferred_browser_cookie_sources(preferred_browsers=("edge", "chrome", "fir
         for source in detected_sources
         if source and source[0] == browser
     ]
+
+
+import base64
+import json
+import sqlite3
+import shutil
+import ctypes
+import subprocess
+from ctypes import wintypes
+try:
+    from Crypto.Cipher import AES
+except ImportError:
+    from Cryptodome.Cipher import AES
+
+class DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+def _win_decrypt_dpapi(encrypted_bytes):
+    try:
+        crypt32 = ctypes.windll.crypt32
+        in_blob = DATA_BLOB(len(encrypted_bytes), ctypes.create_string_buffer(encrypted_bytes))
+        out_blob = DATA_BLOB()
+        if crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+            result = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+            return result
+    except Exception:
+        pass
+    return None
+
+def _decrypt_cookie_value(encrypted_val, master_key):
+    if not encrypted_val:
+        return ""
+    try:
+        if encrypted_val.startswith(b"v10") or encrypted_val.startswith(b"v11"):
+            nonce = encrypted_val[3:15]
+            ciphertext = encrypted_val[15:]
+            tag = ciphertext[-16:]
+            payload = ciphertext[:-16]
+            cipher = AES.new(master_key, AES.MODE_GCM, nonce=nonce)
+            return cipher.decrypt_and_verify(payload, tag).decode("utf-8", errors="ignore")
+        else:
+            val = _win_decrypt_dpapi(encrypted_val)
+            if val:
+                return val.decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+    return ""
+
+def _get_decrypted_browser_cookies(browser_name, domain):
+    cookies = {}
+    if os.name != "nt":
+        return cookies
+    local_state_paths = []
+    cookies_db_paths = []
+    if browser_name == "chrome":
+        local_state_paths = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data\Local State"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data\State"),
+        ]
+        cookies_db_paths = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data\Default\Network\Cookies"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data\Default\Cookies"),
+        ]
+    elif browser_name == "edge":
+        local_state_paths = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data\Local State"),
+        ]
+        cookies_db_paths = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\User Data\Default\Network\Cookies"),
+        ]
+    local_state_path = next((p for p in local_state_paths if os.path.exists(p)), None)
+    cookies_db_path = next((p for p in cookies_db_paths if os.path.exists(p)), None)
+    if not local_state_path or not cookies_db_path:
+        return cookies
+    temp_db = os.path.join(os.path.dirname(cookies_db_path), f"cookies_temp_{browser_name}.db")
+    try:
+        with open(local_state_path, "r", encoding="utf-8") as f:
+            local_state = json.load(f)
+        encrypted_key = base64.b64decode(local_state["os_crypt"]["encrypted_key"])[5:]
+        master_key = _win_decrypt_dpapi(encrypted_key)
+        if not master_key:
+            return cookies
+        shutil.copyfile(cookies_db_path, temp_db)
+        conn = sqlite3.connect(temp_db)
+        cursor = conn.cursor()
+        cursor.execute("SELECT host_key, name, encrypted_value FROM cookies")
+        for host, name, enc_val in cursor.fetchall():
+            if domain.lower() in host.lower():
+                val = _decrypt_cookie_value(enc_val, master_key)
+                if val:
+                    cookies[name] = val
+        conn.close()
+    except Exception:
+        pass
+    finally:
+        if os.path.exists(temp_db):
+            try:
+                os.remove(temp_db)
+            except Exception:
+                pass
+    return cookies
+
+def _download_segments_with_aria2(segment_urls, referer, save_dir, headers_dict=None):
+    aria2_path = None
+    for path in ["aria2c.exe", "aria2c", os.path.join(os.getcwd(), "aria2c.exe"), os.path.join(os.getcwd(), "dist", "aria2c.exe")]:
+        try:
+            subprocess.run([path, "--version"], capture_output=True)
+            aria2_path = path
+            break
+        except Exception:
+            continue
+    if not aria2_path:
+        return False
+    input_file = os.path.join(save_dir, "aria2_segments.txt")
+    with open(input_file, "w", encoding="utf-8") as f:
+        for idx, url in enumerate(segment_urls):
+            filename = f"{idx:06d}.ts"
+            f.write(f"{url}\n")
+            f.write(f"  out={filename}\n")
+            if referer:
+                f.write(f"  header=Referer: {referer}\n")
+            if headers_dict:
+                for k, v in headers_dict.items():
+                    if k.lower() != "referer":
+                        f.write(f"  header={k}: {v}\n")
+    try:
+        cmd = [
+            aria2_path,
+            "-i", input_file,
+            "--dir", save_dir,
+            "-j", "16",
+            "-x", "16",
+            "-s", "16",
+            "--min-split-size=1M",
+            "--allow-overwrite=true",
+            "--connect-timeout=10",
+            "--timeout=15",
+            "--max-tries=5",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            return True
+    except Exception:
+        pass
+    finally:
+        if os.path.exists(input_file):
+            try:
+                os.remove(input_file)
+            except Exception:
+                pass
+    return False
+
+def _is_segment_valid(file_path):
+    if not os.path.exists(file_path):
+        return False
+    size = os.path.getsize(file_path)
+    if size < 188:
+        return False
+    try:
+        with open(file_path, "rb") as f:
+            first_byte = f.read(1)
+            return first_byte == b"G"
+    except Exception:
+        return False
 
 
 def _build_ytdlp_route_profile(site):
@@ -14997,19 +15176,6 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         def collect_parallel(search_jobs, timeout_seconds, target_exact_results=0):
             collected = []
             if not search_jobs:
-                return collected
-            if target_exact_results:
-                deadline = time.time() + max(float(timeout_seconds or 0), 1.0)
-                for _label, job in search_jobs:
-                    if time.time() >= deadline:
-                        break
-                    try:
-                        append_unique_results(collected, job())
-                    except Exception:
-                        continue
-                    exact_count = sum(1 for result in collected if _video_search_matches_query(result, search_text))
-                    if exact_count >= int(target_exact_results):
-                        break
                 return collected
             executor = DaemonThreadPoolExecutor(max_workers=min(len(search_jobs), VIDEO_SEARCH_SOURCE_WORKERS))
             future_map = {}
@@ -23652,7 +23818,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 raise DownloadSourceUnavailableException("BestJavPorn HLS source contains placeholder or preview-length segments")
             candidate_urls = valid_candidate_urls
             url = candidate_urls[0]
-        if source_site in ("gimy", "missav", "movieffm", "xiaoyakankan", "nnyy", "javdock") and candidate_urls:
+        if source_site in ("gimy", "missav", "movieffm", "xiaoyakankan", "nnyy", "javdock", "dramasq") and candidate_urls:
             selected_manifest_url = candidate_urls[0]
             if _normalize_download_url(selected_manifest_url) != _normalize_download_url(url):
                 remaining_manifest_urls = [
@@ -23954,7 +24120,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         parallel_unsupported_segment_url = ""
         parallel_unsupported_segment_error = None
         if not is_mp3:
-            parallel_candidate_urls = candidate_urls if source_site in ("85xvideo", "18av", "bestjavporn", "getav", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites) else [url]
+            parallel_candidate_urls = candidate_urls if source_site in ("85xvideo", "18av", "bestjavporn", "getav", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", "dramasq", *ggjav_hls_source_sites) else [url]
             parallel_candidate_urls = [
                 candidate
                 for candidate in _dedupe_download_urls(parallel_candidate_urls)
@@ -23972,7 +24138,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                         for candidate in candidate_urls
                         if _normalize_download_url(candidate) != _normalize_download_url(parallel_url)
                     ]
-                    if source_site in ("85xvideo", "18av", "bestjavporn", "getav", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", *ggjav_hls_source_sites):
+                    if source_site in ("85xvideo", "18av", "bestjavporn", "getav", "gimy", "hayav", "javdock", "jable", "missav", "movieffm", "njav", "njavtv", "nnyy", "supjav", "tinyavideo", "xiaoyakankan", "dramasq", *ggjav_hls_source_sites):
                         self._cache_task_resolved_link(
                             task,
                             parallel_url,
@@ -29194,6 +29360,17 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                     source_page=url,
                     fallback_urls=fallback_urls,
                 )
+                for next_url, next_name in episodes:
+                    if next_url != primary_url:
+                        self._schedule_ui_call(
+                            lambda ep_url=next_url, ep_name=next_name: self._final_add_download(
+                                ep_url,
+                                is_mp3=is_mp3,
+                                custom_name=ep_name,
+                                source_site="777tv",
+                                extra_task_data=self._build_extra_task_data(source_page=url),
+                            )
+                        )
                 self._download_task_internal(primary_url, item_id, save_dir, use_impersonate, is_mp3)
                 return
             page_title, candidates, _player_data = _extract_777tv_playback_candidates(resp.text, page_title)
@@ -29307,36 +29484,22 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
 
         if "dramasq.io" in parsed_url.netloc and re.search(r"/(?:detail|vodplay)/\d+(?:/ep\d+)?\.html$", parsed_url.path, re.IGNORECASE):
             self._set_task_parse_ui(item_id, message="正在解析 DramasQ...")
-            c_req = get_curl_cffi_requests()
-            page_resp = c_req.get(
-                url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_ytdlp_http_headers(referer="https://dramasq.io/"),
-            )
-            page_text = _response_text_utf8(page_resp)
-            page_title = _clean_series_site_title(_extract_html_title(page_text, short_name or "DramasQ"), fallback_title=short_name or "DramasQ")
-            if re.search(r"/detail/\d+\.html$", parsed_url.path, re.IGNORECASE):
-                episodes = _extract_dramasq_episode_entries(page_text, url, page_title)
-                if not episodes:
-                    raise Exception("DramasQ detail page did not expose episode links")
+            page_title, episodes, candidates = self._fetch_decoupled_media_candidates("dramasq", url, short_name or "DramasQ")
+            if episodes:
                 fallback_urls = [episode_url for episode_url, _episode_name in episodes[1:]]
                 _set_task_identity(name=episodes[0][1] or page_title, source_site="dramasq", source_page=url, fallback_urls=fallback_urls)
+                for next_url, next_name in episodes[1:]:
+                    self._schedule_ui_call(
+                        lambda ep_url=next_url, ep_name=next_name: self._final_add_download(
+                            ep_url,
+                            is_mp3=is_mp3,
+                            custom_name=ep_name,
+                            source_site="dramasq",
+                            extra_task_data=self._build_extra_task_data(source_page=url),
+                        )
+                    )
                 self._download_task_internal(episodes[0][0], item_id, save_dir, use_impersonate, is_mp3)
                 return
-            api_match = re.search(r"/vodplay/(\d+)/(ep\d+)\.html$", parsed_url.path, re.IGNORECASE)
-            if not api_match:
-                raise Exception("DramasQ play id missing")
-            api_url = f"https://dramasq.io/drq/{api_match.group(1)}/{api_match.group(2)}"
-            api_resp = c_req.get(
-                api_url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_ytdlp_http_headers(referer=url),
-            )
-            candidates = _extract_dramasq_playback_candidates(_response_text_utf8(api_resp))
-            if not candidates:
-                candidates = _extract_candidate_media_urls(page_text, allowed_exts=(".m3u8", ".mp4", ".mpd"))
             if not candidates:
                 raise Exception("DramasQ stream URL missing")
             fallback_urls = candidates[1:]
@@ -29352,24 +29515,22 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
 
         if ("olevod.com" in parsed_url.netloc or "olehdtv.com" in parsed_url.netloc) and re.search(r"/index\.php/vod/(?:detail|play)/id/\d+", parsed_url.path, re.IGNORECASE):
             self._set_task_parse_ui(item_id, message="正在解析 Olevod...")
-            c_req = get_curl_cffi_requests()
-            page_resp = c_req.get(
-                url,
-                impersonate="chrome120",
-                timeout=20,
-                headers=_make_ytdlp_http_headers(referer="https://olevod.com/"),
-            )
-            page_text = _response_text_utf8(page_resp)
-            page_title = _clean_series_site_title(_extract_html_title(page_text, short_name or "Olevod"), fallback_title=short_name or "Olevod")
-            if "/vod/detail/" in parsed_url.path.lower():
-                episodes = _extract_olevod_episode_entries(page_text, url, page_title)
-                if not episodes:
-                    raise Exception("Olevod detail page did not expose episode links")
+            page_title, episodes, candidates = self._fetch_decoupled_media_candidates("olevod", url, short_name or "Olevod")
+            if episodes:
                 fallback_urls = [episode_url for episode_url, _episode_name in episodes[1:]]
                 _set_task_identity(name=episodes[0][1] or page_title, source_site="olevod", source_page=url, fallback_urls=fallback_urls)
+                for next_url, next_name in episodes[1:]:
+                    self._schedule_ui_call(
+                        lambda ep_url=next_url, ep_name=next_name: self._final_add_download(
+                            ep_url,
+                            is_mp3=is_mp3,
+                            custom_name=ep_name,
+                            source_site="olevod",
+                            extra_task_data=self._build_extra_task_data(source_page=url),
+                        )
+                    )
                 self._download_task_internal(episodes[0][0], item_id, save_dir, use_impersonate, is_mp3)
                 return
-            candidates = _extract_olevod_playback_candidates(page_text)
             if not candidates:
                 raise Exception("Olevod stream URL missing")
             fallback_urls = candidates[1:]
