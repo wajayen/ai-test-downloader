@@ -101,7 +101,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260808-3801"
+APP_BUILD = "20260808-3802"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -938,10 +938,10 @@ PARALLEL_HLS_SEGMENT_HOST_MARKERS = (
 PARALLEL_HLS_MISLABELLED_MEDIA_HOST_MARKERS = ("surrit.com", "worldstatic.com", "vdcdn.top", "googleusercontent.com", "ctyunxs.cn", "yximgs.com", "tiktokcdn.com", "byteoversea.com")
 PARALLEL_HLS_FMP4_BOX_MARKERS = (b"ftyp", b"moof", b"mdat", b"styp", b"sidx", b"free")
 PARALLEL_HLS_RATE_LIMIT_STATUS_CODES = (403, 429, 502, 503, 504)
-PARALLEL_HLS_RATE_LIMIT_ERROR_KEYWORDS = ("429", "too many requests", "rate limit", "503", "502", "504", "403 forbidden", "connection reset", "connection aborted", "timeout")
+PARALLEL_HLS_RATE_LIMIT_ERROR_KEYWORDS = ("429", "too many requests", "rate limit", "503", "502", "504", "403 forbidden", "connection reset")
+PARALLEL_HLS_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 GIMY_NETLOC_MARKERS = ("gimy", "gitube")
 GIMY_DOMAINS = ("gimy.cc", "gimy.tw", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com", "gitube.tv")
-PARALLEL_HLS_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PARALLEL_HLS_NON_VIDEO_MAGIC_PREFIXES = (b"<!DOCTYPE", b"<html", b"{", b"\x89PNG", b"GIF8", b"\xff\xd8\xff")
 NON_JAV_PREFIX_MARKERS = ("EP", "SS", "BV")
 HAYAV_JAV_CODE_REGEX = re.compile(r"\b([A-Za-z]{2,10})[-_. ]?(\d{2,6})(?:u?c)?\b", re.IGNORECASE)
@@ -6788,7 +6788,6 @@ VIDEO_SEARCH_PLAYLIST_DETAIL_SITE_MARKERS = (
     "gimy01.tv",
     "gimy.tube",
     "gimytube.com",
-    "gitube.tv",
     "movieffm.net",
     "nnyy.in",
     "xiaoyakankan.io",
@@ -8585,7 +8584,6 @@ def _video_search_result_is_downloadable(result):
         "gimy01.tv",
         "gimy.tube",
         "gimytube.com",
-        "gitube.tv",
         "18jav.tv",
         "18av.mm-cg.com",
         "99itv.net",
@@ -9823,7 +9821,7 @@ class UIThrottler:
             return
         if not updates:
             return
-        if "status" in updates:
+        if "state" in updates or "status" in updates:
             force = True
         now = time.time()
         with self._lock:
@@ -9834,6 +9832,11 @@ class UIThrottler:
                 last_val, _last_time = last_map.get(col, (None, 0))
                 if not force and value == last_val and pending_map.get(col) == value:
                     continue
+                if not force and col == "progress" and last_val is not None:
+                    if value == last_val:
+                        continue
+                    if now - _last_time < 0.25 and value != "100%" and value != "100.0%":
+                        continue
                 last_map[col] = (value, now)
                 pending_map[col] = value
                 changed = True
@@ -9873,6 +9876,8 @@ class UIThrottler:
             column_indexes = self._column_indexes()
             for item_id, updates in pending.items():
                 try:
+                    if not self.tree.exists(item_id):
+                        continue
                     current_values = list(self.tree.item(item_id, "values"))
                 except tk.TclError:
                     continue
@@ -10513,8 +10518,8 @@ class DownloadCoordinator:
         self._last_reported_domain_limit = None
         self._resume_artifact_locks = {}
         self._resume_artifact_locks_guard = threading.Lock()
-        self._ffmpeg_remux_lock = threading.Lock()
-        self.config = load_config()
+        from config_manager import ConfigManager
+        self.config = ConfigManager(CONFIG_FILE)
         self._ffmpeg_install_started = False
         self._last_state_persist_at = 0.0
         self._last_state_persist_signature = None
@@ -10621,6 +10626,7 @@ class DownloadCoordinator:
 
 
 from downloader_gui import DownloadManagerGUI
+
 
 class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
     """Main desktop downloader application."""
@@ -10966,7 +10972,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
             return
         self._save_dir_cached = normalized
         self.save_dir_var.set(normalized)
-        save_config({"save_dir": normalized})
+        self.config["save_dir"] = normalized
 
     def _load_url_input_history(self):
         history = []
@@ -11012,7 +11018,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         self.url_history = history[:URL_INPUT_HISTORY_LIMIT]
         self._url_history_index = -1
         self._refresh_url_history_values()
-        save_config({"url_history": self.url_history})
+        self.config["url_history"] = self.url_history
 
     def _select_url_history(self, direction):
         if not getattr(self, "url_history", None):
@@ -13679,7 +13685,9 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
             callback()
 
     def _schedule_tree_update(self, item_id, col, value, force=False):
-        self.update_tree(item_id, col, value, force=force)
+        self._schedule_ui_call(
+            lambda _item_id=item_id, _col=col, _value=value, _force=force: self.update_tree(_item_id, _col, _value, force=_force)
+        )
 
     def _clean_leftover_temp_files(self):
         def cleanup():
@@ -13711,6 +13719,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                                 try:
                                     if time.time() - os.path.getmtime(file_path) > 300:
                                         os.remove(file_path)
+                                # Keep it quiet to not disrupt main thread
                                 except Exception:
                                     pass
             except Exception:
@@ -13809,7 +13818,6 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
             "gimy01.tv": "gimy",
             "gimy.tube": "gimy",
             "gimytube.com": "gimy",
-            "gitube.tv": "gimy",
             "javfilms.com": "javfilms",
             "18jav.tv": "18jav",
             "hohoj.tv": "hohoj",
@@ -13858,7 +13866,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 {"url": episode_url, "title": title}
                 for episode_url, title in _extract_olevod_episode_entries(page_text, normalized_url, page_title or query_text or "Olevod")
             ]
-        if site in GIMY_DOMAINS and _is_gimy_detail_path(parsed.path):
+        if site in ("gimy.cc", "gimy.tw", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com") and _is_gimy_detail_path(parsed.path):
             base = f"{parsed.scheme or 'https'}://{parsed.netloc}"
             drama_name = _clean_gimy_title(page_title or "Gimy", fallback_title=page_title or query_text or "Gimy", page_url=normalized_url)
             entries = self._extract_gimy_detail_entries(page_text, base, drama_name)
@@ -14894,7 +14902,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 return collected
             if jav_code:
                 return collected
-            for domain in ("gimy.tw", "gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com", "gitube.tv"):
+            for domain in ("gimy.tw", "gimy.cc", "gimy01.co", "gimy01.tv", "gimy.tube", "gimytube.com"):
                 for path_marker in ("/voddetail", "/detail", "/title", "/watch"):
                     for primary in primary_queries:
                         query = f"{primary} site:{domain}{path_marker}"
@@ -22283,7 +22291,6 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         if not any(line.startswith("#EXT-X-ENDLIST") for line in lines):
             raise Exception("parallel HLS only supports complete VOD playlists")
         active_key = None
-        active_map = None
         sequence_number = 0
         pending_duration = 0.0
         segments = []
@@ -22293,18 +22300,6 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                     sequence_number = int(line.split(":", 1)[1].strip())
                 except Exception:
                     sequence_number = 0
-            elif line.startswith("#EXT-X-MAP"):
-                attrs = self._parse_hls_attribute_list(line.split(":", 1)[1] if ":" in line else "")
-                map_uri = attrs.get("URI", "")
-                if map_uri:
-                    active_map = {
-                        "index": -1,
-                        "sequence": -1,
-                        "url": urllib.parse.urljoin(playlist_url, map_uri),
-                        "duration": 0.0,
-                        "key": None,
-                        "is_init": True,
-                    }
             elif line.startswith("#EXT-X-KEY"):
                 attrs = self._parse_hls_attribute_list(line.split(":", 1)[1] if ":" in line else "")
                 method = str(attrs.get("METHOD", "") or "").upper()
@@ -22335,8 +22330,6 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 pending_duration = 0.0
         if not segments:
             raise Exception("parallel HLS playlist has no media segments")
-        if active_map:
-            segments.insert(0, active_map)
         return segments
 
     def _fetch_parallel_hls_keys(self, segments, headers, stop_event=None):
@@ -22405,20 +22398,6 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
             )
         key_url = key_info.get("uri")
         key_data = (key_cache or {}).get(key_url)
-        if not key_data and key_url:
-            try:
-                request_headers = {"User-Agent": DEFAULT_USER_AGENT}
-                with urllib.request.urlopen(urllib.request.Request(key_url, headers=request_headers), timeout=10) as resp:
-                    fetched_key = resp.read()
-                if fetched_key and len(fetched_key) == 16:
-                    if key_cache is not None:
-                        key_cache[key_url] = fetched_key
-                    key_data = fetched_key
-            except Exception as e:
-                try:
-                    write_error_log("parallel hls dynamic key fetch failed", e, key_url=key_url)
-                except Exception:
-                    pass
         if not key_data:
             raise Exception("parallel HLS AES key missing")
         if CryptoAES is None:
@@ -22458,11 +22437,13 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
             tail = view[pos:]
             if not tail:
                 return None
-            tail_prefix = bytes(tail[:4096])
-            stripped_len = len(tail_prefix) - len(tail_prefix.lstrip(b"\x00\xff"))
-            if stripped_len == len(tail_prefix) and len(tail) > 4096:
-                tail_bytes = bytes(tail)
-                stripped_len = len(tail_bytes) - len(tail_bytes.lstrip(b"\x00\xff"))
+            stripped_len = 0
+            for i in range(len(tail)):
+                val = tail[i]
+                if val == 0xff or val == 0x00:
+                    stripped_len += 1
+                else:
+                    break
             actual_tail = tail[stripped_len:]
             if not actual_tail:
                 return None
@@ -22682,23 +22663,6 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 raise ParallelHlsUnsupportedSegmentContentException(
                     "parallel HLS native concat requires MPEG-TS segments; falling back to ffmpeg"
                 )
-    def _probe_parallel_hls_head(self, url, headers):
-        try:
-            session = self._parallel_hls_curl_session()
-            resp = session.head(url, headers=headers, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS)
-            if resp.status_code >= 400:
-                raise Exception(f"HTTP {resp.status_code}")
-            return str(resp.headers.get("Content-Type") or "").lower()
-        except Exception:
-            req = urllib.request.Request(url, headers=headers, method="HEAD")
-            with urllib.request.urlopen(req, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
-                return str(resp.headers.get("Content-Type") or "").lower()
-
-    def _drop_unsupported_google_parallel_hls_segments(self, segments, request_headers):
-        google_segments = [
-            seg for seg in (segments or [])
-            if "googleusercontent.com" in urllib.parse.urlsplit(_normalize_download_url(seg.get("url") or "") or "").netloc.lower()
-        ]
         if not google_segments:
             return
         for segment in google_segments[:3]:
@@ -22709,7 +22673,9 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 google_request_headers = dict(request_headers)
                 google_request_headers.pop("Referer", None)
                 google_request_headers.pop("Origin", None)
-                content_type = self._probe_parallel_hls_head(segment_url, google_request_headers)
+                req = urllib.request.Request(segment_url, headers=google_request_headers, method="HEAD")
+                with urllib.request.urlopen(req, timeout=PARALLEL_HLS_SEGMENT_TIMEOUT_SECONDS) as resp:
+                    content_type = str(resp.headers.get("Content-Type") or "").lower()
             except Exception:
                 continue
             if "image/" in content_type and content_type != "image/png":
@@ -22879,7 +22845,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 return max(int(host_retries or 0), 1)
         return max(int(PARALLEL_HLS_SEGMENT_RETRIES), 1)
 
-    def _fetch_parallel_hls_segment_payload(self, segment_url, request_headers, prefer_curl=False, stop_event=None, session=None):
+    def _fetch_parallel_hls_segment_payload(self, segment_url, request_headers, prefer_curl=False, stop_event=None):
         def _stop_requested():
             return bool(
                 (stop_event is not None and stop_event.is_set())
@@ -22893,8 +22859,8 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         def _fetch_with_curl():
             if _stop_requested():
                 raise StopDownloadException("stop requested")
-            use_session = session if session is not None else self._parallel_hls_curl_session()
-            resp = use_session.get(
+            session = self._parallel_hls_curl_session()
+            resp = session.get(
                 segment_url,
                 timeout=_segment_timeout(),
                 headers=request_headers,
@@ -22929,7 +22895,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 continue
         raise last_exc or Exception("parallel HLS segment fetch failed")
 
-    def _stream_parallel_hls_segment_payload_to_file(self, segment_url, request_headers, temp_part_path, prefer_curl=False, stop_event=None, session=None):
+    def _stream_parallel_hls_segment_payload_to_file(self, segment_url, request_headers, temp_part_path, prefer_curl=False, stop_event=None):
         def _stop_requested():
             return bool(
                 (stop_event is not None and stop_event.is_set())
@@ -22958,8 +22924,8 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         def _stream_with_curl():
             if _stop_requested():
                 raise StopDownloadException("stop requested")
-            use_session = session if session is not None else self._parallel_hls_curl_session()
-            resp = use_session.get(
+            session = self._parallel_hls_curl_session()
+            resp = session.get(
                 segment_url,
                 timeout=_segment_timeout(),
                 headers=request_headers,
@@ -23048,23 +23014,28 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         raise last_exc or Exception("parallel HLS segment stream failed")
 
     def _parallel_hls_segment_error_is_rate_limited(self, exc):
-        for attr in ("code", "status_code"):
-            try:
-                val = int(getattr(exc, attr, 0) or 0)
-                if val in PARALLEL_HLS_RATE_LIMIT_STATUS_CODES:
-                    return True
-            except Exception:
-                pass
+        try:
+            code = int(getattr(exc, "code", 0) or 0)
+            if code in (403, 429, 502, 503, 504):
+                return True
+        except Exception:
+            pass
+        try:
+            status_code = int(getattr(exc, "status_code", 0) or 0)
+            if status_code in (403, 429, 502, 503, 504):
+                return True
+        except Exception:
+            pass
         try:
             resp = getattr(exc, "response", None)
             if resp is not None:
                 val = int(getattr(resp, "status_code", 0) or 0)
-                if val in PARALLEL_HLS_RATE_LIMIT_STATUS_CODES:
+                if val in (403, 429, 502, 503, 504):
                     return True
         except Exception:
             pass
         text = str(exc or "").lower()
-        return any(kw in text for kw in PARALLEL_HLS_RATE_LIMIT_ERROR_KEYWORDS)
+        return any(x in text for x in ("429", "too many requests", "rate limit", "503", "502", "504", "403 forbidden", "connection reset", "connection aborted", "timeout"))
 
     def _download_parallel_hls_segment(self, segment, part_path, headers, key_cache, stop_event, prefer_curl=False, session=None):
         if stop_event.is_set() or getattr(self, "_shutdown_stop_requested", False) or self._shutdown_started:
@@ -24832,7 +24803,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
             else:
                 cmd += ["-c", "copy"]
             cmd += [active_output_path]
-            print(f"DEBUG: running ffmpeg command: {cmd}")
+
             popen_kwargs = {
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.STDOUT,
@@ -30941,11 +30912,21 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
 
         if "avbebe.com" in parsed_url.netloc and "/archives/" in parsed_url.path:
             self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="正在解析 Avbebe...")
-            is_category, video_page_urls, page_title, stream_url, stream_referer, stream_origin, fallback_urls, direct_candidates, iframe_candidates = self._fetch_decoupled_media_candidates("avbebe", url, fallback_name=short_name or "Avbebe")
+            c_req = get_curl_cffi_requests()
             site_root = f"{parsed_url.scheme or 'https'}://{parsed_url.netloc}"
-            
-            if is_category:
+            page_headers = _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root)
+            resp = c_req.get(url, impersonate="chrome120", timeout=20, headers=page_headers)
+            page_text = _response_text_utf8(resp)
+            if re.search(r"/archives/category(?:/|$)", parsed_url.path, re.IGNORECASE):
+                video_page_urls = _extract_avbebe_category_video_urls(page_text, url)
                 if not video_page_urls:
+                    write_error_log(
+                        "avbebe category page candidates missing",
+                        Exception("Avbebe category page did not expose video detail URLs"),
+                        item_id=item_id,
+                        url=url,
+                        **_http_response_log_fields(resp),
+                    )
                     raise Exception("Failed to extract Avbebe category video URLs")
                 target_url = video_page_urls[0]
                 fallback_page_urls = video_page_urls[1:]
@@ -30958,11 +30939,87 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                     source_page=target_url,
                     fallback_urls=fallback_page_urls,
                 )
+                write_error_log(
+                    "avbebe category page retargeted",
+                    Exception("Avbebe category page was redirected to the first video detail URL"),
+                    item_id=item_id,
+                    original_url=url,
+                    target_url=target_url,
+                    fallback_count=len(fallback_page_urls),
+                )
                 self._set_task_parse_ui(item_id, message=f"Avbebe 分類頁已找到 {len(video_page_urls)} 個影片頁，改用第一個下載...")
                 self._download_task_internal(target_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
                 return
-            
-            if stream_url:
+            page_title = _extract_avbebe_page_title(page_text, short_name or "Avbebe")
+            media_candidates = _dedupe_download_urls(_extract_candidate_media_urls(page_text, allowed_exts=(".mp4", ".m3u8", ".mpd")))
+            candidate_referers = {_normalize_download_url(candidate): url for candidate in media_candidates}
+            iframe_candidates = []
+            for iframe_src in re.findall(r"<iframe[^>]+src=[\"']([^\"']+)[\"']", page_text, re.IGNORECASE):
+                iframe_url = _normalize_download_url(urllib.parse.urljoin(url, html.unescape(iframe_src).replace("\\/", "/")))
+                if iframe_url and not any(ad_marker in iframe_url.lower() for ad_marker in ("adserver", "widgets", "juicyads")):
+                    iframe_candidates.append(iframe_url)
+            iframe_candidates = sorted(_dedupe_download_urls(iframe_candidates), key=_avbebe_iframe_priority)
+            for iframe_url in iframe_candidates:
+                try:
+                    iframe_headers = _make_ytdlp_http_headers(referer=url, origin=site_root)
+                    iframe_resp = c_req.get(iframe_url, impersonate="chrome120", timeout=20, headers=iframe_headers)
+                    iframe_media_candidates = _extract_candidate_media_urls(
+                        iframe_resp.text,
+                        allowed_exts=(".mp4", ".m3u8", ".mpd"),
+                    )
+                    for candidate in iframe_media_candidates:
+                        normalized_candidate = _normalize_download_url(candidate)
+                        if not normalized_candidate:
+                            continue
+                        media_candidates.append(normalized_candidate)
+                        candidate_referers[normalized_candidate] = iframe_url
+                except Exception as exc:
+                    write_error_log(
+                        "avbebe iframe parser failed",
+                        exc,
+                        item_id=item_id,
+                        url=url,
+                        iframe_url=iframe_url,
+                    )
+            playable_iframe_streams = []
+            for iframe_url in iframe_candidates:
+                if not _avbebe_is_playable_iframe(iframe_url):
+                    continue
+                for candidate in media_candidates:
+                    normalized_candidate = _normalize_download_url(candidate)
+                    if (
+                        normalized_candidate
+                        and _looks_like_manifest_url(normalized_candidate)
+                        and candidate_referers.get(normalized_candidate) == iframe_url
+                    ):
+                        playable_iframe_streams.append(normalized_candidate)
+            playable_iframe_streams = _dedupe_download_urls(playable_iframe_streams)
+            if playable_iframe_streams:
+                valid_playable_iframe_streams = []
+                for candidate in sorted(playable_iframe_streams, key=_avbebe_stream_priority):
+                    candidate_referer = candidate_referers.get(_normalize_download_url(candidate), url) or url
+                    candidate_parts = urllib.parse.urlsplit(candidate_referer)
+                    candidate_origin = f"{candidate_parts.scheme}://{candidate_parts.netloc}" if candidate_parts.scheme and candidate_parts.netloc else site_root
+                    if _avbebe_manifest_looks_downloadable(candidate, referer=candidate_referer, origin=candidate_origin):
+                        valid_playable_iframe_streams.append(candidate)
+                        continue
+                    write_error_log(
+                        "avbebe rejected playable iframe stream",
+                        Exception("Avbebe playable iframe stream returned non-video segment content"),
+                        item_id=item_id,
+                        url=url,
+                        candidate_url=candidate,
+                        candidate_referer=candidate_referer,
+                    )
+                stream_url = valid_playable_iframe_streams[0] if valid_playable_iframe_streams else ""
+            if playable_iframe_streams and stream_url:
+                stream_referer = candidate_referers.get(_normalize_download_url(stream_url), url) or url
+                referer_parts = urllib.parse.urlsplit(stream_referer)
+                stream_origin = f"{referer_parts.scheme}://{referer_parts.netloc}" if referer_parts.scheme and referer_parts.netloc else site_root
+                fallback_urls = _dedupe_download_urls(
+                    [candidate for candidate in valid_playable_iframe_streams if candidate != stream_url],
+                    primary_url=stream_url,
+                )
                 _dispatch_manifest_download(
                     stream_url,
                     name=page_title,
@@ -30975,13 +31032,53 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                     force_ffmpeg=True,
                 )
                 return
-
+            media_candidates = _dedupe_download_urls(media_candidates)
+            stream_candidates = sorted(
+                [candidate for candidate in media_candidates if _looks_like_manifest_url(candidate)],
+                key=_avbebe_stream_priority,
+            )
+            direct_candidates = [candidate for candidate in media_candidates if _looks_like_http_media_url(candidate) and not _looks_like_manifest_url(candidate)]
+            valid_stream_candidates = []
+            for candidate in stream_candidates:
+                candidate_referer = candidate_referers.get(_normalize_download_url(candidate), url) or url
+                candidate_parts = urllib.parse.urlsplit(candidate_referer)
+                candidate_origin = f"{candidate_parts.scheme}://{candidate_parts.netloc}" if candidate_parts.scheme and candidate_parts.netloc else site_root
+                if _avbebe_manifest_looks_downloadable(candidate, referer=candidate_referer, origin=candidate_origin):
+                    valid_stream_candidates.append(candidate)
+                    continue
+                write_error_log(
+                    "avbebe rejected non-video stream candidate",
+                    Exception("Avbebe stream candidate returned non-video segment content"),
+                    item_id=item_id,
+                    url=url,
+                    candidate_url=candidate,
+                    candidate_referer=candidate_referer,
+                )
+            stream_candidates = valid_stream_candidates
+            stream_url = stream_candidates[0] if stream_candidates else ""
+            if stream_url:
+                fallback_urls = _dedupe_download_urls(stream_candidates[1:] + direct_candidates + iframe_candidates, primary_url=stream_url)
+                stream_referer = candidate_referers.get(_normalize_download_url(stream_url), url) or url
+                referer_parts = urllib.parse.urlsplit(stream_referer)
+                stream_origin = f"{referer_parts.scheme}://{referer_parts.netloc}" if referer_parts.scheme and referer_parts.netloc else site_root
+                _dispatch_manifest_download(
+                    stream_url,
+                    name=page_title,
+                    source_site="avbebe",
+                    source_page=url,
+                    fallback_urls=fallback_urls,
+                    referer=stream_referer,
+                    origin=stream_origin,
+                    default_route="ffmpeg",
+                    force_ffmpeg=True,
+                )
+                return
             if direct_candidates:
                 direct_url = direct_candidates[0]
                 fallback_urls = _dedupe_download_urls(direct_candidates[1:] + iframe_candidates, primary_url=direct_url)
-                direct_referer = url
-                direct_origin = site_root
-                page_headers = _make_ytdlp_http_headers(referer=site_root + "/", origin=site_root)
+                direct_referer = candidate_referers.get(_normalize_download_url(direct_url), url) or url
+                direct_parts = urllib.parse.urlsplit(direct_referer)
+                direct_origin = f"{direct_parts.scheme}://{direct_parts.netloc}" if direct_parts.scheme and direct_parts.netloc else site_root
                 _set_task_identity(name=page_title, source_site="avbebe", source_page=url, fallback_urls=fallback_urls)
                 self._download_routed_media_url(
                     task,
@@ -30997,7 +31094,6 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                     headers=page_headers,
                 )
                 return
-
             if iframe_candidates:
                 retryable_iframe_candidates = [candidate for candidate in iframe_candidates if _avbebe_can_retry_iframe_directly(candidate)]
                 iframe_url = retryable_iframe_candidates[0] if retryable_iframe_candidates else ""
@@ -31015,7 +31111,16 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 self._set_task_parse_ui(item_id, message="Avbebe 直連不可用，改用網頁可播放分流...")
                 self._download_task_internal(iframe_url, item_id, save_dir, use_impersonate=use_impersonate, is_mp3=is_mp3)
                 return
-
+            write_error_log(
+                "avbebe parser candidates missing",
+                Exception("Avbebe parser found no usable media candidates"),
+                item_id=item_id,
+                url=url,
+                **_http_response_log_fields(resp),
+                has_flowplayer="flowplayer" in (resp.text or "").lower(),
+                has_data_item="data-item" in (resp.text or "").lower(),
+                iframe_count=len(iframe_candidates),
+            )
             raise Exception("Failed to extract Avbebe stream URL")
 
         if "missav" in parsed_url.netloc:
