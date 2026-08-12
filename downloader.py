@@ -101,7 +101,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260812-3803"
+APP_BUILD = "20260812-3804"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -10105,6 +10105,10 @@ def replace_state_entries(entries):
         normalized_entries.append(normalized)
     with state_lock:
         save_state_entries(normalized_entries)
+
+
+# Compiled regex to strip ANSI terminal escape sequences from error messages
+RE_ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-9;]*[ -/]*[@-~])')
 
 
 def summarize_error_message(exc, fallback_key, limit=120):
@@ -29672,6 +29676,8 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         _add_m3u8_candidate = _ctx.add_m3u8_candidate
         _run_youtube_fast_multipart_download = _ctx.run_youtube_fast
         _extract_ytdlp_page_title = _ctx.extract_ytdlp_page_title
+        # Recompute dispatch-scope prep variables (originally computed before the guard)
+        forced_m3u8_site = _resolve_forced_m3u8_site(_normalize_download_url(url), task)
 
         site_config = FORCED_M3U8_SITE_RULES[forced_m3u8_site]
         referer = site_config["referer"]
@@ -29774,6 +29780,11 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         _add_m3u8_candidate = _ctx.add_m3u8_candidate
         _run_youtube_fast_multipart_download = _ctx.run_youtube_fast
         _extract_ytdlp_page_title = _ctx.extract_ytdlp_page_title
+        # Recompute dispatch-scope prep variables (originally computed before the guard)
+        chat_platform_file_site = _chat_platform_file_site_from_url(url)
+        inferred_direct_media_ext = _infer_media_extension_from_url(url)
+        if chat_platform_file_site and not inferred_direct_media_ext:
+            inferred_direct_media_ext = _chat_platform_default_extension_from_url(url)
 
         self._set_task_parse_ui(item_id, key="eta_direct_media", fallback=self._ui_text("eta_direct_media", "直接媒體下載"))
         if chat_platform_file_site:
@@ -32252,6 +32263,8 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         _add_m3u8_candidate = _ctx.add_m3u8_candidate
         _run_youtube_fast_multipart_download = _ctx.run_youtube_fast
         _extract_ytdlp_page_title = _ctx.extract_ytdlp_page_title
+        # Recompute dispatch-scope prep variable (originally computed before the guard)
+        hgcloud_embed_url = _avbebe_hgcloud_embed_url(url)
 
         self._set_task_parse_ui(item_id, key="eta_found_stream", fallback="正在解析 Avbebe 第一分流...")
         c_req = get_curl_cffi_requests()
@@ -34849,6 +34862,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         _add_m3u8_candidate = _ctx.add_m3u8_candidate
         _run_youtube_fast_multipart_download = _ctx.run_youtube_fast
         _extract_ytdlp_page_title = _ctx.extract_ytdlp_page_title
+        page_url = url  # alias used throughout this handler body
 
         try:
             if not page_url or not re.match(r"^https://anime1\.(?:me|pw)/\d+/?$", _normalize_download_url(page_url) or ""):
