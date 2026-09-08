@@ -101,7 +101,7 @@ except Exception:
     MegaClient = None
 
 
-APP_BUILD = "20260812-3804"
+APP_BUILD = "20260908-3806"
 CURRENT_LANG = "en_US"
 if getattr(sys, "frozen", False):
     _APP_DIR = os.path.abspath(os.path.dirname(sys.executable))
@@ -10544,6 +10544,9 @@ class DownloadCoordinator:
         self._final_exit_timer = None
         self._active_network_sessions = {}
         self._active_network_sessions_lock = threading.Lock()
+        # Serialize FFmpeg remux operations so parallel-HLS resume finalization
+        # cannot reference an uninitialized lock or corrupt shared output files.
+        self._ffmpeg_remux_lock = threading.Lock()
         self._active_download_item_ids = set()
         self._active_download_item_ids_lock = threading.Lock()
         self._parallel_hls_stop_events = {}
@@ -22849,7 +22852,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 return max(int(host_retries or 0), 1)
         return max(int(PARALLEL_HLS_SEGMENT_RETRIES), 1)
 
-    def _fetch_parallel_hls_segment_payload(self, segment_url, request_headers, prefer_curl=False, stop_event=None):
+    def _fetch_parallel_hls_segment_payload(self, segment_url, request_headers, prefer_curl=False, stop_event=None, session=None):
         def _stop_requested():
             return bool(
                 (stop_event is not None and stop_event.is_set())
@@ -22863,8 +22866,8 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         def _fetch_with_curl():
             if _stop_requested():
                 raise StopDownloadException("stop requested")
-            session = self._parallel_hls_curl_session()
-            resp = session.get(
+            active_session = session or self._parallel_hls_curl_session()
+            resp = active_session.get(
                 segment_url,
                 timeout=_segment_timeout(),
                 headers=request_headers,
@@ -22899,7 +22902,7 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
                 continue
         raise last_exc or Exception("parallel HLS segment fetch failed")
 
-    def _stream_parallel_hls_segment_payload_to_file(self, segment_url, request_headers, temp_part_path, prefer_curl=False, stop_event=None):
+    def _stream_parallel_hls_segment_payload_to_file(self, segment_url, request_headers, temp_part_path, prefer_curl=False, stop_event=None, session=None):
         def _stop_requested():
             return bool(
                 (stop_event is not None and stop_event.is_set())
@@ -22928,8 +22931,8 @@ class DownloadManagerApp(DownloadManagerGUI, DownloadCoordinator):
         def _stream_with_curl():
             if _stop_requested():
                 raise StopDownloadException("stop requested")
-            session = self._parallel_hls_curl_session()
-            resp = session.get(
+            active_session = session or self._parallel_hls_curl_session()
+            resp = active_session.get(
                 segment_url,
                 timeout=_segment_timeout(),
                 headers=request_headers,
@@ -35340,9 +35343,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
 
 
 
